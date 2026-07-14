@@ -79,6 +79,13 @@ impl App {
                 changed |= ui
                     .selectable_value(&mut self.filters.heat_metric, HeatMetric::Events, "events")
                     .changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut self.filters.heat_metric,
+                        HeatMetric::Diversity,
+                        "source diversity",
+                    )
+                    .changed();
                 ui.separator();
 
                 ui.label(RichText::new("markers:").color(TEXT_DIM));
@@ -93,6 +100,39 @@ impl App {
                 changed |= ui
                     .checkbox(&mut self.filters.attention_markers, "attention")
                     .changed();
+                ui.separator();
+
+                let theme_label = if self.filters.themes.is_empty() {
+                    "themes: all".to_string()
+                } else {
+                    format!("themes: {}", self.filters.themes.len())
+                };
+                ui.menu_button(theme_label, |ui| {
+                    let Some(vocab) = &self.theme_vocab else {
+                        ui.label(RichText::new("loading themes…").color(TEXT_DIM));
+                        return;
+                    };
+                    if !self.filters.themes.is_empty() && ui.button("clear theme filter").clicked()
+                    {
+                        self.filters.themes.clear();
+                        changed = true;
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for (theme, count) in vocab {
+                                let mut on = self.filters.themes.contains(theme);
+                                if ui.checkbox(&mut on, format!("{theme} ({count})")).changed() {
+                                    if on {
+                                        self.filters.themes.push(theme.clone());
+                                    } else {
+                                        self.filters.themes.retain(|t| t != theme);
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
                 ui.separator();
 
                 ui.label(RichText::new("min confidence").color(TEXT_DIM));
@@ -408,6 +448,7 @@ impl App {
         let metric = match self.filters.heat_metric {
             HeatMetric::Attention => "media attention",
             HeatMetric::Events => "event count",
+            HeatMetric::Diversity => "source diversity (peak distinct outlets / 6 h)",
         };
         ui.label(RichText::new(format!("Heatmap · {metric} (log scale)")).small());
         let (rect, _) = ui.allocate_exact_size(

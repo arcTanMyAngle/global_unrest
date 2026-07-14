@@ -32,9 +32,11 @@ pub enum Phase {
 pub enum HeatMetric {
     Attention,
     Events,
+    /// Peak distinct outlet domains in any 6 h bucket of the window.
+    Diversity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     pub protest: bool,
     pub conflict: bool,
@@ -47,6 +49,10 @@ pub struct Filters {
     pub show_heatmap: bool,
     pub show_markers: bool,
     pub heat_metric: HeatMetric,
+    /// Selected themes; empty = no theme filtering. `serde(default)` keeps
+    /// settings saved before M2 loadable.
+    #[serde(default)]
+    pub themes: Vec<String>,
 }
 
 impl Default for Filters {
@@ -61,6 +67,7 @@ impl Default for Filters {
             show_heatmap: true,
             show_markers: true,
             heat_metric: HeatMetric::Attention,
+            themes: Vec::new(),
         }
     }
 }
@@ -153,6 +160,10 @@ pub struct App {
     /// Bucket-aligned data extent `[start, end)`.
     pub extent: Option<EpochWindow>,
 
+    pending_vocab: Option<Reply<Vec<(String, u32)>>>,
+    /// Distinct themes with usage counts, most-used first (from the data).
+    pub theme_vocab: Option<Vec<(String, u32)>>,
+
     pub timeline: Timeline,
     pub filters: Filters,
     last_saved_filters: Filters,
@@ -226,14 +237,16 @@ impl App {
             show_log_window: false,
             pending_extent: None,
             extent: None,
+            pending_vocab: None,
+            theme_vocab: None,
             timeline: Timeline {
                 len: WindowLen::D1,
                 start_bucket: 0,
                 playing: false,
                 accum: 0.0,
             },
+            last_saved_filters: filters.clone(),
             filters,
-            last_saved_filters: filters,
             dirty: false,
             pending_buckets: None,
             pending_points: None,
@@ -294,6 +307,7 @@ impl App {
                     self.ingest_report = Some(report);
                     self.pending_extent = Some(self.store.time_extent());
                     self.pending_log = Some(self.store.ingest_log(20));
+                    self.pending_vocab = Some(self.store.theme_vocab());
                 }
                 Err(e) => self.phase = Phase::Error(format!("ingest: {e}")),
             }
@@ -327,6 +341,16 @@ impl App {
             self.pending_log = None;
             if let Ok(log) = result {
                 self.ingest_log = Some(log);
+            }
+        }
+
+        if let Some(reply) = &self.pending_vocab
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_vocab = None;
+            match result {
+                Ok(vocab) => self.theme_vocab = Some(vocab),
+                Err(e) => tracing::error!("theme vocab: {e}"),
             }
         }
 
@@ -364,10 +388,12 @@ impl App {
         let Some(window) = self.current_window() else {
             return;
         };
-        self.pending_buckets = Some(self.store.query_buckets(window));
+        let themes = (!self.filters.themes.is_empty()).then(|| self.filters.themes.clone());
+        self.pending_buckets = Some(self.store.query_buckets(window, themes.clone()));
         self.pending_points = Some(self.store.query_points(
             window,
             Some(self.filters.kinds_for_query()),
+            themes,
             self.filters.min_confidence,
         ));
         if let Some(cell) = self.selected_cell {
@@ -379,11 +405,14 @@ impl App {
         self.bucket_count = buckets.len();
         let mut per_cell: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
         for b in buckets {
-            let v = match self.filters.heat_metric {
-                HeatMetric::Attention => u64::from(b.attention_count),
-                HeatMetric::Events => u64::from(b.event_count),
-            };
-            *per_cell.entry(b.h3_cell).or_insert(0) += v;
+            let entry = per_cell.entry(b.h3_cell).or_insert(0);
+            match self.filters.heat_metric {
+                HeatMetric::Attention => *entry += u64::from(b.attention_count),
+                HeatMetric::Events => *entry += u64::from(b.event_count),
+                // Distinct counts don't sum across buckets; show the peak
+                // 6 h diversity instead.
+                HeatMetric::Diversity => *entry = (*entry).max(u64::from(b.distinct_outlets)),
+            }
         }
         per_cell.retain(|_, v| *v > 0);
         let max = per_cell.values().copied().max().unwrap_or(0);
@@ -441,7 +470,7 @@ impl App {
             if let Err(e) = self.settings.set("filters", &self.filters) {
                 tracing::warn!("saving filters: {e}");
             }
-            self.last_saved_filters = self.filters;
+            self.last_saved_filters = self.filters.clone();
         }
     }
 

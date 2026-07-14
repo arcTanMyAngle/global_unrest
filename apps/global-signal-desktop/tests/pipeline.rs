@@ -82,7 +82,7 @@ fn full_offline_pipeline() {
 
     // --- stored buckets must equal the analytics reference, scores included
     // (this exercises the events → DB → ScoreEvent read-back roundtrip) ---
-    let buckets = store.query_buckets((min_ts, max_ts)).wait().unwrap();
+    let buckets = store.query_buckets((min_ts, max_ts), None).wait().unwrap();
     let reference = analytics::aggregate_buckets(&events);
     assert_eq!(buckets.len(), reference.len(), "bucket count mismatch");
     for (stored, rust) in buckets.iter().zip(&reference) {
@@ -141,7 +141,7 @@ fn full_offline_pipeline() {
 
     // --- precision rendering contract: no coarse rows come back as points ---
     let points = store
-        .query_points((min_ts, max_ts), None, 0.0)
+        .query_points((min_ts, max_ts), None, None, 0.0)
         .wait()
         .unwrap();
     assert!(!points.is_empty());

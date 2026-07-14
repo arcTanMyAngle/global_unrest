@@ -137,13 +137,18 @@ enum Cmd {
     },
     QueryBuckets {
         window: EpochWindow,
+        themes: Option<Vec<String>>,
         reply: mpsc::Sender<Result<Vec<RegionBucket>, StorageError>>,
     },
     QueryPoints {
         window: EpochWindow,
         kinds: Option<Vec<EventKind>>,
+        themes: Option<Vec<String>>,
         min_confidence: f32,
         reply: mpsc::Sender<Result<Vec<EventPoint>, StorageError>>,
+    },
+    ThemeVocab {
+        reply: mpsc::Sender<Result<Vec<(String, u32)>, StorageError>>,
     },
     RegionDetail {
         h3_cell: u64,
@@ -248,9 +253,20 @@ impl StorageHandle {
         Reply(rx)
     }
 
-    pub fn query_buckets(&self, window: EpochWindow) -> Reply<Vec<RegionBucket>> {
+    /// Bucket rows in a window. With `themes`, buckets are recomputed over
+    /// only the events carrying one of those themes — including baselines
+    /// and spike, so a theme's spike reads "vs. that theme's own baseline".
+    pub fn query_buckets(
+        &self,
+        window: EpochWindow,
+        themes: Option<Vec<String>>,
+    ) -> Reply<Vec<RegionBucket>> {
         let (reply, rx) = mpsc::channel();
-        self.send(Cmd::QueryBuckets { window, reply });
+        self.send(Cmd::QueryBuckets {
+            window,
+            themes,
+            reply,
+        });
         Reply(rx)
     }
 
@@ -258,15 +274,24 @@ impl StorageHandle {
         &self,
         window: EpochWindow,
         kinds: Option<Vec<EventKind>>,
+        themes: Option<Vec<String>>,
         min_confidence: f32,
     ) -> Reply<Vec<EventPoint>> {
         let (reply, rx) = mpsc::channel();
         self.send(Cmd::QueryPoints {
             window,
             kinds,
+            themes,
             min_confidence,
             reply,
         });
+        Reply(rx)
+    }
+
+    /// Distinct themes across all events with usage counts, most-used first.
+    pub fn theme_vocab(&self) -> Reply<Vec<(String, u32)>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::ThemeVocab { reply });
         Reply(rx)
     }
 
@@ -317,12 +342,17 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
             Cmd::TimeExtent { reply } => {
                 let _ = reply.send(do_time_extent(&conn));
             }
-            Cmd::QueryBuckets { window, reply } => {
-                let _ = reply.send(do_query_buckets(&conn, window));
+            Cmd::QueryBuckets {
+                window,
+                themes,
+                reply,
+            } => {
+                let _ = reply.send(do_query_buckets(&conn, window, themes.as_deref()));
             }
             Cmd::QueryPoints {
                 window,
                 kinds,
+                themes,
                 min_confidence,
                 reply,
             } => {
@@ -330,8 +360,12 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
                     &conn,
                     window,
                     kinds.as_deref(),
+                    themes.as_deref(),
                     min_confidence,
                 ));
+            }
+            Cmd::ThemeVocab { reply } => {
+                let _ = reply.send(do_theme_vocab(&conn));
             }
             Cmd::RegionDetail {
                 h3_cell,
@@ -571,8 +605,35 @@ fn do_time_extent(conn: &Connection) -> Result<Option<EpochWindow>, StorageError
 fn do_query_buckets(
     conn: &Connection,
     window: EpochWindow,
+    themes: Option<&[String]>,
 ) -> Result<Vec<RegionBucket>, StorageError> {
-    select_buckets(conn, window, None)
+    let Some(themes) = themes else {
+        return select_buckets(conn, window, None);
+    };
+    // Theme-filtered view: re-run the scoring pipeline over only the events
+    // carrying a selected theme (full history, so the theme's baselines and
+    // spike stay meaningful), then trim to the window.
+    let mut events = read_score_events(conn)?;
+    events.retain(|ev| ev.themes.iter().any(|t| themes.contains(t)));
+    let from = bucket_start_epoch(window.0);
+    let mut buckets = analytics::score_buckets(&events).buckets;
+    buckets.retain(|b| b.bucket_start >= from && b.bucket_start < window.1);
+    Ok(buckets)
+}
+
+fn do_theme_vocab(conn: &Connection) -> Result<Vec<(String, u32)>, StorageError> {
+    let mut stmt = conn.prepare("SELECT themes FROM events")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for row in rows {
+        let themes: Vec<String> = serde_json::from_str(&row?).unwrap_or_default();
+        for theme in themes {
+            *counts.entry(theme).or_insert(0) += 1;
+        }
+    }
+    let mut vocab: Vec<(String, u32)> = counts.into_iter().collect();
+    vocab.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(vocab)
 }
 
 /// Bucket rows in a window, optionally restricted to one cell.
@@ -625,11 +686,12 @@ fn do_query_points(
     conn: &Connection,
     window: EpochWindow,
     kinds: Option<&[EventKind]>,
+    themes: Option<&[String]>,
     min_confidence: f32,
 ) -> Result<Vec<EventPoint>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, lat, lon, kind, location_precision, location_confidence,
-                ts_epoch_s, article_count, headline
+                ts_epoch_s, article_count, headline, themes
          FROM events
          WHERE ts_epoch_s >= ? AND ts_epoch_s < ?
            AND location_precision IN ('city', 'exact')
@@ -650,17 +712,24 @@ fn do_query_points(
                 r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?,
                 r.get::<_, Option<String>>(8)?,
+                r.get::<_, String>(9)?,
             ))
         },
     )?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, lat, lon, kind, precision, confidence, ts, articles, headline) = row?;
+        let (id, lat, lon, kind, precision, confidence, ts, articles, headline, themes_s) = row?;
         let kind = parse_kind(&kind)?;
         if let Some(filter) = kinds
             && !filter.contains(&kind)
         {
             continue;
+        }
+        if let Some(filter) = themes {
+            let event_themes: Vec<String> = serde_json::from_str(&themes_s).unwrap_or_default();
+            if !event_themes.iter().any(|t| filter.contains(t)) {
+                continue;
+            }
         }
         out.push(EventPoint {
             id: u64_from_db(id),
@@ -915,7 +984,10 @@ mod tests {
 
         // Buckets match the hand-computed aggregation: cell 100 bucket 0
         // holds 1 attention + 1 event; cell 200 bucket 1 holds 1 event.
-        let buckets = store.query_buckets((day, day + 86_400)).wait().unwrap();
+        let buckets = store
+            .query_buckets((day, day + 86_400), None)
+            .wait()
+            .unwrap();
         assert_eq!(buckets.len(), 2);
         assert_eq!(buckets[0].h3_cell, 100);
         assert_eq!(buckets[0].attention_count, 1);
@@ -969,16 +1041,16 @@ mod tests {
         let window = (day, day + 86_400);
 
         // Precision contract: country-precision rows never come back as points.
-        let all = store.query_points(window, None, 0.0).wait().unwrap();
+        let all = store.query_points(window, None, None, 0.0).wait().unwrap();
         assert_eq!(all.len(), 3);
 
         // Confidence floor.
-        let confident = store.query_points(window, None, 0.5).wait().unwrap();
+        let confident = store.query_points(window, None, None, 0.5).wait().unwrap();
         assert_eq!(confident.len(), 2);
 
         // Kind filter.
         let protests = store
-            .query_points(window, Some(vec![EventKind::Protest]), 0.0)
+            .query_points(window, Some(vec![EventKind::Protest]), None, 0.0)
             .wait()
             .unwrap();
         assert_eq!(protests.len(), 2);
@@ -1020,6 +1092,54 @@ mod tests {
         assert!(scores.spike_cold_start);
         assert_eq!(detail.coarse_share, 0.0);
         assert!(detail.baseline_hint.is_some());
+    }
+
+    #[test]
+    fn theme_vocab_and_theme_filtered_queries() {
+        let store = open_mem();
+        let mut flood = sample_event(40, EventKind::NewsAttention, 1, 700);
+        flood.themes = vec!["flood".into()];
+        let events = vec![
+            sample_event(41, EventKind::Protest, 1, 700), // themes: protest, labor
+            sample_event(42, EventKind::Protest, 8, 700),
+            flood,
+        ];
+        store.ingest(events, vec![]).wait().unwrap();
+
+        // Vocabulary comes from the data, most-used first.
+        let vocab = store.theme_vocab().wait().unwrap();
+        assert_eq!(
+            vocab,
+            vec![
+                ("labor".into(), 2),
+                ("protest".into(), 2),
+                ("flood".into(), 1)
+            ]
+        );
+
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let window = (day, day + 86_400);
+
+        // Theme-filtered buckets: only the flood record's bucket remains,
+        // with counts recomputed over the filtered set.
+        let buckets = store
+            .query_buckets(window, Some(vec!["flood".into()]))
+            .wait()
+            .unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].attention_count, 1);
+        assert_eq!(buckets[0].event_count, 0);
+
+        // Theme-filtered points: both protest events match "labor".
+        let points = store
+            .query_points(window, None, Some(vec!["labor".into()]), 0.0)
+            .wait()
+            .unwrap();
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|p| p.kind == EventKind::Protest));
     }
 
     #[test]
