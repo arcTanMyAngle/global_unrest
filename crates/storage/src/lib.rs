@@ -24,7 +24,10 @@ use core_types::{
 };
 use duckdb::{Connection, params};
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_init.sql")),
+    (2, include_str!("../migrations/0002_scores.sql")),
+];
 
 /// Cap on rows returned to the UI in one query, as a memory safety valve.
 const MAX_POINT_ROWS: usize = 100_000;
@@ -443,7 +446,8 @@ fn rebuild_buckets(conn: &Connection) -> Result<(), StorageError> {
              count(*) FILTER (WHERE kind <> 'news_attention')::INTEGER,
              count(*) FILTER (WHERE kind = 'news_attention')::INTEGER,
              coalesce(sum(article_count), 0)::BIGINT,
-             coalesce(sum(distinct_source_count), 0)::BIGINT
+             coalesce(sum(distinct_source_count), 0)::BIGINT,
+             0, 0.0, 0.0, 0.0, 0.0, 0.0, FALSE
          FROM events
          GROUP BY 1, 2;",
         b = BUCKET_SECS
@@ -469,7 +473,9 @@ fn do_query_buckets(
     window: EpochWindow,
 ) -> Result<Vec<RegionBucket>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT h3_cell, bucket_start, event_count, attention_count, article_count, source_count
+        "SELECT h3_cell, bucket_start, event_count, attention_count, article_count, source_count,
+                distinct_outlets, attention_score, unrest_score, spike_score, combined_score,
+                baseline, spike_cold_start
          FROM region_buckets
          WHERE bucket_start >= ? AND bucket_start < ?
          ORDER BY h3_cell, bucket_start",
@@ -484,6 +490,13 @@ fn do_query_buckets(
             attention_count: r.get::<_, i64>(3)? as u32,
             article_count: r.get::<_, i64>(4)? as u64,
             source_count: r.get::<_, i64>(5)? as u64,
+            distinct_outlets: r.get::<_, i64>(6)? as u32,
+            attention_score: r.get(7)?,
+            unrest_score: r.get(8)?,
+            spike_score: r.get(9)?,
+            combined_score: r.get(10)?,
+            baseline: r.get(11)?,
+            spike_cold_start: r.get(12)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

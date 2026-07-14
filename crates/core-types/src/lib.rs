@@ -231,8 +231,9 @@ impl TimeWindow {
     }
 }
 
-/// Aggregate for one (H3 res-3 cell, 6-hour bucket). M1 carries raw counts;
-/// M2 adds the score components (stored separately, shown separately).
+/// Aggregate for one (H3 res-3 cell, 6-hour bucket): raw counts plus the M2
+/// score components. Components are stored separately and always displayed
+/// separately — never only the combined number (docs/SCORING.md).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RegionBucket {
     pub h3_cell: u64,
@@ -247,6 +248,44 @@ pub struct RegionBucket {
     /// Sum of per-record distinct outlet counts (an upper bound on true
     /// distinct outlets; exact de-duplication needs raw outlet sets).
     pub source_count: u64,
+    /// Exact distinct outlet domains across all records in the bucket
+    /// (unlike `source_count`, which is a summed upper bound).
+    pub distinct_outlets: u32,
+    /// Attention component in [0, 1] — attention observations only.
+    pub attention_score: f32,
+    /// Unrest component in [0, 1] — discrete event records only.
+    pub unrest_score: f32,
+    /// Spike vs. trailing baseline, in [0, 1] with 0.5 neutral.
+    pub spike_score: f32,
+    /// 0.40·attention + 0.45·unrest + 0.15·spike.
+    pub combined_score: f32,
+    /// Spike denominator: trailing 28-day median records-per-bucket for this
+    /// cell and time-of-day slot, as of this bucket's day.
+    pub baseline: f32,
+    /// Fewer than `MIN_BASELINE_DAYS` of history behind this bucket — spike
+    /// was forced neutral and the UI shows a low-confidence badge.
+    pub spike_cold_start: bool,
+}
+
+impl RegionBucket {
+    /// All-zero bucket for a key; aggregation entries start from this.
+    pub fn empty(h3_cell: u64, bucket_start: i64) -> Self {
+        Self {
+            h3_cell,
+            bucket_start,
+            event_count: 0,
+            attention_count: 0,
+            article_count: 0,
+            source_count: 0,
+            distinct_outlets: 0,
+            attention_score: 0.0,
+            unrest_score: 0.0,
+            spike_score: 0.0,
+            combined_score: 0.0,
+            baseline: 0.0,
+            spike_cold_start: false,
+        }
+    }
 }
 
 /// Filters a caller passes to `SignalSource::fetch`.

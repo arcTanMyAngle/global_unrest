@@ -81,14 +81,9 @@ pub fn aggregate_buckets(events: &[GeoTemporalEvent]) -> Vec<RegionBucket> {
     let mut map: BTreeMap<(u64, i64), RegionBucket> = BTreeMap::new();
     for ev in events {
         let key = (ev.h3_cell, bucket_start_epoch(ev.ts_utc.timestamp()));
-        let bucket = map.entry(key).or_insert(RegionBucket {
-            h3_cell: key.0,
-            bucket_start: key.1,
-            event_count: 0,
-            attention_count: 0,
-            article_count: 0,
-            source_count: 0,
-        });
+        let bucket = map
+            .entry(key)
+            .or_insert_with(|| RegionBucket::empty(key.0, key.1));
         if ev.kind.is_attention() {
             bucket.attention_count += 1;
         } else {
