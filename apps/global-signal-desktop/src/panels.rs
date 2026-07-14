@@ -146,6 +146,13 @@ impl App {
                 if ui.button("reset view").clicked() {
                     self.map.viewport = None;
                 }
+                if ui
+                    .button("export parquet")
+                    .on_hover_text("write this session as date-partitioned Parquet")
+                    .clicked()
+                {
+                    self.start_export();
+                }
                 if changed {
                     self.mark_dirty();
                 }
@@ -284,6 +291,9 @@ impl App {
                         .color(TEXT_DIM)
                         .small(),
                 );
+                if let Some(status) = &self.export_status {
+                    ui.label(RichText::new(status).color(TEXT_DIM).small());
+                }
             }
         }
     }

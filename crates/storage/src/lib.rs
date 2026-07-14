@@ -113,6 +113,15 @@ pub struct IngestLogRow {
     pub raw_excerpt: String,
 }
 
+/// Result of a Parquet session export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportReport {
+    pub dir: PathBuf,
+    pub events: u64,
+    pub buckets: u64,
+    pub baselines: u64,
+}
+
 /// One persisted baseline row (trailing median as of the newest data day).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BaselineDbRow {
@@ -162,6 +171,10 @@ enum Cmd {
     Baselines {
         h3_cell: u64,
         reply: mpsc::Sender<Result<Vec<BaselineDbRow>, StorageError>>,
+    },
+    ExportParquet {
+        dir: PathBuf,
+        reply: mpsc::Sender<Result<ExportReport, StorageError>>,
     },
     Shutdown,
 }
@@ -318,6 +331,16 @@ impl StorageHandle {
         self.send(Cmd::Baselines { h3_cell, reply });
         Reply(rx)
     }
+
+    /// Export the session to Parquet under `dir` (must not already contain
+    /// data): `events/` and `region_buckets/` as hive `date=YYYY-MM-DD`
+    /// partitions plus `baselines.parquet`. This layout is the M4 handoff
+    /// surface — the worker will publish the same shape (docs/PLAN.md §7).
+    pub fn export_parquet(&self, dir: PathBuf) -> Reply<ExportReport> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::ExportParquet { dir, reply });
+        Reply(rx)
+    }
 }
 
 impl Drop for StorageHandle {
@@ -379,6 +402,9 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
             }
             Cmd::Baselines { h3_cell, reply } => {
                 let _ = reply.send(do_baselines(&conn, h3_cell));
+            }
+            Cmd::ExportParquet { dir, reply } => {
+                let _ = reply.send(do_export_parquet(&conn, dir));
             }
             Cmd::Shutdown => break,
         }
@@ -882,6 +908,42 @@ fn do_baselines(conn: &Connection, h3_cell: u64) -> Result<Vec<BaselineDbRow>, S
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// A filesystem path as a single-quoted DuckDB SQL string literal.
+/// DuckDB accepts forward slashes on Windows; single quotes are doubled.
+fn sql_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/").replace('\'', "''")
+}
+
+fn do_export_parquet(conn: &Connection, dir: PathBuf) -> Result<ExportReport, StorageError> {
+    std::fs::create_dir_all(&dir)?;
+    let count = |table: &str| -> Result<u64, StorageError> {
+        let n: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
+    };
+    let report = ExportReport {
+        events: count("events")?,
+        buckets: count("region_buckets")?,
+        baselines: count("baselines")?,
+        dir: dir.clone(),
+    };
+
+    // Hive `date=YYYY-MM-DD` partitions; the derived date is UTC.
+    // make_timestamp(µs) keeps this timezone-setting-independent.
+    let sql = format!(
+        "COPY (SELECT *, strftime(make_timestamp(ts_epoch_s * 1000000), '%Y-%m-%d') AS date
+               FROM events)
+         TO '{d}/events' (FORMAT PARQUET, PARTITION_BY (date));
+         COPY (SELECT *, strftime(make_timestamp(bucket_start * 1000000), '%Y-%m-%d') AS date
+               FROM region_buckets)
+         TO '{d}/region_buckets' (FORMAT PARQUET, PARTITION_BY (date));
+         COPY baselines TO '{d}/baselines.parquet' (FORMAT PARQUET);",
+        d = sql_path(&dir)
+    );
+    conn.execute_batch(&sql)?;
+    tracing::info!(dir = %dir.display(), events = report.events, "parquet export complete");
+    Ok(report)
+}
+
 /// Convenience used by the ingest pipeline: normalize a batch of raw records
 /// with a source, partitioning successes and failures.
 pub fn partition_normalized<S: core_types::SignalSource>(
@@ -1140,6 +1202,73 @@ mod tests {
             .unwrap();
         assert_eq!(points.len(), 2);
         assert!(points.iter().all(|p| p.kind == EventKind::Protest));
+    }
+
+    #[test]
+    fn parquet_export_is_date_partitioned_and_reimportable() {
+        let store = open_mem();
+        let mut day2 = sample_event(51, EventKind::Conflict, 3, 800);
+        day2.ts_utc = Utc.with_ymd_and_hms(2026, 6, 2, 9, 0, 0).unwrap();
+        let events = vec![
+            sample_event(50, EventKind::NewsAttention, 1, 800),
+            day2,
+            sample_event(52, EventKind::Protest, 20, 900),
+        ];
+        store.ingest(events, vec![]).wait().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("session");
+        let report = store.export_parquet(out.clone()).wait().unwrap();
+        assert_eq!(report.events, 3);
+        assert!(report.buckets >= 3);
+        assert_eq!(report.baselines, 8); // 2 cells × 4 time-of-day slots
+
+        // Hive date partitioning on disk (the M4 handoff layout).
+        let partitions: Vec<String> = std::fs::read_dir(out.join("events"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(partitions.contains(&"date=2026-06-01".to_string()));
+        assert!(partitions.contains(&"date=2026-06-02".to_string()));
+
+        // A fresh DuckDB can read everything back, scores included.
+        let conn = Connection::open_in_memory().unwrap();
+        let glob = |sub: &str| format!("{}/{sub}/**/*.parquet", sql_path(&out));
+        let n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM read_parquet('{}', hive_partitioning=1)",
+                    glob("events")
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let (buckets, scored): (i64, i64) = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*), count(*) FILTER (WHERE combined_score > 0)
+                     FROM read_parquet('{}', hive_partitioning=1)",
+                    glob("region_buckets")
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(buckets as u64, report.buckets);
+        assert_eq!(scored, buckets, "score columns must survive the roundtrip");
+        let baselines: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM read_parquet('{}/baselines.parquet')",
+                    sql_path(&out)
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(baselines, 8);
     }
 
     #[test]

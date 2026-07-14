@@ -11,8 +11,8 @@ use geo_utils::CountryIndex;
 use renderer::{BasemapLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
-    EpochWindow, EventPoint, IngestLogRow, IngestReport, RegionDetail, Reply, SettingsDb,
-    StorageHandle,
+    EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail, Reply,
+    SettingsDb, StorageHandle,
 };
 
 use crate::ingest::{self, IngestMsg};
@@ -147,6 +147,11 @@ pub struct App {
     pub settings: SettingsDb,
     pub map: MapView,
     pub countries: CountryIndex,
+    data_dir: std::path::PathBuf,
+
+    pending_export: Option<Reply<ExportReport>>,
+    /// Human-readable outcome of the last Parquet export, for the status UI.
+    pub export_status: Option<String>,
 
     pub phase: Phase,
     ingest_rx: Option<mpsc::Receiver<IngestMsg>>,
@@ -228,6 +233,9 @@ impl App {
             settings,
             map: MapView::new(basemap, style),
             countries,
+            data_dir,
+            pending_export: None,
+            export_status: None,
             phase,
             ingest_rx,
             pending_ingest: None,
@@ -273,6 +281,21 @@ impl App {
 
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+    }
+
+    /// Kick off a Parquet session export into a fresh timestamped directory
+    /// under the app data dir (the M4 handoff layout).
+    pub fn start_export(&mut self) {
+        if self.pending_export.is_some() {
+            return;
+        }
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let dir = self
+            .data_dir
+            .join("exports")
+            .join(format!("session-{stamp}"));
+        self.export_status = Some("exporting…".into());
+        self.pending_export = Some(self.store.export_parquet(dir));
     }
 
     /// Poll every async reply; drive the phase machine.
@@ -352,6 +375,16 @@ impl App {
                 Ok(vocab) => self.theme_vocab = Some(vocab),
                 Err(e) => tracing::error!("theme vocab: {e}"),
             }
+        }
+
+        if let Some(reply) = &self.pending_export
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_export = None;
+            self.export_status = Some(match result {
+                Ok(r) => format!("exported {} events → {}", r.events, r.dir.display()),
+                Err(e) => format!("export failed: {e}"),
+            });
         }
 
         // 3. Window queries → rebuild layers.
