@@ -80,18 +80,64 @@ fn full_offline_pipeline() {
         "fixture span was {span_days:.1} days"
     );
 
-    // --- SQL bucket aggregation must match the analytics reference ---
+    // --- stored buckets must equal the analytics reference, scores included
+    // (this exercises the events → DB → ScoreEvent read-back roundtrip) ---
     let buckets = store.query_buckets((min_ts, max_ts)).wait().unwrap();
     let reference = analytics::aggregate_buckets(&events);
     assert_eq!(buckets.len(), reference.len(), "bucket count mismatch");
-    for (sql, rust) in buckets.iter().zip(&reference) {
-        assert_eq!(sql, rust, "SQL GROUP BY diverged from reference");
+    for (stored, rust) in buckets.iter().zip(&reference) {
+        assert_eq!(stored, rust, "stored bucket diverged from reference");
     }
     let total_counted: u64 = buckets
         .iter()
         .map(|b| u64::from(b.event_count) + u64::from(b.attention_count))
         .sum();
     assert_eq!(total_counted as usize, events.len());
+
+    // --- M2 scoring: every component stored per bucket, all in [0, 1] ---
+    for b in &buckets {
+        for v in [
+            b.attention_score,
+            b.unrest_score,
+            b.spike_score,
+            b.combined_score,
+        ] {
+            assert!((0.0..=1.0).contains(&v), "score out of range: {v}");
+        }
+        assert!(b.baseline >= 0.0);
+    }
+
+    // Cold-start rule: exactly the buckets with under MIN_BASELINE_DAYS of
+    // history behind them are flagged, and their spike is forced neutral.
+    let start_day = min_ts.div_euclid(86_400);
+    let rel_day = |b: &core_types::RegionBucket| b.bucket_start.div_euclid(86_400) - start_day;
+    assert!(buckets.iter().any(|b| b.spike_cold_start));
+    assert!(buckets.iter().any(|b| !b.spike_cold_start));
+    for b in &buckets {
+        assert_eq!(b.spike_cold_start, rel_day(b) < 7, "day {}", rel_day(b));
+        if b.spike_cold_start {
+            assert_eq!(b.spike_score, 0.5);
+        }
+    }
+
+    // The scripted Paris spike (fixture days 20–23, ~6× attention) must
+    // register clearly against its warm 28-day baseline.
+    let paris = geo_utils::cell_for_latlon(48.8566, 2.3522, 3).unwrap();
+    let paris_spike_max = buckets
+        .iter()
+        .filter(|b| b.h3_cell == paris && (20..=23).contains(&rel_day(b)))
+        .map(|b| b.spike_score)
+        .fold(0.0f32, f32::max);
+    assert!(
+        paris_spike_max > 0.8,
+        "scripted spike too weak: {paris_spike_max}"
+    );
+
+    // Baselines are persisted with a full trailing window for Paris.
+    let paris_base = store.baselines(paris).wait().unwrap();
+    assert_eq!(paris_base.len(), 4);
+    assert!(paris_base.iter().all(|r| r.sample_days == 28));
+    assert!(paris_base.iter().any(|r| r.baseline > 0.0));
 
     // --- precision rendering contract: no coarse rows come back as points ---
     let points = store

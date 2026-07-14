@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+analytics.workspace = true
 chrono.workspace = true
 core-types.workspace = true
 duckdb.workspace = true

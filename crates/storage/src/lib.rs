@@ -19,8 +19,7 @@ use std::sync::mpsc;
 
 use chrono::Utc;
 use core_types::{
-    BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, RegionBucket,
-    bucket_start_epoch,
+    EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, RegionBucket, bucket_start_epoch,
 };
 use duckdb::{Connection, params};
 
@@ -105,6 +104,16 @@ pub struct IngestLogRow {
     pub raw_excerpt: String,
 }
 
+/// One persisted baseline row (trailing median as of the newest data day).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BaselineDbRow {
+    pub h3_cell: u64,
+    pub tod_bucket: u8,
+    pub baseline: f64,
+    pub sample_days: u32,
+    pub computed_at_epoch_s: i64,
+}
+
 /// Epoch-seconds window `[start, end)` as used by all queries.
 pub type EpochWindow = (i64, i64);
 
@@ -135,6 +144,10 @@ enum Cmd {
     IngestLog {
         limit: usize,
         reply: mpsc::Sender<Result<(u64, Vec<IngestLogRow>), StorageError>>,
+    },
+    Baselines {
+        h3_cell: u64,
+        reply: mpsc::Sender<Result<Vec<BaselineDbRow>, StorageError>>,
     },
     Shutdown,
 }
@@ -264,6 +277,13 @@ impl StorageHandle {
         self.send(Cmd::IngestLog { limit, reply });
         Reply(rx)
     }
+
+    /// The four persisted time-of-day baselines for one cell.
+    pub fn baselines(&self, h3_cell: u64) -> Reply<Vec<BaselineDbRow>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::Baselines { h3_cell, reply });
+        Reply(rx)
+    }
 }
 
 impl Drop for StorageHandle {
@@ -313,6 +333,9 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
             }
             Cmd::IngestLog { limit, reply } => {
                 let _ = reply.send(do_ingest_log(&conn, limit));
+            }
+            Cmd::Baselines { h3_cell, reply } => {
+                let _ = reply.send(do_baselines(&conn, h3_cell));
             }
             Cmd::Shutdown => break,
         }
@@ -434,26 +457,94 @@ fn do_ingest(
     })
 }
 
-/// Recompute region_buckets from events. Must agree with
-/// `analytics::aggregate_buckets` (integration-tested).
+/// Recompute region_buckets and baselines from events by running the
+/// analytics reference pipeline (`analytics::score_buckets`) over the whole
+/// events table and persisting the result. One implementation, no SQL twin
+/// to keep in sync. Reading everything back is fine at fixture/M3 scale
+/// (~1e5–1e6 rows); make this incremental if ingest ever gets hot.
 fn rebuild_buckets(conn: &Connection) -> Result<(), StorageError> {
-    let sql = format!(
-        "DELETE FROM region_buckets;
-         INSERT INTO region_buckets
-         SELECT
-             h3_cell,
-             (ts_epoch_s // {b}) * {b} AS bucket_start,
-             count(*) FILTER (WHERE kind <> 'news_attention')::INTEGER,
-             count(*) FILTER (WHERE kind = 'news_attention')::INTEGER,
-             coalesce(sum(article_count), 0)::BIGINT,
-             coalesce(sum(distinct_source_count), 0)::BIGINT,
-             0, 0.0, 0.0, 0.0, 0.0, 0.0, FALSE
-         FROM events
-         GROUP BY 1, 2;",
-        b = BUCKET_SECS
-    );
-    conn.execute_batch(&sql)?;
+    let events = read_score_events(conn)?;
+    let scored = analytics::score_buckets(&events);
+
+    conn.execute("DELETE FROM region_buckets", [])?;
+    {
+        let mut app = conn.appender("region_buckets")?;
+        for b in &scored.buckets {
+            app.append_row(params![
+                u64_to_db(b.h3_cell),
+                b.bucket_start,
+                b.event_count as i32,
+                b.attention_count as i32,
+                b.article_count as i64,
+                b.source_count as i64,
+                b.distinct_outlets as i32,
+                b.attention_score,
+                b.unrest_score,
+                b.spike_score,
+                b.combined_score,
+                b.baseline,
+                b.spike_cold_start,
+            ])?;
+        }
+        app.flush()?;
+    }
+
+    conn.execute("DELETE FROM baselines", [])?;
+    {
+        let computed_at = Utc::now().timestamp();
+        let mut app = conn.appender("baselines")?;
+        for r in &scored.baselines {
+            app.append_row(params![
+                u64_to_db(r.h3_cell),
+                i32::from(r.tod_bucket),
+                r.baseline,
+                r.sample_days as i32,
+                computed_at,
+            ])?;
+        }
+        app.flush()?;
+    }
     Ok(())
+}
+
+/// Read back the event columns that scoring consumes.
+fn read_score_events(conn: &Connection) -> Result<Vec<analytics::ScoreEvent>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT h3_cell, ts_epoch_s, kind, article_count, distinct_source_count,
+                location_confidence, severity, location_precision, themes, outlet_domains
+         FROM events",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, f32>(5)?,
+            r.get::<_, Option<f32>>(6)?,
+            r.get::<_, String>(7)?,
+            r.get::<_, String>(8)?,
+            r.get::<_, String>(9)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (cell, ts, kind, articles, sources, conf, severity, precision, themes, outlets) = row?;
+        out.push(analytics::ScoreEvent {
+            h3_cell: u64_from_db(cell),
+            ts_epoch_s: ts,
+            kind: parse_kind(&kind)?,
+            article_count: articles.max(0) as u32,
+            distinct_source_count: sources.max(0) as u32,
+            location_confidence: conf,
+            severity,
+            renders_as_point: parse_precision(&precision)?.renders_as_point(),
+            themes: serde_json::from_str(&themes).unwrap_or_default(),
+            outlet_domains: serde_json::from_str(&outlets).unwrap_or_default(),
+        });
+    }
+    Ok(out)
 }
 
 fn do_time_extent(conn: &Connection) -> Result<Option<EpochWindow>, StorageError> {
@@ -674,6 +765,23 @@ fn do_ingest_log(
     Ok((total.max(0) as u64, rows.collect::<Result<Vec<_>, _>>()?))
 }
 
+fn do_baselines(conn: &Connection, h3_cell: u64) -> Result<Vec<BaselineDbRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT tod_bucket, baseline, sample_days, computed_at_epoch_s
+         FROM baselines WHERE h3_cell = ? ORDER BY tod_bucket",
+    )?;
+    let rows = stmt.query_map(params![u64_to_db(h3_cell)], |r| {
+        Ok(BaselineDbRow {
+            h3_cell,
+            tod_bucket: r.get::<_, i32>(0)? as u8,
+            baseline: r.get(1)?,
+            sample_days: r.get::<_, i32>(2)?.max(0) as u32,
+            computed_at_epoch_s: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Convenience used by the ingest pipeline: normalize a batch of raw records
 /// with a source, partitioning successes and failures.
 pub fn partition_normalized<S: core_types::SignalSource>(
@@ -700,7 +808,7 @@ pub fn partition_normalized<S: core_types::SignalSource>(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use core_types::{SourceId, event_id};
+    use core_types::{BUCKET_SECS, SourceId, event_id};
 
     fn sample_event(seq: u32, kind: EventKind, hour: u32, cell: u64) -> GeoTemporalEvent {
         let ts = Utc.with_ymd_and_hms(2026, 6, 1, hour, 30, 0).unwrap();
@@ -784,6 +892,23 @@ mod tests {
         assert_eq!(buckets[0].article_count, 20);
         assert_eq!(buckets[1].h3_cell, 200);
         assert_eq!(buckets[1].bucket_start, day + BUCKET_SECS);
+
+        // Scores were computed and persisted: mixed bucket has both
+        // components; a single day of data is always spike-cold-start.
+        assert!(buckets[0].attention_score > 0.0);
+        assert!(buckets[0].unrest_score > 0.0);
+        assert_eq!(buckets[0].distinct_outlets, 2);
+        assert!(buckets[0].spike_cold_start);
+        assert_eq!(buckets[0].spike_score, 0.5);
+
+        // Baselines were persisted for every time-of-day slot of the cell:
+        // one day of history, 2 records in the 00–06 slot, none elsewhere.
+        let base = store.baselines(100).wait().unwrap();
+        assert_eq!(base.len(), 4);
+        assert_eq!(base[0].tod_bucket, 0);
+        assert!((base[0].baseline - 2.0).abs() < 1e-9);
+        assert!(base.iter().all(|r| r.sample_days == 1));
+        assert!((base[1].baseline).abs() < 1e-9);
 
         // Ingest log kept the failure.
         let (total, rows) = store.ingest_log(10).wait().unwrap();
