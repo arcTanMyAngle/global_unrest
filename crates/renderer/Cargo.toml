@@ -14,6 +14,7 @@ earcutr.workspace = true
 egui.workspace = true
 geo-utils.workspace = true
 geojson.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [lints]

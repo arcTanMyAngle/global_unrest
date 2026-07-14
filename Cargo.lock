@@ -3993,6 +3993,7 @@ dependencies = [
  "egui",
  "geo-utils",
  "geojson",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
