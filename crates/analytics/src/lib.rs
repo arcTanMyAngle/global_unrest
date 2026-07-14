@@ -4,16 +4,72 @@
 //! `aggregate_buckets` is also the reference implementation that the storage
 //! crate's SQL `GROUP BY` is integration-tested against.
 
+pub mod baseline;
+pub mod scoring;
+
 use std::collections::BTreeMap;
 
 use core_types::{GeoTemporalEvent, RegionBucket, bucket_start_epoch};
 
-/// Combined-signal weights (docs/SCORING.md). Named constants, not magic
-/// numbers; the M2 scoring functions will consume these.
+/// Every scoring constant, named (docs/SCORING.md). Nothing in the score
+/// functions is a magic number.
 pub mod weights {
+    /// combined = 0.40·attention + 0.45·unrest + 0.15·spike.
     pub const ATTENTION: f64 = 0.40;
     pub const UNREST: f64 = 0.45;
     pub const SPIKE: f64 = 0.15;
+
+    /// Recency decay half-life (attention and unrest recency terms).
+    pub const RECENCY_HALF_LIFE_SECS: f64 = 86_400.0; // 24 h
+
+    /// Attention volume saturates at this many articles per bucket.
+    pub const ATTENTION_ARTICLE_SATURATION: f64 = 100.0;
+    /// Source-diversity weight saturates at this many distinct outlets.
+    pub const DIVERSITY_OUTLET_SATURATION: f64 = 8.0;
+    /// Theme weight: buckets touching a high-signal theme vs. the rest.
+    pub const THEME_WEIGHT_HIGH: f64 = 1.0;
+    pub const THEME_WEIGHT_BASE: f64 = 0.6;
+    /// Unrest-relevant themes (compared against lowercased source themes).
+    pub const HIGH_SIGNAL_THEMES: &[&str] = &[
+        "protest",
+        "conflict",
+        "riot",
+        "unrest",
+        "violence",
+        "elections",
+        "security",
+        "displacement",
+        "air_defense",
+        "strike",
+        "coup",
+    ];
+
+    /// Unrest term weights — must sum to 1 so unrest stays in [0, 1].
+    pub const UNREST_EVENT_COUNT: f64 = 0.30;
+    pub const UNREST_EVENT_TYPE: f64 = 0.25;
+    pub const UNREST_RECENCY: f64 = 0.10;
+    pub const UNREST_SEVERITY: f64 = 0.20;
+    pub const UNREST_PRECISION: f64 = 0.15;
+    /// Unrest count term saturates at this many events per bucket.
+    pub const EVENT_COUNT_SATURATION: f64 = 10.0;
+
+    /// Per-kind weights for the unrest event-type term.
+    pub const KIND_CONFLICT: f64 = 1.0;
+    pub const KIND_PROTEST: f64 = 0.7;
+    pub const KIND_DISRUPTION: f64 = 0.5;
+    pub const KIND_OTHER: f64 = 0.3;
+
+    /// Spike log-ratio smoothing (half a record) and clamp span: ±3 doublings
+    /// (⅛×–8× baseline) map onto [0, 1] with 0.5 neutral.
+    pub const SPIKE_EPSILON: f64 = 0.5;
+    pub const SPIKE_LOG2_SPAN: f64 = 3.0;
+    pub const SPIKE_NEUTRAL: f64 = 0.5;
+
+    /// Baseline = trailing median over this many days…
+    pub const BASELINE_WINDOW_DAYS: u32 = 28;
+    /// …and below this much history a bucket is cold-start: neutral spike,
+    /// low-confidence badge in the UI.
+    pub const MIN_BASELINE_DAYS: u32 = 7;
 }
 
 /// Aggregate events into (H3 res-3 cell × 6-hour bucket) counts.
@@ -118,5 +174,15 @@ mod tests {
     #[test]
     fn combined_weights_sum_to_one() {
         assert!((weights::ATTENTION + weights::UNREST + weights::SPIKE - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unrest_term_weights_sum_to_one() {
+        let sum = weights::UNREST_EVENT_COUNT
+            + weights::UNREST_EVENT_TYPE
+            + weights::UNREST_RECENCY
+            + weights::UNREST_SEVERITY
+            + weights::UNREST_PRECISION;
+        assert!((sum - 1.0).abs() < 1e-12);
     }
 }
