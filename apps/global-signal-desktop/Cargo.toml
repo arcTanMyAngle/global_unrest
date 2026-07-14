@@ -15,6 +15,7 @@ eframe.workspace = true
 egui.workspace = true
 geo-utils.workspace = true
 renderer.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 source-fixtures.workspace = true
 storage.workspace = true
