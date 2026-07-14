@@ -94,6 +94,15 @@ pub struct RegionDetail {
     pub distinct_outlets: u32,
     pub mean_confidence: f32,
     pub total_articles: u64,
+    /// Window-composed score components (`analytics::compose_window` over
+    /// this cell's stored buckets); `None` when the window holds no buckets.
+    pub scores: Option<analytics::WindowScores>,
+    /// Share of the cell's records geocoded only to country/admin1 level.
+    /// High values earn a low-confidence badge in the UI.
+    pub coarse_share: f32,
+    /// Trailing 28-day median (records per 6 h) behind the newest bucket in
+    /// the window — shown alongside the spike bar for context.
+    pub baseline_hint: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -563,17 +572,27 @@ fn do_query_buckets(
     conn: &Connection,
     window: EpochWindow,
 ) -> Result<Vec<RegionBucket>, StorageError> {
+    select_buckets(conn, window, None)
+}
+
+/// Bucket rows in a window, optionally restricted to one cell.
+fn select_buckets(
+    conn: &Connection,
+    window: EpochWindow,
+    h3_cell: Option<u64>,
+) -> Result<Vec<RegionBucket>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT h3_cell, bucket_start, event_count, attention_count, article_count, source_count,
                 distinct_outlets, attention_score, unrest_score, spike_score, combined_score,
                 baseline, spike_cold_start
          FROM region_buckets
          WHERE bucket_start >= ? AND bucket_start < ?
+           AND h3_cell = coalesce(?, h3_cell)
          ORDER BY h3_cell, bucket_start",
     )?;
     // Include the bucket the window start falls into.
     let from = bucket_start_epoch(window.0);
-    let rows = stmt.query_map(params![from, window.1], |r| {
+    let rows = stmt.query_map(params![from, window.1, h3_cell.map(u64_to_db)], |r| {
         Ok(RegionBucket {
             h3_cell: u64_from_db(r.get(0)?),
             bucket_start: r.get(1)?,
@@ -697,6 +716,7 @@ fn do_region_detail(
     let mut outlets: HashSet<String> = HashSet::new();
     let mut conf_sum = 0.0f64;
     let mut n_rows = 0u32;
+    let mut n_coarse = 0u32;
 
     for row in rows {
         let (kind_s, themes_s, headline, domains_s, confidence, precision_s, articles, ts) = row?;
@@ -705,6 +725,7 @@ fn do_region_detail(
         let themes: Vec<String> = serde_json::from_str(&themes_s).unwrap_or_default();
         let domains: Vec<String> = serde_json::from_str(&domains_s).unwrap_or_default();
 
+        n_coarse += u32::from(!precision.renders_as_point());
         kind_counts.entry(kind.as_str()).or_insert((kind, 0)).1 += 1;
         for theme in themes {
             *theme_counts.entry(theme).or_insert(0) += 1;
@@ -742,6 +763,16 @@ fn do_region_detail(
     } else {
         0.0
     };
+    detail.coarse_share = if n_rows > 0 {
+        n_coarse as f32 / n_rows as f32
+    } else {
+        0.0
+    };
+
+    // Window-composed score components from this cell's stored buckets.
+    let buckets = select_buckets(conn, window, Some(h3_cell))?;
+    detail.scores = analytics::compose_window(&buckets, window);
+    detail.baseline_hint = buckets.last().map(|b| b.baseline);
     Ok(detail)
 }
 
@@ -980,6 +1011,15 @@ mod tests {
         assert_eq!(detail.total_articles, 30);
         assert!((detail.mean_confidence - 0.85).abs() < 1e-6);
         assert_eq!(detail.top_themes[0].1, 3); // protest & labor appear 3x each
+
+        // Window-composed scores ride along: both components present, one
+        // day of data ⇒ cold-start spike; all rows are city precision.
+        let scores = detail.scores.expect("cell has buckets in window");
+        assert!(scores.attention > 0.0);
+        assert!(scores.unrest > 0.0);
+        assert!(scores.spike_cold_start);
+        assert_eq!(detail.coarse_share, 0.0);
+        assert!(detail.baseline_hint.is_some());
     }
 
     #[test]

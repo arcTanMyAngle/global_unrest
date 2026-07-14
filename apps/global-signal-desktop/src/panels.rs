@@ -9,10 +9,42 @@ use crate::app::{App, HeatMetric, Phase, WindowLen};
 
 const TEXT_DIM: Color32 = Color32::from_rgb(148, 155, 168);
 
+/// Above this share of coarse-precision (country/admin1) records, a cell's
+/// detail gets a low-confidence badge.
+const COARSE_SHARE_BADGE: f32 = 0.5;
+
+const BADGE_BG: Color32 = Color32::from_rgb(72, 52, 20);
+const BADGE_FG: Color32 = Color32::from_rgb(255, 196, 110);
+
 fn fmt_ts(epoch_s: i64) -> String {
     DateTime::from_timestamp(epoch_s, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| format!("t={epoch_s}"))
+}
+
+/// Small amber low-confidence badge.
+fn badge(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(format!(" {text} "))
+            .small()
+            .color(BADGE_FG)
+            .background_color(BADGE_BG),
+    );
+}
+
+/// One labeled score bar. All score components are in [0, 1].
+fn score_bar(ui: &mut egui::Ui, label: &str, value: f32, text: String) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [86.0, 14.0],
+            egui::Label::new(RichText::new(label).small().color(TEXT_DIM)),
+        );
+        ui.add(
+            egui::ProgressBar::new(value.clamp(0.0, 1.0))
+                .desired_height(13.0)
+                .text(RichText::new(text).small()),
+        );
+    });
 }
 
 impl App {
@@ -269,6 +301,51 @@ impl App {
         }
         if !any_events {
             ui.label(RichText::new("none in window").color(TEXT_DIM));
+        }
+
+        // Score components — always all four, never only the combined number
+        // (hard project rule; docs/SCORING.md).
+        ui.add_space(6.0);
+        ui.label(RichText::new("Signal components").strong());
+        match &detail.scores {
+            Some(s) => {
+                if s.spike_cold_start {
+                    badge(ui, "low confidence: baseline cold start (<7 days history)");
+                }
+                if detail.coarse_share > COARSE_SHARE_BADGE {
+                    badge(
+                        ui,
+                        &format!(
+                            "low confidence: {:.0}% coarse geocoding",
+                            detail.coarse_share * 100.0
+                        ),
+                    );
+                }
+                score_bar(ui, "attention", s.attention, format!("{:.2}", s.attention));
+                score_bar(ui, "unrest", s.unrest, format!("{:.2}", s.unrest));
+                let spike_text = match detail.baseline_hint {
+                    Some(b) => format!("{:.2} · baseline {b:.1}/6h · 0.50 = normal", s.spike),
+                    None => format!("{:.2} · 0.50 = normal", s.spike),
+                };
+                score_bar(ui, "spike", s.spike, spike_text);
+                score_bar(
+                    ui,
+                    "combined",
+                    s.combined,
+                    format!("{:.2} = 0.40·att + 0.45·unr + 0.15·spk", s.combined),
+                );
+                ui.label(
+                    RichText::new(
+                        "Composed from stored 6 h bucket scores, weighted by \
+                         recency within the window (24 h half-life).",
+                    )
+                    .color(TEXT_DIM)
+                    .small(),
+                );
+            }
+            None => {
+                ui.label(RichText::new("no bucket data in window").color(TEXT_DIM));
+            }
         }
 
         ui.add_space(6.0);
