@@ -48,20 +48,45 @@ contribute to region-level shading only.**
 
 Aggregate keyed by `(h3_cell res 3, bucket_start)` with a **6-hour** bucket.
 Physical key is H3-only; country rollups are queries/views, never a second
-physical table. M1 carries raw counts (`event_count`, `attention_count`,
-`article_count`, `distinct_source_count` upper bound); M2 adds the score
-components (attention, unrest, spike, combined — stored separately, shown
-separately).
+physical table (the heatmap's world-zoom rollup to H3 res 1/2 derives
+parents via `geo_utils::cell_parent` at display time). Carries:
+
+- raw counts: `event_count`, `attention_count`, `article_count`,
+  `source_count` (summed upper bound) and `distinct_outlets` (exact
+  distinct outlet domains);
+- M2 score components, each in [0, 1], stored separately and shown
+  separately: `attention_score`, `unrest_score`, `spike_score` (0.5 =
+  neutral), `combined_score`, plus `baseline` (the spike denominator as of
+  this bucket's day) and `spike_cold_start` (see SCORING.md).
 
 ## DuckDB schema (analytics store)
 
 - `schema_version(version, applied_at)` — migration ledger.
 - `events` — one row per `GeoTemporalEvent`; `themes`/`outlet_domains`/`urls`
   stored as JSON text; timestamps as epoch seconds (`BIGINT`).
-- `region_buckets` — recomputed from `events` after ingest (SQL `GROUP BY`).
-- `baselines` — M2: per (h3_cell, time-of-day bucket) robust baselines.
+- `region_buckets` — recomputed from `events` after every ingest by running
+  `analytics::score_buckets` (the single reference implementation — there
+  is deliberately no SQL twin to keep in sync).
+- `baselines` — per (h3_cell, time-of-day bucket): the current trailing
+  28-day median and its `sample_days` (< `MIN_BASELINE_DAYS` ⇒ cold start).
 - `ingest_log` — one row per failed/refused record: source, reason, raw
   excerpt, timestamp. Normalization failures are never silently dropped.
+
+## Parquet session export (M4 handoff layout)
+
+`StorageHandle::export_parquet` (UI: "export parquet") writes a session as:
+
+```
+session-<UTC stamp>/
+  events/date=YYYY-MM-DD/*.parquet          (hive-partitioned, UTC dates)
+  region_buckets/date=YYYY-MM-DD/*.parquet  (scores included)
+  baselines.parquet
+```
+
+Re-readable with `read_parquet('…/**/*.parquet', hive_partitioning=1)`
+(roundtrip-tested). This is the exact layout the M4 worker will publish —
+DuckDB is single-writer per file, so Parquet partitions, never a shared
+`.duckdb`, are the process boundary.
 
 ## SQLite (settings.db)
 

@@ -6,8 +6,8 @@ visualization only: public or properly authorized sources, aggregate-level
 signals, transparent (non-ML) scoring, and a hard separation between "media
 attention" and "verified event data."
 
-**Milestone 1 (current): runs 100% offline** from committed synthetic
-fixtures — no network, no API keys.
+**Milestones 1–2 complete: runs 100% offline** from committed synthetic
+fixtures — no network, no API keys. Live GDELT ingestion is M3.
 
 ## Quickstart
 
@@ -18,16 +18,22 @@ cargo run -p global-signal-desktop
 
 You get a dark world map with:
 
-- **Heatmap** — H3 (res 3) cells shaded by media attention or event count
-  (log scale; toggle the metric in the top bar).
+- **Heatmap** — H3 cells shaded by media attention, event count, or source
+  diversity (log scale; toggle in the top bar). Cells roll up to coarser H3
+  parents at world zoom.
 - **Event markers** — protests/conflicts/disruptions as colored diamonds.
   Only city/exact-precision records render as points; country/admin
   centroids shade regions instead of faking hotspots.
 - **Time slider** — replay 35 days of data in 6-hour buckets (▶ loops).
 - **Region inspector** — click anywhere: counts by kind, attention vs.
-  events (always separate), top themes, outlet diversity, confidence,
-  headline metadata.
-- **Filters** — event kinds, minimum location confidence, layer toggles.
+  events (always separate), **score components as separate bars**
+  (attention / unrest / spike-vs-baseline / combined, per
+  [docs/SCORING.md](docs/SCORING.md)), low-confidence badges (baseline cold
+  start, coarse geocoding), top themes, outlet diversity, headline metadata.
+- **Filters** — event kinds, themes (vocabulary from the data), minimum
+  location confidence, layer toggles.
+- **Parquet export** — one click writes the session as date-partitioned
+  Parquet (the M4 service handoff layout).
 - **Ingest log** — malformed records are logged and surfaced, never
   silently dropped.
 
@@ -56,7 +62,8 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 ## Roadmap
 
 - **M1 ✅** offline fixture pipeline: ingest → DuckDB → map/timeline/inspector
-- **M2** scoring depth: baselines, spike detection, confidence badges, Parquet export
+- **M2 ✅** scoring depth: score components, 28-day median baselines, spike
+  detection with cold-start badges, theme filters, Parquet export
 - **M3** live GDELT ingestion (DOC API + 15-min dumps), optional OSM tile layer
 - **M4** Dockerized services (axum API + ingest worker, Parquet handoff)
 - **M5** ACLED adapter (authorized access only), optional NOAA/AIS/CelesTrak layers
