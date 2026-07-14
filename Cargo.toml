@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = [
+    "apps/global-signal-desktop",
+    "crates/analytics",
+    "crates/core-types",
+    "crates/geo-utils",
+    "crates/renderer",
+    "crates/source-acled",
+    "crates/source-fixtures",
+    "crates/source-gdelt",
+    "crates/storage",
+    "services/api",
+    "services/workers",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.96"
+
+[workspace.dependencies]
+# Internal crates
+analytics = { path = "crates/analytics" }
+core-types = { path = "crates/core-types" }
+geo-utils = { path = "crates/geo-utils" }
+renderer = { path = "crates/renderer" }
+source-acled = { path = "crates/source-acled" }
+source-fixtures = { path = "crates/source-fixtures" }
+source-gdelt = { path = "crates/source-gdelt" }
+storage = { path = "crates/storage" }
+
+# External crates — pinned at the workspace level; do not re-declare versions
+# in member crates. eframe 0.35 rides wgpu 29; do not bump wgpu independently.
+anyhow = "1"
+chrono = { version = "0.4.45", features = ["serde"] }
+directories = "6"
+duckdb = { version = "1.10504.0", features = ["bundled"] }
+earcutr = "0.5"
+eframe = "0.35"
+egui = "0.35"
+geo = "0.33"
+geojson = "1.0"
+h3o = "0.10"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.52", features = ["rt", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Optimize dependencies even in dev builds: epaint tessellation and geo math
+# stay smooth while the workspace crates keep fast incremental compiles.
+[profile.dev.package."*"]
+opt-level = 2

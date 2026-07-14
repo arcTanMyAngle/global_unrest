@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+
+# Secrets — API keys live in env vars or .env files, never in git
+.env
+.env.*
+
+# Local databases and data directories
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite-journal
+*.db
+*.db-journal
+/var/
+/data/
+
+# Editor noise
+.vscode/
+.idea/

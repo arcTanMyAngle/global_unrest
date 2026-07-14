@@ -1,0 +1,16 @@
+[package]
+name = "source-gdelt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# M3 crate. Live GDELT ingestion (DOC 2.0 JSON API + 15-minute CSV-zip dumps)
+# lands here after Milestone 1; reqwest/governor arrive with it.
+
+[dependencies]
+core-types.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

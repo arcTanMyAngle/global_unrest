@@ -1,0 +1,20 @@
+[package]
+name = "renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# egui LAYER LIBRARY, not a wgpu engine: projection + cached epaint meshes
+# for basemap / heatmap / marker layers. Never tessellates paths per frame.
+
+[dependencies]
+core-types.workspace = true
+earcutr.workspace = true
+egui.workspace = true
+geo-utils.workspace = true
+geojson.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
