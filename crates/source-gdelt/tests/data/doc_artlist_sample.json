@@ -1,0 +1,54 @@
+{
+  "articles": [
+    {
+      "url": "https://globalwire.example/a/1001",
+      "url_mobile": "",
+      "title": "[synthetic] Transit workers rally in central Paris",
+      "seendate": "20260620T081500Z",
+      "socialimage": "https://globalwire.example/img/1001.jpg",
+      "domain": "globalwire.example",
+      "language": "French",
+      "sourcecountry": "France"
+    },
+    {
+      "url": "https://worldpost.example/a/1002",
+      "url_mobile": "",
+      "title": "[synthetic] Election commission announcement draws crowds in Nairobi",
+      "seendate": "20260620T144000Z",
+      "socialimage": "https://worldpost.example/img/1002.jpg",
+      "domain": "worldpost.example",
+      "language": "English",
+      "sourcecountry": "Kenya"
+    },
+    {
+      "url": "https://meridian-news.example/a/1003",
+      "url_mobile": "",
+      "title": "[synthetic] Monsoon flooding disrupts Jakarta transport network",
+      "seendate": "20260621T023000Z",
+      "socialimage": "",
+      "domain": "meridian-news.example",
+      "language": "Indonesian",
+      "sourcecountry": "Indonesia"
+    },
+    {
+      "url": "https://signal-times.example/a/1004",
+      "url_mobile": "",
+      "title": "[synthetic] National wire covers regional developments",
+      "seendate": "20260621T110500Z",
+      "socialimage": "",
+      "domain": "signal-times.example",
+      "language": "English",
+      "sourcecountry": "United States"
+    },
+    {
+      "url": "https://open-dispatch.example/a/1005",
+      "url_mobile": "",
+      "title": "[synthetic] Report from an unmapped territory",
+      "seendate": "20260621T185000Z",
+      "socialimage": "",
+      "domain": "open-dispatch.example",
+      "language": "English",
+      "sourcecountry": "Atlantis"
+    }
+  ]
+}

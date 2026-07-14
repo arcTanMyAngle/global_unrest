@@ -44,10 +44,14 @@ egui = "0.35"
 geo = "0.33"
 geojson = "1.0"
 h3o = "0.10"
+# GDELT live ingestion (M3). rustls (not native-tls) so CI stays OpenSSL-free
+# on both Windows and Linux; no default TLS/http2 pulled in.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+url = "2"
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
