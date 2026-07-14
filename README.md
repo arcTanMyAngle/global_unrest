@@ -45,6 +45,8 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 
 | Doc | Contents |
 |---|---|
+| [HANDOFF.md](HANDOFF.md) | Session handoff: current status, M2 task list, known quirks |
+| [docs/PLAN.md](docs/PLAN.md) | The approved project plan, with milestone status |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate map, threading model, rendering strategy, single-writer rule |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | `GeoTemporalEvent`, buckets, DuckDB schema, fixtures |
 | [docs/SCORING.md](docs/SCORING.md) | Transparent scoring formulas, baseline/spike design (M2) |
