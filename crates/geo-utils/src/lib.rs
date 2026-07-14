@@ -68,6 +68,17 @@ pub fn cell_center_lonlat(cell: u64) -> Result<(f64, f64), GeoError> {
     Ok((ll.lng(), ll.lat()))
 }
 
+/// Parent of `cell` at the coarser resolution `res`. Parents are derived on
+/// demand for display rollups — only res-3 cells are ever stored
+/// (docs/DATA_MODEL.md). `res` must not exceed the cell's own resolution.
+pub fn cell_parent(cell: u64, res: u8) -> Result<u64, GeoError> {
+    let idx = CellIndex::try_from(cell).map_err(|_| GeoError::InvalidCell(cell))?;
+    let resolution = Resolution::try_from(res).map_err(|_| GeoError::InvalidResolution(res))?;
+    idx.parent(resolution)
+        .map(u64::from)
+        .ok_or(GeoError::InvalidResolution(res))
+}
+
 // ---------------------------------------------------------------------------
 // Equirectangular viewport
 // ---------------------------------------------------------------------------
@@ -287,6 +298,23 @@ mod tests {
         assert!(cell_for_latlon(999.0, 0.0, 3).is_err());
         assert!(cell_for_latlon(0.0, 0.0, 99).is_err());
         assert!(cell_boundary_lonlat(0xdead_beef).is_err());
+    }
+
+    #[test]
+    fn parent_rollup_contains_child_center() {
+        let child = cell_for_latlon(48.8566, 2.3522, 3).unwrap();
+        for res in [1u8, 2] {
+            let parent = cell_parent(child, res).unwrap();
+            let idx = CellIndex::try_from(parent).unwrap();
+            assert_eq!(u8::from(idx.resolution()), res);
+            // The parent at the child's own location must be that parent.
+            let via_latlon = cell_for_latlon(48.8566, 2.3522, res).unwrap();
+            assert_eq!(parent, via_latlon);
+        }
+        // Same resolution is the identity; finer resolutions are an error.
+        assert_eq!(cell_parent(child, 3).unwrap(), child);
+        assert!(cell_parent(child, 5).is_err());
+        assert!(cell_parent(0xdead_beef, 1).is_err());
     }
 
     #[test]

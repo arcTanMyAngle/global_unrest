@@ -177,6 +177,12 @@ pub struct App {
     pending_buckets: Option<Reply<Vec<RegionBucket>>>,
     pending_points: Option<Reply<Vec<EventPoint>>>,
     pub bucket_count: usize,
+    /// Buckets of the current window, kept so the heatmap can re-aggregate
+    /// at a different H3 rollup resolution when the zoom crosses a threshold
+    /// without re-querying storage.
+    window_buckets: Vec<RegionBucket>,
+    /// H3 resolution the heatmap layer was last built at.
+    heat_res: u8,
 
     pub selected_cell: Option<u64>,
     pub selected_label: Option<String>,
@@ -259,6 +265,8 @@ impl App {
             pending_buckets: None,
             pending_points: None,
             bucket_count: 0,
+            window_buckets: Vec::new(),
+            heat_res: core_types::H3_RESOLUTION,
             selected_cell: None,
             selected_label: None,
             pending_detail: None,
@@ -393,7 +401,10 @@ impl App {
         {
             self.pending_buckets = None;
             match result {
-                Ok(buckets) => self.rebuild_heatmap(&buckets),
+                Ok(buckets) => {
+                    self.window_buckets = buckets;
+                    self.rebuild_heatmap();
+                }
                 Err(e) => tracing::error!("bucket query: {e}"),
             }
         }
@@ -434,16 +445,35 @@ impl App {
         }
     }
 
-    fn rebuild_heatmap(&mut self, buckets: &[RegionBucket]) {
+    /// Heatmap display resolution for a zoom level: res-3 cells shrink to a
+    /// few pixels at world zoom, so roll up to coarser H3 parents (derived
+    /// via `geo_utils::cell_parent`; only res 3 is ever stored).
+    fn heat_resolution(deg_per_px: f64) -> u8 {
+        if deg_per_px >= 0.25 {
+            1
+        } else if deg_per_px >= 0.08 {
+            2
+        } else {
+            core_types::H3_RESOLUTION
+        }
+    }
+
+    fn rebuild_heatmap(&mut self) {
+        let buckets = &self.window_buckets;
         self.bucket_count = buckets.len();
+        let deg_per_px = self.map.viewport.as_ref().map_or(0.225, |v| v.deg_per_px);
+        self.heat_res = Self::heat_resolution(deg_per_px);
         let mut per_cell: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
         for b in buckets {
-            let entry = per_cell.entry(b.h3_cell).or_insert(0);
+            let Ok(cell) = geo_utils::cell_parent(b.h3_cell, self.heat_res) else {
+                continue; // cells were validated at ingest
+            };
+            let entry = per_cell.entry(cell).or_insert(0);
             match self.filters.heat_metric {
                 HeatMetric::Attention => *entry += u64::from(b.attention_count),
                 HeatMetric::Events => *entry += u64::from(b.event_count),
-                // Distinct counts don't sum across buckets; show the peak
-                // 6 h diversity instead.
+                // Distinct counts sum across neither buckets nor child
+                // cells; show the peak 6 h diversity instead.
                 HeatMetric::Diversity => *entry = (*entry).max(u64::from(b.distinct_outlets)),
             }
         }
@@ -533,6 +563,15 @@ impl eframe::App for App {
         self.inspector_panel(ui);
         self.central_map(ui);
         self.log_window(&ctx);
+
+        // Zoom crossed a rollup threshold → re-aggregate the cached buckets
+        // at the new display resolution (no storage round-trip).
+        if matches!(self.phase, Phase::Ready) {
+            let deg_per_px = self.map.viewport.as_ref().map_or(0.225, |v| v.deg_per_px);
+            if Self::heat_resolution(deg_per_px) != self.heat_res {
+                self.rebuild_heatmap();
+            }
+        }
 
         if self.dirty && matches!(self.phase, Phase::Ready) {
             self.dirty = false;

@@ -9,5 +9,12 @@ rust-version.workspace = true
 chrono.workspace = true
 core-types.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "scoring"
+harness = false
+
 [lints]
 workspace = true
