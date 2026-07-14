@@ -1,0 +1,10 @@
+{
+  "schema": "les-fixture-v1",
+  "comment": "Hand-written ACLED-shaped discrete event records. All synthetic. geo_precision: 1 = exact/town, 2 = admin area, 3 = region/country. Shape reference for docs/DATA_MODEL.md and golden tests.",
+  "records": [
+    {"shape": "acled_event", "record_id": "sample-aevt-001", "event_date": "2026-06-20", "event_time": "13:00:00", "event_type": "Protests", "sub_event_type": "Peaceful protest", "lat": 48.8566, "lon": 2.3522, "geo_precision": 1, "country_iso": "FRA", "admin1": "Île-de-France", "fatalities": 0, "source_count": 4, "notes_headline": "[synthetic] Peaceful march over transit fares", "tags": ["LABOR"]},
+    {"shape": "acled_event", "record_id": "sample-aevt-002", "event_date": "2026-06-20", "event_time": "16:30:00", "event_type": "Riots", "sub_event_type": "Violent demonstration", "lat": -1.2921, "lon": 36.8219, "geo_precision": 1, "country_iso": "KEN", "admin1": "Nairobi", "fatalities": 2, "source_count": 5, "notes_headline": "[synthetic] Demonstration turned violent near government quarter", "tags": ["ELECTIONS"]},
+    {"shape": "acled_event", "record_id": "sample-aevt-003", "event_date": "2026-06-21", "event_time": "04:45:00", "event_type": "Battles", "sub_event_type": "Armed clash", "lat": -4.0383, "lon": 21.7587, "geo_precision": 3, "country_iso": "COD", "fatalities": 9, "source_count": 2, "notes_headline": "[synthetic] Armed clash reported, location known only to country level", "tags": ["CONFLICT"]},
+    {"shape": "acled_event", "record_id": "sample-aevt-004", "event_date": "2026-06-21", "event_time": "09:20:00", "event_type": "Strategic developments", "sub_event_type": "Disrupted weapons use", "lat": -6.2088, "lon": 106.8456, "geo_precision": 2, "country_iso": "IDN", "admin1": "Jakarta", "fatalities": 0, "source_count": 3, "notes_headline": "[synthetic] Port operations suspended amid flooding", "tags": ["FLOOD"]}
+  ]
+}
