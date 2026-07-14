@@ -2,7 +2,7 @@
 
 Desktop-first Rust geospatial dashboard visualizing global news-attention
 and unrest/event signals. Civic-data research/visualization only. Currently
-between **M1 (done, verified)** and **M2 (scoring depth)** — see
+between **M2 (done, verified 2026-07-14)** and **M3 (GDELT live)** — see
 [HANDOFF.md](HANDOFF.md) for status and the next task list, and
 [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
@@ -48,8 +48,10 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
 - `crates/source-fixtures` — fixture reader + deterministic generator
   (SplitMix64, fixed anchor 2026-07-01). Normalization is fallible **per
   record**; failures go to `ingest_log`, never dropped.
-- `crates/analytics` — pure functions; `aggregate_buckets` is the reference
-  the storage SQL is tested against. M2 scoring goes here.
+- `crates/analytics` — pure functions; `score_buckets` is the single
+  scoring/aggregation implementation storage persists (no SQL twin);
+  `scoring.rs`/`baseline.rs` hold the M2 component functions + medians;
+  every constant is named in `analytics::weights`.
 - `crates/storage` — DuckDB behind a dedicated **actor thread** (the
   connection is `!Sync`); versioned `.sql` migrations in `migrations/`;
   `Reply<T>` handles polled by the UI per frame; rusqlite settings store.

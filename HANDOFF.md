@@ -1,109 +1,120 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-07-13 → 2026-07-14. **M0 + M1 complete and verified.**
-Next session starts **Milestone 2** (scoring depth). Read this file, then
+Last session: 2026-07-14. **M0 + M1 + M2 complete and verified.**
+Next session starts **Milestone 3** (GDELT live). Read this file, then
 [CLAUDE.md](CLAUDE.md), then skim [docs/PLAN.md](docs/PLAN.md).
 
 ## Where things stand
 
 | | |
 |---|---|
-| Repo | `live-earth-signals/` — git initialized, **no remote yet** (CI workflow is committed but dormant until pushed to GitHub) |
-| Commits | 5 clean PR-sized commits (`git log --oneline`), working tree clean |
-| Tests | 40 pass (`cargo test --workspace`), clippy `-D warnings` clean, fmt clean |
-| App | Launches and works: 11,043 fixture events ingested, map/heatmap/markers/timeline/inspector all verified live (screenshot + scripted click on Nairobi filled the inspector correctly) |
+| Repo | `live-earth-signals/` — git initialized, **no remote yet** (CI workflow committed but dormant until pushed) |
+| Commits | Clean PR-sized commits through M2 (`git log --oneline`), working tree clean |
+| Tests | 72 pass (`cargo test --workspace`), clippy `-D warnings` clean, fmt clean; criterion benches in `crates/analytics/benches` |
+| App | Verified live 2026-07-14: score bars + cold-start badge + baseline hint in inspector, heatmap rollup at world zoom, Parquet export written to disk and confirmed |
 | Brief | `../prompt_1.md` (original project prompt, outside the repo) |
-| Plan | [docs/PLAN.md](docs/PLAN.md) — the user-approved plan, vendored from `~/.claude/plans/prompt-1-md-recursive-rossum.md` |
+| Plan | [docs/PLAN.md](docs/PLAN.md) — user-approved plan |
 
-## Milestone 1 acceptance — all met
+## Milestone 2 acceptance — all met
 
-Offline `cargo run -p global-signal-desktop`: loads fixtures → normalizes
-into `GeoTemporalEvent` → DuckDB → dark world map with H3 heatmap +
-precision-aware markers + 6h-bucket time slider with looping replay + region
-inspector (attention vs. event data always separated) + ingest-log surfacing
-of the 2 planted malformed records. Headless E2E test
-([apps/global-signal-desktop/tests/pipeline.rs](apps/global-signal-desktop/tests/pipeline.rs))
-covers the whole data path and checks the SQL aggregation against
-`analytics::aggregate_buckets`. Perf smoke test (10k-point mesh build) lives
-in `crates/renderer/src/markers.rs`.
+- Every score component individually visible in the inspector (four bars:
+  attention / unrest / spike / combined with its formula), never only the
+  combined number.
+- Golden tests match hand-computed values (`analytics/src/scoring.rs`,
+  `baseline.rs`, full-bucket + compose-window goldens in `lib.rs`).
+- Spike cold start (< 7 days history) forces a neutral spike and shows an
+  amber low-confidence badge (verified live on the first fixture day);
+  second badge for majority-coarse geocoding.
+- Synthetic-series tests: flat ⇒ neutral, burst ⇒ 0.9438 golden, cold ⇒
+  flagged. E2E asserts the scripted Paris spike (days 20–23) > 0.8 and the
+  exact cold-start day boundary.
+- Export produces hive `date=YYYY-MM-DD` Parquet re-read by a fresh DuckDB
+  (roundtrip test + verified live at
+  `%LOCALAPPDATA%\...\data\exports\session-<stamp>\`).
+- Extras shipped: theme filters (vocabulary from data; themed buckets
+  re-scored against the theme's own baseline), source-diversity heat
+  metric, heatmap H3 parent rollup at world zoom, criterion benches
+  (score_buckets 100k ≈ 55 ms).
 
-## Milestone 2 — next up (scoring depth)
+## How M2 scoring works (read before touching analytics/storage)
 
-Per the approved plan §8/§11/§12. Suggested PR-sized order:
+One reference implementation: `analytics::score_buckets` aggregates events
+and scores each bucket **as of its own end**; spike baselines are trailing
+28-day medians per (cell, time-of-day slot) **as of that bucket's day**
+(replay is honest; early days cold-start). Storage's `rebuild_buckets`
+reads back all events and persists what analytics computes — there is
+deliberately **no SQL scoring twin**. The inspector's window scores come
+from `analytics::compose_window` (recency-weighted vs. window end, empty
+slots dilute attention/unrest but not spike). Full spec: docs/SCORING.md.
 
-1. `analytics::scoring` — attention/unrest component functions with named
-   weights (`analytics::weights` already exists) + **hand-computed golden
-   tests**. Formulas are locked in [docs/SCORING.md](docs/SCORING.md).
-2. `core-types` — add score-component fields to `RegionBucket`
-   (attention/unrest/spike/combined, each stored separately); storage
-   migration `0002_*.sql` adds the columns (migration runner already
-   handles versioning).
-3. `storage` — populate `baselines` (table exists, empty): trailing 28-day
-   **median** per (h3_cell, 6h time-of-day bucket) via DuckDB window
-   functions, recomputed after ingest.
-4. `analytics` — spike = clamped log-ratio vs. baseline + cold-start rule
-   (`MIN_BASELINE_DAYS`, below it ⇒ neutral spike + low-confidence flag).
-   Synthetic-series tests: flat ⇒ neutral, injected burst ⇒ high, cold
-   start ⇒ neutral + flagged. Fixtures already span 35 days with scripted
-   spikes (Paris d20–23, Nairobi d10–12, Jakarta d28–29, Lagos d31–32) so
-   baselines work without regenerating.
-5. `combined_signal` (0.40/0.45/0.15) computed and stored per bucket; UI
-   must show the components separately, never only the combined number.
-6. UI — score components in the inspector (per-component bars), confidence
-   badges (cold-start spike, coarse-precision share of a cell's records).
-7. UI — topic/theme filters (theme vocabulary from data; extend
-   `query_points`/`query_buckets` filtering).
-8. UI — source-diversity display (distinct outlets is already in the
-   inspector; consider adding it as a heatmap metric option).
-9. `storage` — Parquet session export via `COPY TO ... (FORMAT PARQUET,
-   PARTITION_BY ...)` with **date partitioning designed for M4 reuse**
-   (worker publishes the same layout later) + roundtrip test re-reading via
-   DuckDB.
-10. criterion benches (scoring + aggregation at 100k events) and the one
-    known visual polish item: heatmap res-3 cells are tiny at world zoom —
-    roll up to H3 parent res 1/2 when zoomed out (parents derived via h3o,
-    never stored).
-11. Docs: SCORING.md status flip, DATA_MODEL.md score fields, README
-    roadmap check-off.
+At M3 volumes, note: every ingest re-reads the whole events table and
+rescores (~55 ms per 100k events, measured). Fine for 15-minute batches at
+~100k/day; revisit (incremental scoring) only if retention grows past a few
+million rows.
 
-M2 acceptance (plan §12): every component individually visible in the
-inspector; golden tests match hand-computed values; spike cold-start shows a
-low-confidence badge; export produces date-partitioned Parquet re-readable
-by DuckDB.
+## Milestone 3 — next up (GDELT live)
 
-**Milestone gating still applies:** no live APIs until M2 is done and
-approved; GDELT is M3. Offline fixture mode stays a permanent supported path.
+Per the approved plan §5/§11/§12. Hard rules: respect GDELT rate limits and
+attribution; offline fixture mode remains a permanent supported path; no
+API keys needed (GDELT is keyless). Suggested PR-sized order:
+
+1. `source-gdelt`: DOC 2.0 API client (keyless JSON REST) — query builder,
+   response → `RawRecord::GdeltDocJson`, `normalize()` to `NewsAttention`
+   events (theme lowercase mapping, geo precision mapping like fixtures).
+   Golden tests on committed **synthetic** response fixtures.
+2. `source-gdelt`: Events 15-minute CSV-zip dump path (separate code path —
+   `lastupdate.txt` → zip fetch → CSV rows → `RawRecord::GdeltEventCsv`),
+   normalization to discrete events; malformed rows → `ingest_log`.
+3. Rate limiting + politeness: `governor` (pinned 0.10) + backoff; fetch
+   scheduler in the ingest worker (tokio) with 15-min cadence + manual
+   backfill window.
+4. Incremental ingest loop in the app: online mode toggle; dedup relies on
+   the existing deterministic event ids — verify on re-fetch (acceptance).
+5. Retention: cap events table (~100k/day ⇒ prune beyond N days), settings
+   for retention length; keep baselines meaningful across pruning.
+6. UI: source status indicator (last fetch, next fetch, error/degraded
+   state); network kill ⇒ graceful cached degradation (acceptance).
+7. Optional stretch: `walkers 0.56` slippy-tile layer (online basemap mode;
+   OSM tile policy first — see SAFETY_AND_PRIVACY.md).
+8. Docs: ARCHITECTURE/DATA_MODEL updates, GDELT attribution in README.
+
+M3 acceptance (plan §12): live ingest within rate limits; network kill ⇒
+graceful cached degradation with status indicator; dedup verified on
+re-fetch.
 
 ## Landmines and quirks (learned the hard way)
 
-- **egui 0.35 redesigned its API**: `eframe::App::update(ctx)` is now
-  `fn ui(&mut self, ui: &mut egui::Ui, frame)`; `TopBottomPanel`/`SidePanel`
-  are a unified `egui::Panel::top/bottom/right(id).show(ui, …)` (sides use
-  `.default_size`, not `.default_width`); `CentralPanel::default_margins()`;
-  `raw_scroll_delta` → `smooth_scroll_delta()`; `egui::Window` still takes
-  `&Context`. Check the registry source before assuming pre-0.35 APIs.
-- **eframe 0.35 rides wgpu 29** — wgpu 30 is out; do not bump independently.
-- **geojson 1.0** uses struct variants (`GeometryValue::Polygon
-  { coordinates }`) and a `Position` newtype (`.as_slice()`).
-- **h3o accepts out-of-range lat/lon** (normalizes onto the sphere) —
-  `geo_utils::cell_for_latlon` range-validates first; keep it that way so
-  garbage fails into `ingest_log`.
-- **duckdb crate versioning** is `1.MMmmpp.x` (pinned `1.10504.0` = DuckDB
-  1.5.4). The connection is `!Sync` — all access goes through the storage
-  actor thread. u64 ids/cells are stored as BIGINT via bit-cast.
-- **DuckDB is single-writer per file across processes** — firm M4 rule:
-  Parquet is the handoff surface, never a shared `.duckdb`.
+- **egui 0.35 API**: `App::ui(&mut self, ui, frame)`; unified
+  `egui::Panel::top/bottom/right(id)`; sides use `.default_size`;
+  `CentralPanel::default_margins()`; `smooth_scroll_delta()`;
+  `egui::Window` still takes `&Context`. eframe 0.35 rides **wgpu 29** — do
+  not bump wgpu independently.
+- **duckdb crate** `1.10504.0` = DuckDB 1.5.4 (`1.MMmmpp.x`). Connection is
+  `!Sync` — all access via the storage actor thread. u64 via i64 bit-cast.
+  DuckDB **cannot ALTER TABLE ADD non-null columns** — migration 0002
+  recreates derived tables instead (they rebuild after every ingest).
+- **Parquet COPY**: use `make_timestamp(µs)` for partition dates (timezone-
+  setting independent); target dir must be fresh (timestamped session dirs).
+- **Filters struct is no longer `Copy`** (themes Vec) — clone when saving.
+  `#[serde(default)]` on new filter fields keeps old saved settings loading.
+- **h3o**: accepts out-of-range lat/lon (normalizes) — `geo_utils`
+  range-validates first; parents via `geo_utils::cell_parent` (display
+  only, never stored).
 - App data: `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`
-  (`signals.duckdb` + `settings.sqlite`). Delete to reset. `LES_DATA_DIR`
-  and `LES_FIXTURES_DIR` override. `ingest_log` grows by 2 rows per app
-  start (the planted malformed fixtures re-log; inserts dedupe, log doesn't
-  — accepted for M1, could dedupe in M2 if it annoys).
-- First cold build compiles the DuckDB C++ amalgamation (minutes). It's
-  cached in `target/` now; don't clean it casually.
-- GUI verification on this machine (Windows 11, 2560×1600, DPI-scaled): see
-  `.claude/skills/run/SKILL.md` — `FindWindow` with a null class fails from
-  PowerShell; use `(Get-Process -Id $pid).MainWindowHandle` and call
-  `SetProcessDPIAware()` before any capture/cursor Win32 calls.
+  (`signals.duckdb`, `settings.sqlite`, `exports/`). `LES_DATA_DIR` /
+  `LES_FIXTURES_DIR` override. `ingest_log` grows 2 rows per app start
+  (planted malformed fixtures re-log; inserts dedupe, the log doesn't).
+- First cold build compiles DuckDB C++ (minutes); it's cached in `target/`
+  — don't `cargo clean` casually.
+- **GUI verification on this machine**: see `.claude/skills/run/SKILL.md`.
+  New lessons from M2 verification: the eframe window may open small and
+  offset — force `ShowWindow(h, 3)` (SW_SHOWMAXIMIZED) before computing
+  click coordinates; `SetForegroundWindow` is blocked by focus-stealing
+  prevention — minimize+re-maximize with an Alt `keybd_event` wrapped
+  around it, and verify with `GetForegroundWindow` before every synthetic
+  click; **if another app keeps taking foreground, the user is at the
+  machine — stop clicking.** Each PowerShell tool call is a fresh process:
+  re-run `Add-Type` every time.
 
 ## Quality gates (run after every step; CI runs the same)
 

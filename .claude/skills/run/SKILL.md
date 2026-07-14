@@ -46,7 +46,27 @@ Hard-won gotchas — follow exactly:
    process; `SetForegroundWindow(handle)` first, small sleeps between steps.
 5. Kill when done: `Stop-Process -Id $proc.Id -Force -Confirm:$false`.
 
+Additional lessons from the M2 verification session:
+
+6. The eframe window can open **small and offset**, not maximized —
+   `[Win32]::ShowWindow($h, 3)` (SW_SHOWMAXIMIZED) first, take a fresh
+   screenshot, and only then compute click coordinates. Never reuse
+   coordinates from a previous launch.
+7. `SetForegroundWindow` is blocked by Windows focus-stealing prevention
+   when another app is active. Working recipe: `ShowWindow($h, 6)`
+   (minimize), then wrap `SetForegroundWindow` + `ShowWindow($h, 3)` in an
+   Alt keypress (`keybd_event(0x12, 0, 0/2, …)`). **Verify** with
+   `GetForegroundWindow() -eq $h` immediately before every synthetic click
+   and before every screenshot — otherwise clicks land in whatever the user
+   has open.
+8. **If foreground keeps being stolen, the user is actively using the
+   machine — stop sending input immediately** and fall back to the headless
+   E2E test for verification.
+9. Each PowerShell tool invocation is a fresh process: `Add-Type` for the
+   Win32 helpers must be re-run in every call (types don't persist).
+
 A good end-to-end check: click a hotspot city (e.g. the Nairobi marker) and
 confirm the right-hand inspector fills with the country name, separate
-"Media attention" / "Event data" sections, confidence bar, themes, and
-headlines.
+"Media attention" / "Event data" sections, the four M2 score bars
+(attention / unrest / spike / combined) with cold-start badge on early-day
+windows, confidence bar, themes, and headlines.
