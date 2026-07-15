@@ -168,6 +168,9 @@ pub struct App {
     pub online: bool,
     /// Latest live-source status for the UI.
     pub source_status: Option<SourceStatus>,
+    /// Events-table retention cap in days (`None` = keep everything). Applied to
+    /// the storage actor; persisted in settings.
+    pub retention_days: Option<u32>,
     pending_ingest: Option<Reply<IngestReport>>,
     pub ingest_report: Option<IngestReport>,
     pending_log: Option<Reply<(u64, Vec<IngestLogRow>)>>,
@@ -231,6 +234,13 @@ impl App {
         let settings = SettingsDb::open(&data_dir.join("settings.sqlite"))?;
         let filters: Filters = settings.get("filters")?.unwrap_or_default();
 
+        // Retention: env override wins, else the saved setting, else unbounded.
+        let retention_days: Option<u32> = match std::env::var("LES_RETENTION_DAYS") {
+            Ok(s) => s.trim().parse::<u32>().ok().filter(|d| *d > 0),
+            Err(_) => settings.get("retention_days")?.flatten(),
+        };
+        store.set_retention(retention_days);
+
         // Always spawn the worker; if fixtures are missing it reports the fatal
         // error itself (keeps the online-mode handle unconditional).
         let fixtures_dir =
@@ -253,6 +263,7 @@ impl App {
             ingest_queue: std::collections::VecDeque::new(),
             online: false,
             source_status: None,
+            retention_days,
             pending_ingest: None,
             ingest_report: None,
             pending_log: None,
@@ -309,6 +320,19 @@ impl App {
     /// Request an immediate live fetch (manual refresh; only acts when online).
     pub fn fetch_now(&self) {
         self.ingest_handle.fetch_now();
+    }
+
+    /// Change the events retention cap: apply to storage and persist. The next
+    /// ingest prunes to the new window.
+    pub fn set_retention(&mut self, days: Option<u32>) {
+        if self.retention_days == days {
+            return;
+        }
+        self.retention_days = days;
+        self.store.set_retention(days);
+        if let Err(e) = self.settings.set("retention_days", &days) {
+            tracing::warn!("saving retention: {e}");
+        }
     }
 
     /// Kick off a Parquet session export into a fresh timestamped directory

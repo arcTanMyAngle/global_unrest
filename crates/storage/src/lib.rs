@@ -55,6 +55,8 @@ pub struct IngestReport {
     pub duplicates: usize,
     /// Failed records written to `ingest_log`.
     pub failures: usize,
+    /// Events dropped by the retention cap this batch (0 when disabled).
+    pub pruned: usize,
 }
 
 /// Slim row for the marker layer. Only City/Exact-precision records are
@@ -140,6 +142,9 @@ enum Cmd {
         events: Vec<GeoTemporalEvent>,
         failures: Vec<IngestFailure>,
         reply: mpsc::Sender<Result<IngestReport, StorageError>>,
+    },
+    SetRetention {
+        days: Option<u32>,
     },
     TimeExtent {
         reply: mpsc::Sender<Result<Option<EpochWindow>, StorageError>>,
@@ -258,6 +263,12 @@ impl StorageHandle {
         Reply(rx)
     }
 
+    /// Set the retention cap in days (applied on every subsequent ingest);
+    /// `None` or 0 disables pruning (keep everything). Fire-and-forget.
+    pub fn set_retention(&self, days: Option<u32>) {
+        self.send(Cmd::SetRetention { days });
+    }
+
     /// (min, max+1) event timestamp — i.e. a half-open window covering all
     /// data — or None when the store is empty.
     pub fn time_extent(&self) -> Reply<Option<EpochWindow>> {
@@ -353,6 +364,9 @@ impl Drop for StorageHandle {
 }
 
 fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() + Send>) {
+    // Retention cap in days, held by the actor (the connection's owner). `None`
+    // keeps everything (fixture default); online mode sets a finite window.
+    let mut retention_days: Option<u32> = None;
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Ingest {
@@ -360,7 +374,11 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
                 failures,
                 reply,
             } => {
-                let _ = reply.send(do_ingest(&conn, &events, &failures));
+                let _ = reply.send(do_ingest(&conn, &events, &failures, retention_days));
+            }
+            Cmd::SetRetention { days } => {
+                retention_days = days.filter(|d| *d > 0);
+                continue; // no reply, no repaint needed
             }
             Cmd::TimeExtent { reply } => {
                 let _ = reply.send(do_time_extent(&conn));
@@ -450,6 +468,7 @@ fn do_ingest(
     conn: &Connection,
     events: &[GeoTemporalEvent],
     failures: &[IngestFailure],
+    retention_days: Option<u32>,
 ) -> Result<IngestReport, StorageError> {
     // Idempotent re-ingest: drop events whose id is already present.
     // (The appender has no ON CONFLICT path, so dedup up front.)
@@ -511,19 +530,47 @@ fn do_ingest(
         )?;
     }
 
+    // Apply retention before rescoring so buckets/baselines are computed over
+    // exactly the retained events (no dangling buckets for pruned days).
+    let pruned = match retention_days {
+        Some(days) => prune_events(conn, i64::from(days))?,
+        None => 0,
+    };
+
     rebuild_buckets(conn)?;
 
     tracing::info!(
         inserted,
         duplicates,
         failures = failures.len(),
+        pruned,
         "ingest complete"
     );
     Ok(IngestReport {
         inserted,
         duplicates,
         failures: failures.len(),
+        pruned,
     })
+}
+
+/// Drop events older than `retention_days` relative to the newest event, so the
+/// table stays bounded at online volumes (~100k/day). Retention ≥ the 28-day
+/// baseline window (docs/SCORING.md) keeps recent baselines fully warm; shorter
+/// windows are allowed but degrade the oldest retained buckets to cold start.
+/// Returns the number of rows pruned.
+fn prune_events(conn: &Connection, retention_days: i64) -> Result<usize, StorageError> {
+    let max_ts: Option<i64> =
+        conn.query_row("SELECT max(ts_epoch_s) FROM events", [], |r| r.get(0))?;
+    let Some(max_ts) = max_ts else {
+        return Ok(0);
+    };
+    let cutoff = max_ts - retention_days.saturating_mul(86_400);
+    let pruned = conn.execute("DELETE FROM events WHERE ts_epoch_s < ?", params![cutoff])?;
+    if pruned > 0 {
+        tracing::info!(pruned, retention_days, "pruned events past retention");
+    }
+    Ok(pruned)
 }
 
 /// Recompute region_buckets and baselines from events by running the
@@ -1028,7 +1075,8 @@ mod tests {
             IngestReport {
                 inserted: 3,
                 duplicates: 0,
-                failures: 1
+                failures: 1,
+                pruned: 0,
             }
         );
 
@@ -1079,6 +1127,64 @@ mod tests {
         let (total, rows) = store.ingest_log(10).wait().unwrap();
         assert_eq!(total, 1);
         assert!(rows[0].reason.contains("coordinates out of range"));
+    }
+
+    #[test]
+    fn retention_prunes_old_events_but_keeps_recent_baselines_warm() {
+        let store = open_mem();
+        // 40 days of daily attention at one cell: 2 records/day in the 06–12
+        // slot (07:00). Spread across days so pruning has something to remove.
+        let mut events = Vec::new();
+        let day0 = Utc.with_ymd_and_hms(2026, 6, 1, 7, 0, 0).unwrap();
+        let mut seq = 0u32;
+        for d in 0..40 {
+            for _ in 0..2 {
+                let mut e = sample_event(seq, EventKind::NewsAttention, 7, 100);
+                e.ts_utc = day0 + chrono::Duration::days(d);
+                e.id = event_id(SourceId::Fixtures, &format!("evt-{seq}"));
+                e.source_event_id = format!("evt-{seq}");
+                events.push(e);
+                seq += 1;
+            }
+        }
+
+        // No retention: all 80 events, nothing pruned.
+        let r = store.ingest(events.clone(), vec![]).wait().unwrap();
+        assert_eq!(r.inserted, 80);
+        assert_eq!(r.pruned, 0);
+
+        // Enable 30-day retention and re-ingest (all dedupe; prune then runs).
+        // Newest event is day 39 (07:00); cutoff = day 9 (07:00). Days 0–8 are
+        // strictly older ⇒ 9 days × 2 = 18 events pruned.
+        store.set_retention(Some(30));
+        let r2 = store.ingest(events.clone(), vec![]).wait().unwrap();
+        assert_eq!(r2.inserted, 0);
+        assert_eq!(r2.duplicates, 80);
+        assert_eq!(r2.pruned, 18);
+
+        // Extent now starts at day 9; 62 events (31 days × 2) remain.
+        let (min_ts, _max) = store.time_extent().wait().unwrap().unwrap();
+        assert_eq!(min_ts, (day0 + chrono::Duration::days(9)).timestamp());
+
+        // Baselines stay warm: with 31 retained days behind the newest bucket,
+        // the trailing 28-day median for the 06–12 slot is still full (28) and
+        // reads 2 records/6 h — retention ≥ 28 days preserves this.
+        let base = store.baselines(100).wait().unwrap();
+        let slot1 = base.iter().find(|r| r.tod_bucket == 1).unwrap();
+        assert_eq!(slot1.sample_days, 28);
+        assert!((slot1.baseline - 2.0).abs() < 1e-9);
+
+        // Steady state: the online loop only re-sends recent (forward-moving)
+        // data, never events already past the cap. Re-ingesting an in-window
+        // slice dedupes and prunes nothing.
+        let recent: Vec<_> = events
+            .iter()
+            .filter(|e| e.ts_utc >= day0 + chrono::Duration::days(35))
+            .cloned()
+            .collect();
+        let r3 = store.ingest(recent, vec![]).wait().unwrap();
+        assert_eq!(r3.inserted, 0);
+        assert_eq!(r3.pruned, 0);
     }
 
     #[test]

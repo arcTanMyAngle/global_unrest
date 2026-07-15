@@ -161,6 +161,37 @@ impl App {
                     )
                     .changed();
 
+                let retention_label = match self.retention_days {
+                    Some(d) => format!("retention: {d}d"),
+                    None => "retention: keep all".to_string(),
+                };
+                ui.menu_button(retention_label, |ui| {
+                    ui.label(
+                        RichText::new("Cap the events table (online volumes ~100k/day).")
+                            .color(TEXT_DIM)
+                            .small(),
+                    );
+                    let mut choice = self.retention_days;
+                    let changed = ui
+                        .selectable_value(&mut choice, None, "keep everything")
+                        .clicked()
+                        | ui.selectable_value(&mut choice, Some(30), "30 days")
+                            .clicked()
+                        | ui.selectable_value(&mut choice, Some(60), "60 days")
+                            .clicked()
+                        | ui.selectable_value(&mut choice, Some(90), "90 days")
+                            .clicked();
+                    ui.label(
+                        RichText::new("≥ 30 days keeps the 28-day baselines fully warm.")
+                            .color(TEXT_DIM)
+                            .small(),
+                    );
+                    if changed {
+                        self.set_retention(choice);
+                        ui.close();
+                    }
+                });
+
                 if ui.button("reset view").clicked() {
                     self.map.viewport = None;
                 }
@@ -309,12 +340,23 @@ impl App {
             }
             Phase::Ready => {
                 if let Some(r) = self.ingest_report {
-                    ui.label(format!(
+                    let mut line = format!(
                         "{} events stored ({} new, {} duplicate)",
                         r.inserted + r.duplicates,
                         r.inserted,
                         r.duplicates
-                    ));
+                    );
+                    if r.pruned > 0 {
+                        line.push_str(&format!(", {} pruned", r.pruned));
+                    }
+                    ui.label(line);
+                }
+                if let Some(days) = self.retention_days {
+                    ui.label(
+                        RichText::new(format!("retention: {days} days"))
+                            .color(TEXT_DIM)
+                            .small(),
+                    );
                 }
                 if let Some((total, _)) = &self.ingest_log {
                     let label = format!("{total} records in ingest log");
