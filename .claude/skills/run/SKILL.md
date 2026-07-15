@@ -12,7 +12,27 @@ cargo run -p global-signal-desktop        # must run from workspace root (finds 
 
 No network needed. Env overrides: `LES_FIXTURES_DIR`, `LES_DATA_DIR`,
 `RUST_LOG` (e.g. `info`), `WGPU_BACKEND` (dx12/vulkan/gl) for driver issues.
+M3 live-mode knobs: `LES_ONLINE=1` (auto-start live GDELT), `LES_RETENTION_DAYS`,
+`LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` (point the loop at a mock).
 Reset all state: delete `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`.
+
+## Verify M3 graceful degradation headlessly (no clicks)
+
+The network-kill path is verifiable **without synthetic input**: auto-start
+online mode and point the loop at a dead port, then confirm the app keeps its
+cached fixtures and logs a degraded state.
+
+```powershell
+$env:LES_ONLINE = "1"
+$env:LES_GDELT_DOC_ENDPOINT = "http://127.0.0.1:9/api/v2/doc/doc"
+$env:LES_GDELT_EVENTS_URL   = "http://127.0.0.1:9/gdeltv2/lastupdate.txt"
+$env:RUST_LOG = "info"
+# launch as above, Start-Sleep 8, then grep the stderr log:
+#   expect "ingest complete inserted=11043" (cached data present) and
+#   WARN "gdelt fetch failed; degraded, showing cached data … retry_in_s=…"
+```
+
+Success (real GDELT reachable) would instead log `gdelt cycle ok records=…`.
 
 Expected startup logs (RUST_LOG=info): basemap tessellated (~10.6k
 vertices), fixtures fetched (3 files, ~11k records), fixtures normalized
