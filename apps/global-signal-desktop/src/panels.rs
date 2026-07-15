@@ -22,6 +22,26 @@ fn fmt_ts(epoch_s: i64) -> String {
         .unwrap_or_else(|| format!("t={epoch_s}"))
 }
 
+/// Compact relative time vs. `now` (both epoch seconds): "12s ago", "in 14m".
+fn fmt_relative(epoch_s: i64, now: i64) -> String {
+    let d = epoch_s - now;
+    let mag = d.unsigned_abs();
+    let unit = if mag < 60 {
+        format!("{mag}s")
+    } else if mag < 3600 {
+        format!("{}m", mag / 60)
+    } else if mag < 86_400 {
+        format!("{}h", mag / 3600)
+    } else {
+        format!("{}d", mag / 86_400)
+    };
+    if d < 0 {
+        format!("{unit} ago")
+    } else {
+        format!("in {unit}")
+    }
+}
+
 /// Small amber low-confidence badge.
 fn badge(ui: &mut egui::Ui, text: &str) {
     ui.label(
@@ -376,8 +396,77 @@ impl App {
                 if let Some(status) = &self.export_status {
                     ui.label(RichText::new(status).color(TEXT_DIM).small());
                 }
+                self.live_source_panel(ui);
             }
         }
+    }
+
+    /// Live GDELT source indicator: online/degraded state, last & next fetch,
+    /// and attribution. When a fetch fails the app keeps showing cached data
+    /// and this panel makes the degraded state explicit (M3 acceptance).
+    fn live_source_panel(&self, ui: &mut egui::Ui) {
+        let Some(s) = &self.source_status else {
+            return;
+        };
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(RichText::new("Live source — GDELT").strong());
+
+        if !s.online {
+            ui.label(
+                RichText::new("offline · fixture data only")
+                    .color(TEXT_DIM)
+                    .small(),
+            );
+            return;
+        }
+
+        let (dot, color, state) = if s.degraded {
+            (
+                "▲",
+                Color32::from_rgb(255, 170, 90),
+                "degraded — showing cached data",
+            )
+        } else {
+            ("●", Color32::from_rgb(120, 210, 140), "online")
+        };
+        ui.horizontal(|ui| {
+            ui.colored_label(color, dot);
+            ui.label(RichText::new(state).color(color));
+        });
+        ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
+
+        let now = chrono::Utc::now().timestamp();
+        if let Some(t) = s.last_attempt_epoch_s {
+            ui.label(
+                RichText::new(format!(
+                    "last fetch: {} ({})",
+                    fmt_ts(t),
+                    fmt_relative(t, now)
+                ))
+                .color(TEXT_DIM)
+                .small(),
+            );
+        }
+        if let Some(t) = s.last_success_epoch_s {
+            ui.label(
+                RichText::new(format!("last success: {}", fmt_relative(t, now)))
+                    .color(TEXT_DIM)
+                    .small(),
+            );
+        }
+        if let Some(t) = s.next_attempt_epoch_s {
+            ui.label(
+                RichText::new(format!("next fetch: {}", fmt_relative(t, now)))
+                    .color(TEXT_DIM)
+                    .small(),
+            );
+        }
+        ui.label(
+            RichText::new("Data: GDELT Project — free to use with attribution.")
+                .color(TEXT_DIM)
+                .small(),
+        );
     }
 
     fn inspector_selection(&mut self, ui: &mut egui::Ui, cell: u64) {

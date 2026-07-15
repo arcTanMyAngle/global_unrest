@@ -57,6 +57,9 @@ impl GdeltSource {
     pub fn new() -> Result<Self, SourceError> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("live-earth-signals/", env!("CARGO_PKG_VERSION")))
+            // Bound stalls so a dead network degrades promptly instead of hanging.
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(45))
             .build()
             .map_err(|e| SourceError::Other(format!("building http client: {e}")))?;
         Ok(Self {

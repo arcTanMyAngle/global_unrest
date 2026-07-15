@@ -249,7 +249,7 @@ impl App {
         let (ingest_rx, ingest_handle) = ingest::spawn(fixtures_dir, move || ctx.request_repaint());
         let phase = Phase::Loading("loading fixtures…".into());
 
-        Ok(Self {
+        let mut app = Self {
             store,
             settings,
             map: MapView::new(basemap, style),
@@ -291,7 +291,13 @@ impl App {
             selected_label: None,
             pending_detail: None,
             detail: None,
-        })
+        };
+
+        // Optional auto-start of live mode (headless verification/automation).
+        if std::env::var("LES_ONLINE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")) {
+            app.set_online(true);
+        }
+        Ok(app)
     }
 
     pub fn total_buckets(&self) -> i64 {

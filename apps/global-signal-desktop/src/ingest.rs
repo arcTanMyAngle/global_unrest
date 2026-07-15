@@ -157,7 +157,17 @@ async fn worker(
     }
 
     // 2. Live GDELT loop, driven by control messages and the feed cadence.
-    let gdelt = GdeltSource::new().ok();
+    // Endpoint env overrides let tests/mocks point the loop at a local server
+    // (and reproduce the network-down path deterministically).
+    let gdelt = GdeltSource::new().ok().map(|mut g| {
+        if let Ok(doc) = std::env::var("LES_GDELT_DOC_ENDPOINT") {
+            g = g.with_endpoint(doc);
+        }
+        if let Ok(events) = std::env::var("LES_GDELT_EVENTS_URL") {
+            g = g.with_events_url(events);
+        }
+        g
+    });
     let limiter = sched::request_limiter();
     let mut backoff = sched::Backoff::default();
     let mut online = false;
@@ -247,6 +257,12 @@ async fn fetch_cycle(
             "degraded — showing cached data · {}",
             errors_summary(&doc_err, &events_err)
         );
+        tracing::warn!(
+            retry_in_s = d.as_secs(),
+            attempt = backoff.attempt(),
+            detail = %status.detail,
+            "gdelt fetch failed; degraded, showing cached data"
+        );
         d
     } else {
         backoff.reset();
@@ -258,6 +274,7 @@ async fn fetch_cycle(
         } else {
             format!("online · {} records · partial: {partial}", events.len())
         };
+        tracing::info!(records = events.len(), detail = %status.detail, "gdelt cycle ok");
         let secs = sched::until_next_slot(
             now.timestamp(),
             sched::FEED_INTERVAL_SECS,
