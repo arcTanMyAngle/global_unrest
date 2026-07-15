@@ -4742,12 +4742,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "core-types",
+ "flate2",
  "geo-utils",
  "reqwest",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "zip",
 ]
 
 [[package]]

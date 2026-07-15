@@ -3,18 +3,19 @@
 //!
 //! Two independent code paths, per the GDELT reality (docs/PLAN.md §5):
 //! - [`doc`] — the DOC 2.0 `artlist` **JSON API**: media-attention
-//!   observations, geocoded to the source country. Implemented here.
-//! - Events 15-minute **CSV-zip dumps**: discrete events with coordinates.
-//!   Lands next (`RawRecord::GdeltEventCsv`).
+//!   observations, geocoded to the source country ([`GdeltSource::fetch`]).
+//! - [`events`] — the 15-minute Events **CSV-zip dumps**: discrete CAMEO
+//!   events with coordinates ([`GdeltSource::fetch_events`]).
 //!
 //! GDELT is free to use **with attribution** (see README and the About panel).
 //! Rate-limiting/backoff and the fetch scheduler arrive with the ingest loop;
 //! this adapter is the fetch + normalize surface those will drive. Parsing and
-//! normalization are pure and fully offline-testable; only [`GdeltSource::fetch`]
-//! touches the network.
+//! normalization are pure and fully offline-testable; only the `fetch*` methods
+//! touch the network.
 
 pub mod country;
 pub mod doc;
+pub mod events;
 
 use core_types::{
     GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
@@ -25,6 +26,9 @@ pub use doc::DocQuery;
 
 /// The public DOC 2.0 endpoint (keyless).
 pub const DOC_ENDPOINT: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
+
+/// Pointer to the current 15-minute Events dump (`<size> <md5> <url>` lines).
+pub const EVENTS_LASTUPDATE_URL: &str = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt";
 
 /// A broad civic-attention default query. Callers can override it; theme
 /// filters passed to [`SignalSource::fetch`] refine it further.
@@ -40,6 +44,7 @@ pub const DEFAULT_QUERY: &str =
 pub struct GdeltSource {
     http: reqwest::Client,
     doc_endpoint: String,
+    events_lastupdate_url: String,
     query: String,
     themes: Vec<String>,
     max_records: u32,
@@ -56,6 +61,7 @@ impl GdeltSource {
         Ok(Self {
             http,
             doc_endpoint: DOC_ENDPOINT.to_owned(),
+            events_lastupdate_url: EVENTS_LASTUPDATE_URL.to_owned(),
             query: DEFAULT_QUERY.to_owned(),
             themes: Vec::new(),
             max_records: doc::MAX_RECORDS,
@@ -76,10 +82,68 @@ impl GdeltSource {
         self
     }
 
+    /// Override the Events `lastupdate.txt` URL (tests point this locally).
+    pub fn with_events_url(mut self, url: impl Into<String>) -> Self {
+        self.events_lastupdate_url = url.into();
+        self
+    }
+
     /// Cap the records requested per DOC call (clamped to `1..=MAX_RECORDS`).
     pub fn with_max_records(mut self, max: u32) -> Self {
         self.max_records = max;
         self
+    }
+
+    /// Fetch the current 15-minute Events dump: read `lastupdate.txt`, pull the
+    /// `export.CSV.zip`, unzip it, and hand back one [`RawRecord::GdeltEventCsv`]
+    /// per row. This is the discrete-event path, independent of DOC. Backfill of
+    /// older dumps (by timestamped URL) is a scheduler concern; this always
+    /// fetches the latest published file.
+    pub async fn fetch_events(&self) -> Result<Vec<RawRecord>, SourceError> {
+        let lastupdate = self.get(&self.events_lastupdate_url).await?;
+        let txt = lastupdate
+            .text()
+            .await
+            .map_err(|e| SourceError::Http(e.to_string()))?;
+        let refs = events::parse_lastupdate(&txt)?;
+        let url = events::export_url(&refs)
+            .ok_or_else(|| SourceError::Other("lastupdate.txt has no export dump".into()))?;
+
+        let bytes = self
+            .get(url)
+            .await?
+            .bytes()
+            .await
+            .map_err(|e| SourceError::Http(e.to_string()))?;
+        let csv = events::unzip_csv(&bytes)?;
+
+        let out: Vec<RawRecord> = events::rows(&csv)
+            .map(|r| RawRecord::GdeltEventCsv(r.to_owned()))
+            .collect();
+        tracing::info!(records = out.len(), "gdelt events fetched");
+        Ok(out)
+    }
+
+    /// GET a URL, mapping a 429 to [`SourceError::RateLimited`] (with any
+    /// `Retry-After`) and other non-2xx to [`SourceError::Http`], so the
+    /// scheduler can back off. Both fetch paths share this.
+    async fn get(&self, url: &str) -> Result<reqwest::Response, SourceError> {
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| SourceError::Http(e.to_string()))?;
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            return Err(SourceError::RateLimited { retry_after_secs });
+        }
+        resp.error_for_status()
+            .map_err(|e| SourceError::Http(e.to_string()))
     }
 
     /// The DOC query this fetch will issue for `window`, incorporating any
@@ -125,26 +189,9 @@ impl SignalSource for GdeltSource {
         let url = query.to_url(&self.doc_endpoint)?;
         tracing::info!(%url, "gdelt doc fetch");
 
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
-
-        // Respect a 429 with its Retry-After so the scheduler can back off.
-        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_secs = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u64>().ok());
-            return Err(SourceError::RateLimited { retry_after_secs });
-        }
-        let resp = resp
-            .error_for_status()
-            .map_err(|e| SourceError::Http(e.to_string()))?;
-        let body = resp
+        let body = self
+            .get(url.as_str())
+            .await?
             .text()
             .await
             .map_err(|e| SourceError::Http(e.to_string()))?;
@@ -161,9 +208,10 @@ impl SignalSource for GdeltSource {
     fn normalize(&self, raw: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
         match raw {
             RawRecord::GdeltDocJson(v) => doc::normalize(v).map(|e| vec![e]),
+            RawRecord::GdeltEventCsv(row) => events::normalize(row),
             other => Err(NormalizeError::InvalidValue {
                 field: "record",
-                detail: format!("gdelt source received a non-DOC record: {other:?}"),
+                detail: format!("gdelt source received a foreign record: {other:?}"),
             }),
         }
     }

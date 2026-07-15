@@ -41,6 +41,9 @@ duckdb = { version = "1.10504.0", features = ["bundled"] }
 earcutr = "0.5"
 eframe = "0.35"
 egui = "0.35"
+# Selects `zip`'s DEFLATE backend: flate2's default rust_backend (miniz_oxide,
+# pure Rust). `zip`'s deflate-flate2 feature pulls flate2 but not a backend.
+flate2 = "1"
 geo = "0.33"
 geojson = "1.0"
 h3o = "0.10"
@@ -52,6 +55,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 url = "2"
+# GDELT Events dumps are single-entry DEFLATE zips; pure-Rust miniz_oxide
+# backend keeps CI OpenSSL/zlib-free. No aes/bzip2/lzma/zstd.
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

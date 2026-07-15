@@ -79,12 +79,19 @@ fn reingest_is_idempotent_by_url() {
 }
 
 #[test]
-fn rejects_non_doc_record() {
-    // The trait dispatch must refuse foreign payloads.
+fn rejects_foreign_record() {
+    // The trait dispatch handles GDELT DOC + Events rows, but must refuse a
+    // record from another source entirely.
     use core_types::SignalSource;
     let src = source_gdelt::GdeltSource::new().unwrap();
     let err = src
-        .normalize(&RawRecord::GdeltEventCsv("0\t1\t2".into()))
+        .normalize(&RawRecord::AcledJson(serde_json::json!({"x": 1})))
         .unwrap_err();
-    assert!(matches!(err, NormalizeError::InvalidValue { .. }));
+    assert!(matches!(
+        err,
+        NormalizeError::InvalidValue {
+            field: "record",
+            ..
+        }
+    ));
 }

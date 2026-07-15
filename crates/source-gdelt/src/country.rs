@@ -114,6 +114,73 @@ const fn c(iso_a3: &'static str, lat: f64, lon: f64) -> Country {
     Country { iso_a3, lat, lon }
 }
 
+/// GDELT **Events** rows carry a FIPS 10-4 country code (`ActionGeo_CountryCode`)
+/// rather than a full name; resolve it to ISO-A3. FIPS codes differ from ISO
+/// in ways that bite (FIPS `AU`=Austria, `AS`=Australia; `CH`=China, `SZ`=
+/// Switzerland; `CI`=Chile), so this is an explicit table. Unknown codes yield
+/// `None` — the caller keeps the row's authoritative lat/lon and leaves
+/// `country_iso` empty rather than guessing.
+pub fn iso3_from_fips(fips: &str) -> Option<&'static str> {
+    let key = fips.trim().to_ascii_uppercase();
+    FIPS.iter().find(|(f, _)| *f == key).map(|(_, iso)| *iso)
+}
+
+/// FIPS 10-4 → ISO-A3 for the same country set as [`TABLE`].
+const FIPS: &[(&str, &str)] = &[
+    ("US", "USA"),
+    ("UK", "GBR"),
+    ("FR", "FRA"),
+    ("GM", "DEU"),
+    ("SP", "ESP"),
+    ("PO", "PRT"),
+    ("IT", "ITA"),
+    ("EI", "IRL"),
+    ("NL", "NLD"),
+    ("BE", "BEL"),
+    ("SZ", "CHE"),
+    ("AU", "AUT"),
+    ("PL", "POL"),
+    ("SW", "SWE"),
+    ("NO", "NOR"),
+    ("FI", "FIN"),
+    ("DA", "DNK"),
+    ("GR", "GRC"),
+    ("UP", "UKR"),
+    ("RS", "RUS"),
+    ("TU", "TUR"),
+    ("EG", "EGY"),
+    ("IS", "ISR"),
+    ("SA", "SAU"),
+    ("AE", "ARE"),
+    ("IR", "IRN"),
+    ("IZ", "IRQ"),
+    ("NI", "NGA"),
+    ("KE", "KEN"),
+    ("ET", "ETH"),
+    ("SF", "ZAF"),
+    ("CH", "CHN"),
+    ("JA", "JPN"),
+    ("KS", "KOR"),
+    ("IN", "IND"),
+    ("PK", "PAK"),
+    ("BG", "BGD"),
+    ("ID", "IDN"),
+    ("RP", "PHL"),
+    ("TH", "THA"),
+    ("VM", "VNM"),
+    ("MY", "MYS"),
+    ("AS", "AUS"),
+    ("NZ", "NZL"),
+    ("FJ", "FJI"),
+    ("CA", "CAN"),
+    ("MX", "MEX"),
+    ("BR", "BRA"),
+    ("AR", "ARG"),
+    ("CI", "CHL"),
+    ("CO", "COL"),
+    ("EZ", "CZE"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +226,27 @@ mod tests {
                 TABLE.iter().any(|(n, _)| n == canon),
                 "alias `{alias}` targets missing canonical `{canon}`"
             );
+        }
+    }
+
+    #[test]
+    fn fips_resolves_to_iso3_including_the_tricky_ones() {
+        assert_eq!(iso3_from_fips("FR"), Some("FRA"));
+        assert_eq!(iso3_from_fips("us"), Some("USA"));
+        // FIPS traps: AU/AS and CH/SZ and CI are famously not ISO.
+        assert_eq!(iso3_from_fips("AU"), Some("AUT")); // Austria, not Australia
+        assert_eq!(iso3_from_fips("AS"), Some("AUS")); // Australia
+        assert_eq!(iso3_from_fips("CH"), Some("CHN")); // China, not Switzerland
+        assert_eq!(iso3_from_fips("SZ"), Some("CHE")); // Switzerland
+        assert_eq!(iso3_from_fips("CI"), Some("CHL")); // Chile
+        assert_eq!(iso3_from_fips("ZZ"), None);
+    }
+
+    #[test]
+    fn every_fips_iso3_is_a_known_iso3() {
+        let known: std::collections::HashSet<&str> = TABLE.iter().map(|(_, c)| c.iso_a3).collect();
+        for (fips, iso) in FIPS {
+            assert!(known.contains(iso), "FIPS `{fips}` -> unknown ISO `{iso}`");
         }
     }
 }
