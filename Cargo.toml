@@ -59,7 +59,9 @@ url = "2"
 # GDELT Events dumps are single-entry DEFLATE zips; pure-Rust miniz_oxide
 # backend keeps CI OpenSSL/zlib-free. No aes/bzip2/lzma/zstd.
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
-tokio = { version = "1.52", features = ["rt", "macros", "sync", "time"] }
+# "net" gives the current-thread runtime its IO driver (reqwest needs it for
+# the live GDELT ingest loop); "rt" only, no multi-thread.
+tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

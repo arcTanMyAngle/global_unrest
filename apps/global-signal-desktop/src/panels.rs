@@ -52,11 +52,29 @@ impl App {
         egui::Panel::top("topbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Live Earth Signals").strong());
-                ui.label(
-                    RichText::new("offline fixture mode")
-                        .color(TEXT_DIM)
-                        .small(),
-                );
+
+                // Live GDELT online toggle. Off = permanent offline fixture
+                // base; on = fixtures + live GDELT ingest on the feed cadence.
+                let mut online = self.online;
+                if ui
+                    .checkbox(&mut online, "GDELT live")
+                    .on_hover_text(
+                        "Fetch live GDELT attention + events (keyless, attributed). \
+                         Fixtures always remain the offline base.",
+                    )
+                    .changed()
+                {
+                    self.set_online(online);
+                }
+                if self.online
+                    && ui
+                        .button("↻")
+                        .on_hover_text("fetch the latest GDELT data now")
+                        .clicked()
+                {
+                    self.fetch_now();
+                }
+                self.source_status_label(ui);
                 ui.separator();
 
                 let mut changed = false;
@@ -158,6 +176,28 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Compact live-source status shown next to the online toggle.
+    fn source_status_label(&self, ui: &mut egui::Ui) {
+        match &self.source_status {
+            Some(s) if s.online => {
+                let (dot, color) = if s.degraded {
+                    ("●", Color32::from_rgb(255, 170, 90))
+                } else {
+                    ("●", Color32::from_rgb(120, 210, 140))
+                };
+                ui.colored_label(color, dot);
+                ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
+            }
+            _ => {
+                ui.label(
+                    RichText::new("offline fixture mode")
+                        .color(TEXT_DIM)
+                        .small(),
+                );
+            }
+        }
     }
 
     pub fn timeline_panel(&mut self, ui: &mut egui::Ui) {

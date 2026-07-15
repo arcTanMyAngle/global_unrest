@@ -6,7 +6,9 @@
 
 use std::sync::mpsc;
 
-use core_types::{BUCKET_SECS, EventKind, RegionBucket, bucket_start_epoch};
+use core_types::{
+    BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, RegionBucket, bucket_start_epoch,
+};
 use geo_utils::CountryIndex;
 use renderer::{BasemapLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
@@ -15,7 +17,7 @@ use storage::{
     SettingsDb, StorageHandle,
 };
 
-use crate::ingest::{self, IngestMsg};
+use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
 use crate::map_view::MapView;
 
 /// Natural Earth 1:110m countries (public domain; attribution in README).
@@ -27,6 +29,9 @@ pub enum Phase {
     Ready,
     Error(String),
 }
+
+/// One normalized batch awaiting ingest (events + normalization failures).
+type Batch = (Vec<GeoTemporalEvent>, Vec<IngestFailure>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeatMetric {
@@ -155,6 +160,14 @@ pub struct App {
 
     pub phase: Phase,
     ingest_rx: Option<mpsc::Receiver<IngestMsg>>,
+    ingest_handle: IngestHandle,
+    /// Batches waiting to be handed to the storage actor (one ingest in flight
+    /// at a time). Fed by fixture load + live GDELT cycles.
+    ingest_queue: std::collections::VecDeque<Batch>,
+    /// Live GDELT online mode; drives the ingest worker.
+    pub online: bool,
+    /// Latest live-source status for the UI.
+    pub source_status: Option<SourceStatus>,
     pending_ingest: Option<Reply<IngestReport>>,
     pub ingest_report: Option<IngestReport>,
     pending_log: Option<Reply<(u64, Vec<IngestLogRow>)>>,
@@ -218,21 +231,13 @@ impl App {
         let settings = SettingsDb::open(&data_dir.join("settings.sqlite"))?;
         let filters: Filters = settings.get("filters")?.unwrap_or_default();
 
-        let (phase, ingest_rx) = match ingest::find_fixtures_dir() {
-            Some(dir) => {
-                let ctx = cc.egui_ctx.clone();
-                let rx = ingest::spawn(dir, move || ctx.request_repaint());
-                (Phase::Loading("loading fixtures…".into()), Some(rx))
-            }
-            None => (
-                Phase::Error(
-                    "fixtures directory not found — set LES_FIXTURES_DIR or run from the \
-                     workspace root"
-                        .into(),
-                ),
-                None,
-            ),
-        };
+        // Always spawn the worker; if fixtures are missing it reports the fatal
+        // error itself (keeps the online-mode handle unconditional).
+        let fixtures_dir =
+            ingest::find_fixtures_dir().unwrap_or_else(|| std::path::PathBuf::from("fixtures"));
+        let ctx = cc.egui_ctx.clone();
+        let (ingest_rx, ingest_handle) = ingest::spawn(fixtures_dir, move || ctx.request_repaint());
+        let phase = Phase::Loading("loading fixtures…".into());
 
         Ok(Self {
             store,
@@ -243,7 +248,11 @@ impl App {
             pending_export: None,
             export_status: None,
             phase,
-            ingest_rx,
+            ingest_rx: Some(ingest_rx),
+            ingest_handle,
+            ingest_queue: std::collections::VecDeque::new(),
+            online: false,
+            source_status: None,
             pending_ingest: None,
             ingest_report: None,
             pending_log: None,
@@ -291,6 +300,17 @@ impl App {
         self.dirty = true;
     }
 
+    /// Toggle live GDELT online mode and tell the ingest worker.
+    pub fn set_online(&mut self, on: bool) {
+        self.online = on;
+        self.ingest_handle.set_online(on);
+    }
+
+    /// Request an immediate live fetch (manual refresh; only acts when online).
+    pub fn fetch_now(&self) {
+        self.ingest_handle.fetch_now();
+    }
+
     /// Kick off a Parquet session export into a fresh timestamped directory
     /// under the app data dir (the M4 handoff layout).
     pub fn start_export(&mut self) {
@@ -308,24 +328,46 @@ impl App {
 
     /// Poll every async reply; drive the phase machine.
     fn poll_async(&mut self) {
-        // 1. Fixture load finished → hand records to the storage actor.
+        // 1a. Drain all worker messages: queue batches, apply status, note a
+        // fatal fixture failure. The worker stays alive for live GDELT cycles.
         if let Some(rx) = &self.ingest_rx {
-            match rx.try_recv() {
-                Ok(IngestMsg::Loaded { events, failures }) => {
-                    self.phase = Phase::Loading("storing events…".into());
-                    self.pending_ingest = Some(self.store.ingest(events, failures));
-                    self.ingest_rx = None;
-                }
-                Ok(IngestMsg::Failed(msg)) => {
-                    self.phase = Phase::Error(msg);
-                    self.ingest_rx = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.phase = Phase::Error("ingest thread died".into());
-                    self.ingest_rx = None;
+            loop {
+                match rx.try_recv() {
+                    Ok(IngestMsg::Loaded {
+                        events,
+                        failures,
+                        origin,
+                    }) => {
+                        tracing::debug!(origin, events = events.len(), "batch queued for ingest");
+                        self.ingest_queue.push_back((events, failures));
+                    }
+                    Ok(IngestMsg::Status(status)) => {
+                        self.online = status.online;
+                        self.source_status = Some(status);
+                    }
+                    Ok(IngestMsg::Failed(msg)) => {
+                        if !matches!(self.phase, Phase::Ready) {
+                            self.phase = Phase::Error(msg);
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.ingest_rx = None;
+                        break;
+                    }
                 }
             }
+        }
+
+        // 1b. One ingest in flight at a time: hand the next queued batch to the
+        // storage actor. New live batches wait their turn (no double-ingest).
+        if self.pending_ingest.is_none()
+            && let Some((events, failures)) = self.ingest_queue.pop_front()
+        {
+            if !matches!(self.phase, Phase::Ready) {
+                self.phase = Phase::Loading("storing events…".into());
+            }
+            self.pending_ingest = Some(self.store.ingest(events, failures));
         }
 
         // 2. Storage ingest finished → learn the data extent + failure log.

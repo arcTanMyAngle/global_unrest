@@ -35,9 +35,13 @@ pub const FEED_LAG_SECS: i64 = 90;
 /// retries against the server's own windows.
 const JITTER_FRACTION: f64 = 0.5;
 
+/// The concrete direct rate-limiter type callers hold (so they need not name
+/// governor's generics or depend on the crate directly).
+pub type Limiter = DefaultDirectRateLimiter;
+
 /// A direct rate limiter that allows one request per [`MIN_REQUEST_INTERVAL`].
 /// The worker calls `limiter.until_ready().await` before every live request.
-pub fn request_limiter() -> DefaultDirectRateLimiter {
+pub fn request_limiter() -> Limiter {
     let quota = Quota::with_period(MIN_REQUEST_INTERVAL).expect("non-zero request interval");
     RateLimiter::direct(quota)
 }
