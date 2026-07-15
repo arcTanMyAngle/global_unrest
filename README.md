@@ -6,8 +6,10 @@ visualization only: public or properly authorized sources, aggregate-level
 signals, transparent (non-ML) scoring, and a hard separation between "media
 attention" and "verified event data."
 
-**Milestones 1–2 complete: runs 100% offline** from committed synthetic
-fixtures — no network, no API keys. Live GDELT ingestion is M3.
+**Milestones 1–3 complete.** Runs 100% offline from committed synthetic
+fixtures by default (no network, no API keys); **M3 adds optional live GDELT
+ingestion** — keyless, attributed, with a 15-minute fetch cadence, retention,
+and graceful degradation when the network is unavailable.
 
 ## Quickstart
 
@@ -39,6 +41,19 @@ You get a dark world map with:
 
 Pan by dragging, zoom with the scroll wheel, `reset view` in the top bar.
 
+### Live GDELT mode (M3)
+
+Tick **GDELT live** in the top bar to add live data on top of the fixtures
+(fixtures always remain the offline base). The ingest worker polls the GDELT
+DOC 2.0 API (media attention, geocoded to source country) and the 15-minute
+Events dumps (discrete CAMEO events) on the feed cadence, rate-limited and
+politely backed off. `↻` forces an immediate fetch; the inspector's **Live
+source** panel shows last/next fetch and, if the network drops, a *degraded —
+showing cached data* state (the last-known data stays on screen). Cap the
+events table with the **retention** menu (≥ 30 days keeps the 28-day baselines
+warm). No API key is needed. Env knobs: `LES_ONLINE=1` (auto-start live),
+`LES_RETENTION_DAYS`, `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL`.
+
 ## Commands
 
 ```sh
@@ -51,7 +66,7 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 
 | Doc | Contents |
 |---|---|
-| [HANDOFF.md](HANDOFF.md) | Session handoff: current status, M2 task list, known quirks |
+| [HANDOFF.md](HANDOFF.md) | Session handoff: current status, next task list, known quirks |
 | [docs/PLAN.md](docs/PLAN.md) | The approved project plan, with milestone status |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate map, threading model, rendering strategy, single-writer rule |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | `GeoTemporalEvent`, buckets, DuckDB schema, fixtures |
@@ -64,18 +79,23 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 - **M1 ✅** offline fixture pipeline: ingest → DuckDB → map/timeline/inspector
 - **M2 ✅** scoring depth: score components, 28-day median baselines, spike
   detection with cold-start badges, theme filters, Parquet export
-- **M3** live GDELT ingestion (DOC API + 15-min dumps), optional OSM tile layer
+- **M3 ✅** live GDELT ingestion (DOC 2.0 API + 15-min Events dumps),
+  rate-limited fetch loop, retention, dedup, graceful degradation. Optional
+  OSM slippy-tile layer deferred (stretch)
 - **M4** Dockerized services (axum API + ingest worker, Parquet handoff)
 - **M5** ACLED adapter (authorized access only), optional NOAA/AIS/CelesTrak layers
 
 ## Data & attribution
 
-- All current data is **synthetic** fixture data; outlet names use reserved
-  `.example` domains and headlines are tagged `[synthetic]`.
+- Offline (default): all data is **synthetic** fixture data; outlet names use
+  reserved `.example` domains and headlines are tagged `[synthetic]`.
+- Live mode: data is from the **[GDELT Project](https://www.gdeltproject.org/)**,
+  used **with attribution** per its terms (keyless, no redistribution of raw
+  dumps). GDELT DOC attention is geocoded only to the *source country* and is
+  always shown at country precision — an imperfect, coverage-biased proxy.
 - Basemap: [Natural Earth](https://www.naturalearthdata.com/) 1:110m
   countries (public domain).
-- GDELT (M3) is used with attribution per its terms; ACLED (M5) only with
-  registered authorization.
+- ACLED (M5) only with registered authorization.
 
 ## License
 

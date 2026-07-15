@@ -672,20 +672,25 @@ impl App {
             .small(),
         );
         ui.add_space(4.0);
+        let data_note = if self.online {
+            "Media attention is an imperfect, biased proxy — not ground truth. \
+             Attention and event data are computed and shown separately. \
+             Live data: GDELT Project (free, with attribution); synthetic \
+             fixtures remain the offline base."
+        } else {
+            "Media attention is an imperfect, biased proxy — not ground truth. \
+             Attention and event data are computed and shown separately. \
+             All current data is synthetic fixture data."
+        };
+        ui.label(RichText::new(data_note).color(TEXT_DIM).small());
+        ui.add_space(4.0);
         ui.label(
             RichText::new(
-                "Media attention is an imperfect, biased proxy — not ground truth. \
-                 Attention and event data are computed and shown separately. \
-                 All current data is synthetic fixture data.",
+                "Basemap: Natural Earth (public domain). \
+                 Event/attention data: GDELT Project when live.",
             )
             .color(TEXT_DIM)
             .small(),
-        );
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new("Basemap: Natural Earth (public domain).")
-                .color(TEXT_DIM)
-                .small(),
         );
     }
 

@@ -31,6 +31,10 @@ cargo test --workspace
 |---|---|
 | `RUST_LOG` | tracing filter, e.g. `RUST_LOG=global_signal_desktop=debug`. |
 | `WGPU_BACKEND` | Override the wgpu backend (`dx12`, `vulkan`, `gl`) if a driver misbehaves. |
+| `LES_DATA_DIR` / `LES_FIXTURES_DIR` | Override the data dir / fixtures dir. |
+| `LES_ONLINE` | `1`/`true` auto-starts live GDELT mode (headless verification/automation). |
+| `LES_RETENTION_DAYS` | Events retention cap in days (overrides the saved setting; `0`/unset = keep everything). |
+| `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` | Point the live loop at a local/mock server (testing; reproduces the network-down path). |
 | `ACLED_API_KEY` | M5 only; never committed. Lives in your shell or a `.env` (gitignored). |
 
 ## Where data lives
@@ -45,8 +49,9 @@ cargo test --workspace
   `Cargo.toml`. Member crates say `dep.workspace = true`.
 - eframe/egui and wgpu move in lockstep (eframe 0.35 = wgpu 29). egui
   upgrades happen in one dedicated PR, never as a side effect.
-- `source-gdelt` (reqwest etc.) stays dependency-light until M3 so M1 builds
-  fast.
+- `source-gdelt` (M3) uses **reqwest with rustls** (no OpenSSL/native-tls, so
+  CI stays clean on Windows + Linux), `zip`/`flate2` with the pure-Rust
+  miniz_oxide backend for the Events dumps, and `governor` for rate limiting.
 
 ## Build performance notes
 

@@ -1,8 +1,8 @@
 # CLAUDE.md — Live Earth Signals
 
 Desktop-first Rust geospatial dashboard visualizing global news-attention
-and unrest/event signals. Civic-data research/visualization only. Currently
-between **M2 (done, verified 2026-07-14)** and **M3 (GDELT live)** — see
+and unrest/event signals. Civic-data research/visualization only. **M3 (GDELT
+live) done, verified 2026-07-14**; next is **M4 (services)** — see
 [HANDOFF.md](HANDOFF.md) for status and the next task list, and
 [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
@@ -60,10 +60,17 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   tessellated once in lon/lat (`GeoMesh`), screen meshes rebuilt only on
   viewport change (affine mul-add per vertex), world-copy offsets for ±180°.
   Never add per-frame path tessellation.
+- `crates/source-gdelt` — M3 live GDELT: `doc` (DOC 2.0 artlist JSON →
+  country-precision attention), `events` (15-min Events CSV-zip dumps → CAMEO
+  discrete events), `country` (name/FIPS → ISO-A3 + centroid), `sched`
+  (governor rate limiter + backoff + cadence/backfill). Keyless; parse/
+  normalize pure and offline golden-tested, only `fetch*` touch the network.
 - `apps/global-signal-desktop` — eframe 0.35 shell; state machine in
-  `app.rs`, map widget in `map_view.rs`, panels in `panels.rs`, ingest
-  worker in `ingest.rs`. UI thread never blocks on storage.
-- `services/*`, `source-gdelt`, `source-acled` — stubs until M3–M5.
+  `app.rs`, map widget in `map_view.rs`, panels in `panels.rs`. `ingest.rs`
+  is a long-lived worker: fixtures (offline base) + the online GDELT loop.
+  UI thread never blocks on storage; it ingests worker batches (dedup makes
+  re-fetch idempotent).
+- `services/*`, `source-acled` — stubs until M4–M5.
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).
@@ -75,6 +82,11 @@ markers; Country/Admin1 shade regions (enforced in the storage query).
   `rect_stroke` needs `StrokeKind`. eframe 0.35 = wgpu 29 (do not bump wgpu).
 - geojson 1.0: struct variants + `Position` newtype.
 - duckdb `1.10504.0` = DuckDB 1.5.4 (`1.MMmmpp.x` scheme).
+- M3 deps: reqwest 0.12 (**rustls-tls, no default TLS/http2** — keeps CI
+  OpenSSL-free); `zip` 6 with **`deflate-flate2` + a direct `flate2` dep** so
+  the DEFLATE backend (miniz_oxide) is actually selected; `governor` 0.10
+  (`FakeRelativeClock` for deterministic limiter tests). tokio gained `net`
+  for the worker's IO driver.
 - When an API surprises you, read the crate source in
   `~/.cargo/registry/src/index.crates.io-*/<crate>/` before guessing.
 

@@ -3,9 +3,9 @@
 > User-approved 2026-07-13 (original at
 > `~/.claude/plans/prompt-1-md-recursive-rossum.md`; brief at
 > `../prompt_1.md` outside the repo). Vendored so future sessions don't
-> depend on machine-local paths. **Status: M0 + M1 + M2 complete
-> 2026-07-14** (§12-M1 and §12-M2 acceptance verified, M2 partly live +
-> partly via the E2E test; see HANDOFF.md).
+> depend on machine-local paths. **Status: M0 + M1 + M2 + M3 complete
+> 2026-07-14** (§12-M1/M2/M3 acceptance verified; the walkers slippy-tile
+> stretch in §11 step 7 is deferred — see HANDOFF.md). Next: M4 (services).
 > Version pins in §3 were correct as of 2026-07; re-verify before bumping.
 
 ## Context
@@ -132,11 +132,12 @@ permanent supported path. See [DEVELOPMENT.md](DEVELOPMENT.md).
 - **M2 — Scoring depth** ✅ components, baselines, spike, confidence
   badges, topic filters, source-diversity, Parquet export (M4-compatible
   partitioning), golden tests, criterion benches.
-- **M3 — GDELT live** ⬅ next: DOC JSON + CSV-zip ingestion,
-  scheduling/backfill, dedup, retention (~100k events/day), walkers tile
-  layer (online mode).
-- **M4 — Services**: API contract before the split; axum api + worker in
-  Docker Compose; Parquet handoff.
+- **M3 — GDELT live** ✅ DOC JSON + Events CSV-zip ingestion,
+  rate-limit/backoff scheduling, dedup, retention (~100k events/day),
+  online-mode toggle + status + graceful degradation. Walkers tile layer
+  deferred (stretch; see HANDOFF).
+- **M4 — Services** ⬅ next: API contract before the split; axum api + worker
+  in Docker Compose; Parquet handoff.
 - **M5 — ACLED + optional layers**: feature-gated ACLED (authorized key
   only), optional NOAA/AIS/CelesTrak.
 
@@ -151,7 +152,7 @@ permanent supported path. See [DEVELOPMENT.md](DEVELOPMENT.md).
 - **M2**: each score component individually visible; golden tests match
   hand-computed values; spike cold-start shows low-confidence badge; export
   produces date-partitioned Parquet re-readable by DuckDB.
-- **M3**: live ingest within rate limits; network kill ⇒ graceful cached
+- **M3** ✅ live ingest within rate limits; network kill ⇒ graceful cached
   degradation with status indicator; dedup verified on re-fetch.
 - **M4**: `docker compose up` serves API; desktop consumes it; no
   shared-writer DuckDB anywhere.

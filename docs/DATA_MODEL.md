@@ -44,6 +44,30 @@ middle of a country. The contract, enforced in the renderer: **only `City`
 and `Exact` records render as point markers; `Country` and `Admin1` records
 contribute to region-level shading only.**
 
+## GDELT normalization (M3)
+
+Two independent `source-gdelt` paths produce `GeoTemporalEvent`s (both keyless,
+fallible per record → `ingest_log`):
+
+- **DOC 2.0 `artlist` JSON** → `NewsAttention`. The DOC feed carries no
+  per-article coordinates, so each article is geocoded to its **source
+  country** at `Country` precision (confidence 0.4). This is honest about the
+  feed's granularity and matches the precision rendering contract (country
+  attention shades regions, never fake point hotspots). `source_event_id` is
+  the article URL (stable dedup key). Themes come from the query (a DOC query
+  is usually *for* a theme), lower-cased. Unknown source countries fail per
+  record — never guessed. See `source-gdelt::country`.
+- **Events 2.0 15-minute CSV-zip dumps** → discrete events. Each 61-column row
+  has real `ActionGeo` coordinates; the geo type maps to precision (1=Country,
+  2/5=Admin1, 3/4=City). **Only unrest signals are kept**: CAMEO
+  `EventRootCode` 14 → `Protest`, 15–16 → `Disruption`, 17–20 → `Conflict`;
+  cooperative and low-grade verbal roots are *skipped* (not stored, not
+  failed), which keeps the store focused and bounds volume. `severity` is
+  derived from the Goldstein scale (hostile half → [0,1]); `source_event_id`
+  is `GLOBALEVENTID`; FIPS `ActionGeo_CountryCode` → ISO-A3 via
+  `source-gdelt::country`. Events dumps carry no GKG themes, so `themes` is
+  empty.
+
 ## RegionBucket
 
 Aggregate keyed by `(h3_cell res 3, bucket_start)` with a **6-hour** bucket.
@@ -63,7 +87,10 @@ parents via `geo_utils::cell_parent` at display time). Carries:
 
 - `schema_version(version, applied_at)` — migration ledger.
 - `events` — one row per `GeoTemporalEvent`; `themes`/`outlet_domains`/`urls`
-  stored as JSON text; timestamps as epoch seconds (`BIGINT`).
+  stored as JSON text; timestamps as epoch seconds (`BIGINT`). Under a
+  **retention cap** (M3, online volumes ~100k/day) rows older than *N* days
+  from the newest event are pruned on each ingest before rescoring; a cap ≥ the
+  28-day baseline window keeps recent baselines warm. Default: keep everything.
 - `region_buckets` — recomputed from `events` after every ingest by running
   `analytics::score_buckets` (the single reference implementation — there
   is deliberately no SQL twin to keep in sync).

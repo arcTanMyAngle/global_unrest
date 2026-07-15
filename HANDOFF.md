@@ -1,7 +1,8 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-07-14. **M0 + M1 + M2 complete and verified.**
-Next session starts **Milestone 3** (GDELT live). Read this file, then
+Last session: 2026-07-14. **M0 + M1 + M2 + M3 complete and verified.**
+Next session starts **Milestone 4** (services: axum API + ingest worker in
+Docker Compose, Parquet handoff). Read this file, then
 [CLAUDE.md](CLAUDE.md), then skim [docs/PLAN.md](docs/PLAN.md).
 
 ## Where things stand
@@ -9,112 +10,132 @@ Next session starts **Milestone 3** (GDELT live). Read this file, then
 | | |
 |---|---|
 | Repo | `live-earth-signals/` — git initialized, **no remote yet** (CI workflow committed but dormant until pushed) |
-| Commits | Clean PR-sized commits through M2 (`git log --oneline`), working tree clean |
-| Tests | 72 pass (`cargo test --workspace`), clippy `-D warnings` clean, fmt clean; criterion benches in `crates/analytics/benches` |
-| App | Verified live 2026-07-14: score bars + cold-start badge + baseline hint in inspector, heatmap rollup at world zoom, Parquet export written to disk and confirmed |
+| Commits | Clean PR-sized commits through M3 (`git log --oneline`), working tree clean |
+| Tests | 114 pass (`cargo test --workspace`), clippy `-D warnings` clean, fmt clean; criterion benches in `crates/analytics/benches` |
+| App | Verified 2026-07-14: offline boot loads 11043 fixture events; online mode against a dead endpoint degrades gracefully (cached data stays, "degraded — showing cached data" + backoff) |
 | Brief | `../prompt_1.md` (original project prompt, outside the repo) |
 | Plan | [docs/PLAN.md](docs/PLAN.md) — user-approved plan |
 
-## Milestone 2 acceptance — all met
+## Milestone 3 — done (live GDELT). What shipped
 
-- Every score component individually visible in the inspector (four bars:
-  attention / unrest / spike / combined with its formula), never only the
-  combined number.
-- Golden tests match hand-computed values (`analytics/src/scoring.rs`,
-  `baseline.rs`, full-bucket + compose-window goldens in `lib.rs`).
-- Spike cold start (< 7 days history) forces a neutral spike and shows an
-  amber low-confidence badge (verified live on the first fixture day);
-  second badge for majority-coarse geocoding.
-- Synthetic-series tests: flat ⇒ neutral, burst ⇒ 0.9438 golden, cold ⇒
-  flagged. E2E asserts the scripted Paris spike (days 20–23) > 0.8 and the
-  exact cold-start day boundary.
-- Export produces hive `date=YYYY-MM-DD` Parquet re-read by a fresh DuckDB
-  (roundtrip test + verified live at
-  `%LOCALAPPDATA%\...\data\exports\session-<stamp>\`).
-- Extras shipped: theme filters (vocabulary from data; themed buckets
-  re-scored against the theme's own baseline), source-diversity heat
-  metric, heatmap H3 parent rollup at world zoom, criterion benches
-  (score_buckets 100k ≈ 55 ms).
+Committed as PR-sized steps (see `git log`):
 
-## How M2 scoring works (read before touching analytics/storage)
+1. **`source-gdelt::doc`** — DOC 2.0 `artlist` JSON client: URL builder,
+   response parsing, normalize → `NewsAttention` at **country precision**
+   (DOC gives only the *source country*; honest + matches the precision
+   contract). Golden tests on a committed synthetic `artlist` fixture.
+2. **`source-gdelt::events`** — 15-minute Events CSV-zip dumps:
+   `lastupdate.txt` → unzip (pure-Rust DEFLATE) → 61-column rows → discrete
+   CAMEO events. Keeps only unrest signals (protest/material-conflict), skips
+   cooperative/weak-verbal rows; malformed rows → `ingest_log`. Golden test +
+   `.CSV.zip` roundtrip.
+3. **`source-gdelt::sched`** — `governor` rate limiter + exponential backoff
+   (honors `Retry-After`) + feed-cadence/backfill helpers. Deterministic
+   tests (fake clock).
+4. **App online loop** — `ingest.rs` became a long-lived worker: fixtures
+   (offline base) + a `select!` loop that polls GDELT on cadence and streams
+   incremental batches. `GDELT live` toggle, `↻` fetch-now. Dedup verified
+   (headless acceptance test: re-fetch inserts 0, buckets unchanged).
+5. **Retention** — storage prunes events past *N* days on ingest before
+   rescoring (`IngestReport.pruned`, `set_retention`); ≥ 28 days keeps
+   baselines warm. UI menu + `LES_RETENTION_DAYS`.
+6. **Source status + graceful degradation** — inspector "Live source" panel
+   (state, last/next fetch, attribution); network kill → degraded + cached
+   data + backoff. Verified live on this offline machine.
 
-One reference implementation: `analytics::score_buckets` aggregates events
-and scores each bucket **as of its own end**; spike baselines are trailing
-28-day medians per (cell, time-of-day slot) **as of that bucket's day**
-(replay is honest; early days cold-start). Storage's `rebuild_buckets`
-reads back all events and persists what analytics computes — there is
-deliberately **no SQL scoring twin**. The inspector's window scores come
-from `analytics::compose_window` (recency-weighted vs. window end, empty
-slots dilute attention/unrest but not spike). Full spec: docs/SCORING.md.
+**M3 acceptance (plan §12) — all met**: live ingest within rate limits;
+network kill ⇒ graceful cached degradation with a status indicator; dedup
+verified on re-fetch.
 
-At M3 volumes, note: every ingest re-reads the whole events table and
-rescores (~55 ms per 100k events, measured). Fine for 15-minute batches at
-~100k/day; revisit (incremental scoring) only if retention grows past a few
-million rows.
+### Deferred (optional stretch — not part of §12 acceptance)
 
-## Milestone 3 — next up (GDELT live)
+- **walkers 0.56 slippy-tile online basemap** (plan §11 step 7). Deferred:
+  it needs live OSM tiles (unverifiable on an offline machine), the OSM tile
+  policy must be nailed down first (SAFETY doc has a placeholder row), and
+  walkers renders **Web-Mercator** tiles while our renderer is a cached
+  **equirectangular** layer library — mixing the two projections in one
+  viewport is a real design task, not a drop-in. Pick this up as its own PR
+  when online and when a projection strategy is decided (either reproject our
+  layers to Web Mercator, or keep tiles as a separate optional view).
 
-Per the approved plan §5/§11/§12. Hard rules: respect GDELT rate limits and
-attribution; offline fixture mode remains a permanent supported path; no
-API keys needed (GDELT is keyless). Suggested PR-sized order:
+## How M3 works (read before touching source-gdelt / the ingest loop)
 
-1. `source-gdelt`: DOC 2.0 API client (keyless JSON REST) — query builder,
-   response → `RawRecord::GdeltDocJson`, `normalize()` to `NewsAttention`
-   events (theme lowercase mapping, geo precision mapping like fixtures).
-   Golden tests on committed **synthetic** response fixtures.
-2. `source-gdelt`: Events 15-minute CSV-zip dump path (separate code path —
-   `lastupdate.txt` → zip fetch → CSV rows → `RawRecord::GdeltEventCsv`),
-   normalization to discrete events; malformed rows → `ingest_log`.
-3. Rate limiting + politeness: `governor` (pinned 0.10) + backoff; fetch
-   scheduler in the ingest worker (tokio) with 15-min cadence + manual
-   backfill window.
-4. Incremental ingest loop in the app: online mode toggle; dedup relies on
-   the existing deterministic event ids — verify on re-fetch (acceptance).
-5. Retention: cap events table (~100k/day ⇒ prune beyond N days), settings
-   for retention length; keep baselines meaningful across pruning.
-6. UI: source status indicator (last fetch, next fetch, error/degraded
-   state); network kill ⇒ graceful cached degradation (acceptance).
-7. Optional stretch: `walkers 0.56` slippy-tile layer (online basemap mode;
-   OSM tile policy first — see SAFETY_AND_PRIVACY.md).
-8. Docs: ARCHITECTURE/DATA_MODEL updates, GDELT attribution in README.
+`source-gdelt` has **two independent, keyless paths** and pure, offline-tested
+parsing/normalization; only `GdeltSource::fetch` (DOC) and `fetch_events`
+(dumps) touch the network:
 
-M3 acceptance (plan §12): live ingest within rate limits; network kill ⇒
-graceful cached degradation with status indicator; dedup verified on
-re-fetch.
+- DOC 2.0 artlist JSON → `NewsAttention`, country-precision (source country
+  via `country::resolve`; unknown countries fail per record). Themes come from
+  the query. `source_event_id` = article URL (dedup key).
+- Events 2.0 CSV dumps → discrete events; CAMEO root 14 → Protest, 15–16 →
+  Disruption, 17–20 → Conflict, else skipped (not stored, not failed).
+  Coordinates + geo-type → precision; Goldstein → severity; FIPS → ISO-A3.
+  `source_event_id` = GLOBALEVENTID.
+
+The app worker (`ingest.rs`) rate-limits, fetches DOC (last 60 min,
+overlapping) + the latest Events dump each cycle, normalizes, and hands
+`(events, failures)` to the UI, which ingests them through the storage actor.
+**Storage dedups by event id**, so overlapping re-fetches never double-count.
+On both fetches failing the worker sets a degraded `SourceStatus` and backs
+off; the last-known data stays on screen. Retention pruning runs in
+`do_ingest` before `rebuild_buckets`, so buckets/baselines reflect exactly the
+retained events. Full scoring model unchanged (docs/SCORING.md).
+
+## Milestone 4 — next up (services)
+
+Per the approved plan §7/§10/§11. Hard rule: **DuckDB is single-writer per
+file across processes** — the desktop and services must never share a
+`.duckdb` read-write. The handoff surface is the immutable date-partitioned
+Parquet the M2 export already produces (`StorageHandle::export_parquet`, same
+layout the worker will publish). Suggested PR-sized order:
+
+1. Define the API contract first (types shared via a small crate or an
+   OpenAPI-ish doc) before splitting api/worker.
+2. `services/workers`: ingest worker owns its DuckDB, publishes immutable
+   Parquet partitions (reuse the export layout). Fixtures + GDELT paths reused
+   from the crates.
+3. `services/api`: axum read API over the published Parquet (DuckDB
+   `read_parquet`), no shared writer.
+4. Docker Compose (worker + api; WSL2 on Windows). Keep the desktop a native
+   binary; it can optionally consume the API.
+5. Docs: ARCHITECTURE cross-process section is already written for this.
+
+M4 acceptance (plan §12): `docker compose up` serves the API; the desktop
+consumes it; no shared-writer DuckDB anywhere.
 
 ## Landmines and quirks (learned the hard way)
 
 - **egui 0.35 API**: `App::ui(&mut self, ui, frame)`; unified
-  `egui::Panel::top/bottom/right(id)`; sides use `.default_size`;
-  `CentralPanel::default_margins()`; `smooth_scroll_delta()`;
-  `egui::Window` still takes `&Context`. eframe 0.35 rides **wgpu 29** — do
-  not bump wgpu independently.
-- **duckdb crate** `1.10504.0` = DuckDB 1.5.4 (`1.MMmmpp.x`). Connection is
-  `!Sync` — all access via the storage actor thread. u64 via i64 bit-cast.
-  DuckDB **cannot ALTER TABLE ADD non-null columns** — migration 0002
-  recreates derived tables instead (they rebuild after every ingest).
-- **Parquet COPY**: use `make_timestamp(µs)` for partition dates (timezone-
-  setting independent); target dir must be fresh (timestamped session dirs).
-- **Filters struct is no longer `Copy`** (themes Vec) — clone when saving.
-  `#[serde(default)]` on new filter fields keeps old saved settings loading.
-- **h3o**: accepts out-of-range lat/lon (normalizes) — `geo_utils`
-  range-validates first; parents via `geo_utils::cell_parent` (display
-  only, never stored).
-- App data: `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`
-  (`signals.duckdb`, `settings.sqlite`, `exports/`). `LES_DATA_DIR` /
-  `LES_FIXTURES_DIR` override. `ingest_log` grows 2 rows per app start
-  (planted malformed fixtures re-log; inserts dedupe, the log doesn't).
-- First cold build compiles DuckDB C++ (minutes); it's cached in `target/`
-  — don't `cargo clean` casually.
+  `egui::Panel::top/bottom/right(id)`; `CentralPanel::default_margins()`;
+  `egui::Window` still takes `&Context`; **menu close is `ui.close()`**.
+  eframe 0.35 rides **wgpu 29** — do not bump wgpu independently.
+- **duckdb crate** `1.10504.0` = DuckDB 1.5.4. Connection is `!Sync` — all
+  access via the storage actor thread. u64 via i64 bit-cast. DuckDB **cannot
+  ALTER TABLE ADD non-null columns** — migrations recreate derived tables.
+- **M3 deps**: reqwest 0.12 **rustls-tls, `default-features=false`** (no
+  OpenSSL/native-tls, no http2) keeps CI clean on both OSes; `zip` 6 needs
+  **`deflate-flate2` plus a direct `flate2` dep** or it fails to pick a DEFLATE
+  backend; `governor` 0.10 (`FakeRelativeClock` for tests); tokio needs `net`
+  for the worker's IO driver (`enable_all`).
+- **GDELT DOC has no per-article coordinates** — normalize to source-country
+  precision, never invent a point. Country tables live in
+  `source-gdelt::country` (name→ISO3+centroid and FIPS→ISO3; FIPS≠ISO traps:
+  AU/AS, CH/SZ, CI). Unknown countries fail per record (logged), never guessed.
+- **Retention assumes forward-moving ingest** — the online loop only sends
+  recent windows. Re-sending events already past the cap re-inserts then
+  re-prunes them (churn); don't build a caller that does that.
+- App data: `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`. Env
+  overrides: `LES_DATA_DIR`, `LES_FIXTURES_DIR`, `LES_ONLINE`,
+  `LES_RETENTION_DAYS`, `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL`.
+  `ingest_log` grows 2 rows per app start (planted malformed fixtures re-log).
+- First cold build compiles DuckDB C++ (minutes) plus the reqwest/rustls tree;
+  cached in `target/` — don't `cargo clean` casually.
 - **GUI verification on this machine**: see `.claude/skills/run/SKILL.md`.
-  New lessons from M2 verification: the eframe window may open small and
-  offset — force `ShowWindow(h, 3)` (SW_SHOWMAXIMIZED) before computing
-  click coordinates; `SetForegroundWindow` is blocked by focus-stealing
-  prevention — minimize+re-maximize with an Alt `keybd_event` wrapped
-  around it, and verify with `GetForegroundWindow` before every synthetic
-  click; **if another app keeps taking foreground, the user is at the
-  machine — stop clicking.** Each PowerShell tool call is a fresh process:
-  re-run `Add-Type` every time.
+  The eframe window opens small/offset and `SetForegroundWindow` is blocked by
+  focus-stealing prevention; **if another app keeps taking foreground, the
+  user is at the machine — stop sending input.** For M3 the graceful-
+  degradation path was verified headlessly via `LES_ONLINE=1` +
+  `LES_GDELT_*` pointed at a dead port (no clicks needed).
 
 ## Quality gates (run after every step; CI runs the same)
 

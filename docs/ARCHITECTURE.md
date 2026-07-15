@@ -37,9 +37,16 @@ DuckDB `events` → bucket aggregation (H3 res 3 × 6-hour bucket) →
 - **Storage actor**: one OS thread owning the single DuckDB connection.
   `duckdb::Connection` is `!Sync`; the actor serializes all access. Results
   are sent back over channels and the actor fires a repaint notifier.
-- **Ingest thread**: runs a current-thread tokio runtime because
-  `SignalSource::fetch` is async (live sources need it); fixtures resolve
-  immediately.
+- **Ingest thread**: a long-lived worker with a current-thread tokio runtime.
+  It loads the fixtures once (the permanent offline base) and then, when
+  **online mode** is enabled, runs a `select!` loop driven by control messages
+  (toggle online / fetch now) and the 15-minute feed cadence. Each live cycle
+  is rate-limited (`governor`), fetches GDELT DOC attention + the latest Events
+  dump, normalizes, and streams an incremental batch plus a `SourceStatus` back
+  to the UI. Fetch failures degrade gracefully: the last-known data stays on
+  screen and the worker backs off (exponential + jitter, honoring
+  `Retry-After`). The worker never touches storage — the UI ingests batches, so
+  dedup by event id makes overlapping re-fetches idempotent.
 
 ## Cross-process rule (M4+)
 
@@ -57,7 +64,7 @@ same partitioning so the code is reused, not rewritten.
 | `crates/core-types` | Domain types: `GeoTemporalEvent`, enums, `TimeWindow`, `RegionBucket`, `SignalSource` trait, `RawRecord`. No I/O. |
 | `crates/geo-utils` | Equirectangular viewport math, H3 cell assignment, antimeridian splitting, country point-in-polygon lookup. egui-free. |
 | `crates/source-fixtures` | Offline fixture adapter + `generate-fixtures` bin (35 days of synthetic data). |
-| `crates/source-gdelt` | M3: DOC 2.0 JSON API + 15-minute CSV-zip dump ingestion. Stub until then. |
+| `crates/source-gdelt` | M3 ✅: DOC 2.0 JSON API (`doc`) + 15-minute Events CSV-zip dumps (`events`), country/FIPS geocoding (`country`), and rate-limit/backoff/cadence policy (`sched`). Keyless; parsing/normalization pure and offline-testable, only `fetch*` touch the network. |
 | `crates/source-acled` | M5: feature-gated (`live`), requires registered ACLED authorization. Stub. |
 | `crates/analytics` | Bucket aggregation (M1); scoring, baselines, spike detection (M2). Pure functions. |
 | `crates/storage` | DuckDB actor (migrations, appender, queries, Parquet export) + rusqlite settings DB. |

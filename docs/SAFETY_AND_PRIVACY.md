@@ -40,14 +40,21 @@ features that would push it that way are out of scope by design.
   `attention_score` and `unrest_score` are separate components.
 - **Geocoding bias**: sources frequently geocode to country/admin centroids.
   The precision rendering contract (see DATA_MODEL.md) prevents centroid
-  records from appearing as false point hotspots.
+  records from appearing as false point hotspots. In particular, GDELT **DOC**
+  attention is geocoded only to the *source country* (the publisher's country,
+  not the event's), so it is always emitted at country precision and shades
+  regions only — never a point. GDELT **Events** rows carry real coordinates
+  and render per the contract.
 - **Event taxonomies differ** between sources; `EventKind` is a coarse
   mapping, and per-source provenance is always preserved.
 
 ## Data retention
 
-- Raw source dumps (M3+): configurable retention window; default is to keep
-  only what the analytics tables need.
+- Events table (M3+): a configurable retention window prunes events older than
+  *N* days from the newest event on each ingest (UI menu / `LES_RETENTION_DAYS`;
+  default keep-all offline). A window ≥ the 28-day baseline keeps recent
+  baselines warm. We store only normalized event metadata — never raw GDELT
+  dumps or article bodies.
 - Derived metrics and fixtures: kept indefinitely (they contain no personal
   data).
 - Session Parquet exports are local files created explicitly by the user.
