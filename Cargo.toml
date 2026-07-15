@@ -46,6 +46,7 @@ egui = "0.35"
 flate2 = "1"
 geo = "0.33"
 geojson = "1.0"
+governor = "0.10"
 h3o = "0.10"
 # GDELT live ingestion (M3). rustls (not native-tls) so CI stays OpenSSL-free
 # on both Windows and Linux; no default TLS/http2 pulled in.

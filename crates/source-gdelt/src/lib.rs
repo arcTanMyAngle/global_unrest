@@ -16,6 +16,7 @@
 pub mod country;
 pub mod doc;
 pub mod events;
+pub mod sched;
 
 use core_types::{
     GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
