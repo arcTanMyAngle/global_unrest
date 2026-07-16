@@ -3,10 +3,13 @@
 > User-approved 2026-07-13 (original at
 > `~/.claude/plans/prompt-1-md-recursive-rossum.md`; brief at
 > `../prompt_1.md` outside the repo). Vendored so future sessions don't
-> depend on machine-local paths. **Status: M0 + M1 + M2 + M3 complete
-> 2026-07-14** (§12-M1/M2/M3 acceptance verified; the walkers slippy-tile
-> stretch in §11 step 7 is deferred — see HANDOFF.md). Next: M4 (services).
-> Version pins in §3 were correct as of 2026-07; re-verify before bumping.
+> depend on machine-local paths. **Status: M0–M4 complete** (M0–M3
+> 2026-07-14, M4 2026-07-16; §12-M1/M2/M3/M4 acceptance verified — M4's
+> `docker compose up` path is written but unverified on the dev machine, no
+> docker CLI; worker→api handoff verified natively). The walkers slippy-tile
+> stretch in §11 step 7 is deferred — see HANDOFF.md. Next: M5 (ACLED +
+> optional layers). Version pins in §3 were correct as of 2026-07;
+> re-verify before bumping.
 
 ## Context
 
@@ -136,10 +139,12 @@ permanent supported path. See [DEVELOPMENT.md](DEVELOPMENT.md).
   rate-limit/backoff scheduling, dedup, retention (~100k events/day),
   online-mode toggle + status + graceful degradation. Walkers tile layer
   deferred (stretch; see HANDOFF).
-- **M4 — Services** ⬅ next: API contract before the split; axum api + worker
-  in Docker Compose; Parquet handoff.
-- **M5 — ACLED + optional layers**: feature-gated ACLED (authorized key
-  only), optional NOAA/AIS/CelesTrak.
+- **M4 — Services** ✅ API contract first (docs/API.md), then the axum read
+  api + ingest worker split, Parquet snapshot handoff (versioned `LATEST`
+  pointer, no shared-writer DuckDB), Docker Compose. Worker→api verified
+  natively; `docker compose up` unverified (no docker CLI on the dev box).
+- **M5 — ACLED + optional layers** ⬅ next: feature-gated ACLED (authorized
+  key only), optional NOAA/AIS/CelesTrak.
 
 ## 12. Acceptance criteria
 
@@ -154,8 +159,11 @@ permanent supported path. See [DEVELOPMENT.md](DEVELOPMENT.md).
   produces date-partitioned Parquet re-readable by DuckDB.
 - **M3** ✅ live ingest within rate limits; network kill ⇒ graceful cached
   degradation with status indicator; dedup verified on re-fetch.
-- **M4**: `docker compose up` serves API; desktop consumes it; no
-  shared-writer DuckDB anywhere.
+- **M4** ✅ worker publishes versioned Parquet snapshots; the axum api serves
+  `/health` `/meta` `/buckets` `/events` over them (no shared-writer DuckDB
+  anywhere); `docker compose up` brings up both (compose written, not run on
+  the dev box). Verified natively: worker ingests 11043 fixtures → publishes
+  `v<millis>` with `LATEST`+manifest → api serves real JSON; 400/503 paths hold.
 - **M5**: ACLED compiles out by default; with key, ingests within ToS.
 
 ## 13. Risks & mitigations

@@ -48,14 +48,34 @@ DuckDB `events` → bucket aggregation (H3 res 3 × 6-hour bucket) →
   `Retry-After`). The worker never touches storage — the UI ingests batches, so
   dedup by event id makes overlapping re-fetches idempotent.
 
-## Cross-process rule (M4+)
+## Cross-process rule (M4) — implemented
 
 **DuckDB is single-writer-per-file across processes.** The desktop and the
-services must never share a `.duckdb` file read-write. From M4 on, the worker
-service owns the ingest database and publishes **immutable date-partitioned
-Parquet files** as the handoff surface; the desktop (or the api service)
-queries those Parquet partitions directly. The M2 Parquet export uses this
-same partitioning so the code is reused, not rewritten.
+services never share a `.duckdb` file read-write. The M4 worker service owns
+its own ingest database and publishes **immutable date-partitioned Parquet
+snapshots** as the sole handoff surface; the api service reads those snapshots
+directly. The M2 Parquet export layout is reused (`export_parquet`), not
+rewritten.
+
+```
+┌── services/workers ──┐   publish/                    ┌── services/api ──┐
+│ owns worker.duckdb   │   ├── LATEST  (pointer)  ─────│ read-only        │
+│ ingest fixtures+GDELT│──▶│ v<millis>/               │ read_parquet per │
+│ publish_snapshot()   │   │   manifest.json          │ request; 503 til │
+│ after every cycle    │   │   events/date=…/*.parquet│ first snapshot   │
+└──────────────────────┘   │   region_buckets/…       └──────┬───────────┘
+                           │   baselines.parquet             │ GET /health
+   keep_last prunes old ───┤   v<older>/  …                  │ /meta /buckets
+   version dirs            └──────────────────────────       ▼ /events (JSON)
+```
+
+`StorageHandle::publish_snapshot(root, keep_last)` writes a new `v<millis>/`
+directory (same hive-partitioned shape as `export_parquet`) plus a
+`manifest.json`, then atomically repoints `root/LATEST` via
+write-temp-then-rename (atomic on Windows and POSIX). Each version directory is
+immutable once published, so the api reads it lock-free: every request opens a
+fresh in-memory DuckDB, resolves `LATEST`, and runs `read_parquet(...)` — it
+never opens a `.duckdb` file. Contract and endpoints: [API.md](API.md).
 
 ## Crate map
 
@@ -70,7 +90,8 @@ same partitioning so the code is reused, not rewritten.
 | `crates/storage` | DuckDB actor (migrations, appender, queries, Parquet export) + rusqlite settings DB. |
 | `crates/renderer` | egui **layer library** (not a wgpu engine): cached-mesh basemap/heatmap/marker layers. |
 | `apps/global-signal-desktop` | eframe shell wiring ingest → storage → layers → panels. |
-| `services/api`, `services/workers` | M4 stubs: axum read API and ingest worker. |
+| `services/workers` | M4 ✅: ingest worker owning its own DuckDB; ingests fixtures + live GDELT (reusing `source-gdelt`), publishes a versioned Parquet snapshot after every cycle. |
+| `services/api` | M4 ✅: axum read API (`/health` `/meta` `/buckets` `/events`) over the worker's published snapshots via `read_parquet`; never opens a `.duckdb` file. See [API.md](API.md). |
 
 ## Rendering strategy
 

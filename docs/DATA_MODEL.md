@@ -111,9 +111,23 @@ session-<UTC stamp>/
 ```
 
 Re-readable with `read_parquet('…/**/*.parquet', hive_partitioning=1)`
-(roundtrip-tested). This is the exact layout the M4 worker will publish —
+(roundtrip-tested). This is the exact layout the M4 worker publishes —
 DuckDB is single-writer per file, so Parquet partitions, never a shared
 `.duckdb`, are the process boundary.
+
+**M4 versioned publish** (`StorageHandle::publish_snapshot`, used by
+`services/workers`) wraps this same export in an atomically-swapped snapshot:
+
+```
+{publish_root}/
+  LATEST                  -- text pointer to the current version (atomic rename)
+  v<millis>/
+    manifest.json         -- {version, published_at_epoch_s, events, buckets, baselines}
+    events/ region_buckets/ baselines.parquet   -- the export layout above
+```
+
+`services/api` reads only these snapshots (docs/API.md); older versions are
+pruned past `keep_last`.
 
 ## SQLite (settings.db)
 

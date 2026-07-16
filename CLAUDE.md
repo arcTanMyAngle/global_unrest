@@ -1,10 +1,10 @@
 # CLAUDE.md — Live Earth Signals
 
 Desktop-first Rust geospatial dashboard visualizing global news-attention
-and unrest/event signals. Civic-data research/visualization only. **M3 (GDELT
-live) done, verified 2026-07-14**; next is **M4 (services)** — see
-[HANDOFF.md](HANDOFF.md) for status and the next task list, and
-[docs/PLAN.md](docs/PLAN.md) for the approved plan.
+and unrest/event signals. Civic-data research/visualization only. **M4
+(services) done, verified 2026-07-16**; next is **M5 (ACLED + optional
+layers)** — see [HANDOFF.md](HANDOFF.md) for status and the next task list,
+and [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
 ## Commands
 
@@ -15,7 +15,17 @@ cargo fmt --all --check                                # gate 1
 cargo clippy --workspace --all-targets -- -D warnings  # gate 2
 cargo run -p source-fixtures --bin generate-fixtures   # regenerate fixtures (deterministic; commit result)
 cargo test -p global-signal-desktop --test pipeline    # E2E acceptance test
+cargo run -p workers                                   # M4 ingest worker (publishes Parquet snapshots)
+cargo run -p api                                       # M4 read API (needs LES_PUBLISH_DIR)
+docker compose up                                      # M4 worker + api stack (WSL2 on Windows)
 ```
+
+M4 services env: worker reads `LES_WORKER_DATA_DIR` (its own DuckDB),
+`LES_PUBLISH_DIR` (snapshot root), `LES_FIXTURES_DIR`, `LES_RETENTION_DAYS`,
+`LES_PUBLISH_KEEP_LAST`, `LES_ONLINE` (defaults **on**; `0` = fixtures only).
+api reads `LES_PUBLISH_DIR` + `LES_API_BIND`. Never point the api at a
+`.duckdb` file or share the worker's DB — Parquet snapshots are the only
+handoff (docs/API.md).
 
 Run all three gates after every change. First cold build compiles bundled
 DuckDB C++ (several minutes) — never `cargo clean` casually.
@@ -70,7 +80,13 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   is a long-lived worker: fixtures (offline base) + the online GDELT loop.
   UI thread never blocks on storage; it ingests worker batches (dedup makes
   re-fetch idempotent).
-- `services/*`, `source-acled` — stubs until M4–M5.
+- `services/workers` — M4 ingest worker binary: owns its own DuckDB, ingests
+  fixtures + live GDELT (same `source-gdelt` loop as the desktop), and calls
+  `StorageHandle::publish_snapshot` after every cycle.
+- `services/api` — M4 axum read API over the worker's published Parquet
+  snapshots (`/health` `/meta` `/buckets` `/events`); ephemeral in-memory
+  DuckDB `read_parquet` per request, never a `.duckdb` file (docs/API.md).
+- `source-acled` — stub until M5 (feature-gated, authorized key only).
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).
@@ -87,6 +103,10 @@ markers; Country/Admin1 shade regions (enforced in the storage query).
   the DEFLATE backend (miniz_oxide) is actually selected; `governor` 0.10
   (`FakeRelativeClock` for deterministic limiter tests). tokio gained `net`
   for the worker's IO driver.
+- M4 deps: `axum` 0.8 (services/api only). The api uses `spawn_blocking` for
+  every DuckDB call (the connection is `!Sync` and blocking); each request
+  opens a throwaway in-memory connection — no shared connection, no cache.
+  Docker builds need `cmake` in the builder image (bundled DuckDB C++).
 - When an API surprises you, read the crate source in
   `~/.cargo/registry/src/index.crates.io-*/<crate>/` before guessing.
 
