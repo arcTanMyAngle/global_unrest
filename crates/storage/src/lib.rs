@@ -124,6 +124,22 @@ pub struct ExportReport {
     pub baselines: u64,
 }
 
+/// Result of a versioned snapshot publish under a publish root (M4 handoff:
+/// `services/workers` calls this; `services/api` reads the `LATEST` pointer
+/// it writes). See docs/API.md.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishReport {
+    /// Snapshot version directory name, e.g. `v1752624000123`.
+    pub version: String,
+    /// `{root}/{version}` — the same hive-partitioned layout as
+    /// [`ExportReport`]/`export_parquet`.
+    pub dir: PathBuf,
+    pub events: u64,
+    pub buckets: u64,
+    pub baselines: u64,
+    pub published_at_epoch_s: i64,
+}
+
 /// One persisted baseline row (trailing median as of the newest data day).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BaselineDbRow {
@@ -180,6 +196,11 @@ enum Cmd {
     ExportParquet {
         dir: PathBuf,
         reply: mpsc::Sender<Result<ExportReport, StorageError>>,
+    },
+    PublishSnapshot {
+        root: PathBuf,
+        keep_last: Option<usize>,
+        reply: mpsc::Sender<Result<PublishReport, StorageError>>,
     },
     Shutdown,
 }
@@ -352,6 +373,27 @@ impl StorageHandle {
         self.send(Cmd::ExportParquet { dir, reply });
         Reply(rx)
     }
+
+    /// Publish the current session as a new versioned snapshot under `root`
+    /// (`{root}/v<millis>/...`), then atomically repoint `{root}/LATEST` at
+    /// it. `keep_last` (`None` = keep all) prunes older version directories
+    /// after a successful publish. This is the M4 cross-process handoff: the
+    /// worker calls this after every ingest cycle, and `services/api` only
+    /// ever reads immutable snapshots this produced — never a `.duckdb` file
+    /// (docs/ARCHITECTURE.md's single-writer rule).
+    pub fn publish_snapshot(
+        &self,
+        root: PathBuf,
+        keep_last: Option<usize>,
+    ) -> Reply<PublishReport> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::PublishSnapshot {
+            root,
+            keep_last,
+            reply,
+        });
+        Reply(rx)
+    }
 }
 
 impl Drop for StorageHandle {
@@ -423,6 +465,13 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
             }
             Cmd::ExportParquet { dir, reply } => {
                 let _ = reply.send(do_export_parquet(&conn, dir));
+            }
+            Cmd::PublishSnapshot {
+                root,
+                keep_last,
+                reply,
+            } => {
+                let _ = reply.send(do_publish_snapshot(&conn, root, keep_last));
             }
             Cmd::Shutdown => break,
         }
@@ -991,6 +1040,96 @@ fn do_export_parquet(conn: &Connection, dir: PathBuf) -> Result<ExportReport, St
     Ok(report)
 }
 
+/// A small JSON sidecar in each snapshot directory — lets `services/api`
+/// answer `/health` from disk alone, no DuckDB read needed.
+#[derive(serde::Serialize)]
+struct SnapshotManifest {
+    version: String,
+    published_at_epoch_s: i64,
+    events: u64,
+    buckets: u64,
+    baselines: u64,
+}
+
+fn do_publish_snapshot(
+    conn: &Connection,
+    root: PathBuf,
+    keep_last: Option<usize>,
+) -> Result<PublishReport, StorageError> {
+    std::fs::create_dir_all(&root)?;
+    let published_at_epoch_s = Utc::now().timestamp();
+    // Millis (not seconds) so two publishes in the same second still land in
+    // distinct, lexicographically-sortable version directories; nudge past
+    // the rare exact-millis collision (e.g. back-to-back test publishes).
+    let mut millis = Utc::now().timestamp_millis();
+    let mut version = format!("v{millis}");
+    while root.join(&version).exists() {
+        millis += 1;
+        version = format!("v{millis}");
+    }
+    let version_dir = root.join(&version);
+
+    let export = do_export_parquet(conn, version_dir.clone())?;
+    let manifest = SnapshotManifest {
+        version: version.clone(),
+        published_at_epoch_s,
+        events: export.events,
+        buckets: export.buckets,
+        baselines: export.baselines,
+    };
+    std::fs::write(
+        version_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+    )?;
+
+    // Atomic pointer flip: write-temp-then-rename replaces `LATEST` in one
+    // filesystem op on both Windows and POSIX, so `services/api` never
+    // observes a half-written pointer.
+    let tmp = root.join(".LATEST.tmp");
+    std::fs::write(&tmp, &version)?;
+    std::fs::rename(&tmp, root.join("LATEST"))?;
+
+    if let Some(keep) = keep_last {
+        prune_old_snapshots(&root, &version, keep)?;
+    }
+
+    tracing::info!(version = %version, events = export.events, "snapshot published");
+    Ok(PublishReport {
+        version,
+        dir: version_dir,
+        events: export.events,
+        buckets: export.buckets,
+        baselines: export.baselines,
+        published_at_epoch_s,
+    })
+}
+
+/// Remove version directories under `root` beyond the newest `keep` (the
+/// just-published `current` version always survives). Best-effort: a failed
+/// removal is logged, not fatal — a stray old snapshot just costs disk.
+fn prune_old_snapshots(
+    root: &std::path::Path,
+    current: &str,
+    keep: usize,
+) -> Result<(), StorageError> {
+    let mut versions: Vec<String> = std::fs::read_dir(root)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| name.starts_with('v'))
+        .collect();
+    versions.sort_unstable();
+    versions.reverse(); // newest first
+    debug_assert_eq!(versions.first().map(String::as_str), Some(current));
+    for stale in versions.into_iter().skip(keep.max(1)) {
+        let path = root.join(&stale);
+        if let Err(e) = std::fs::remove_dir_all(&path) {
+            tracing::warn!(version = %stale, error = %e, "failed to prune old snapshot");
+        }
+    }
+    Ok(())
+}
+
 /// Convenience used by the ingest pipeline: normalize a batch of raw records
 /// with a source, partitioning successes and failures.
 pub fn partition_normalized<S: core_types::SignalSource>(
@@ -1375,6 +1514,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(baselines, 8);
+    }
+
+    #[test]
+    fn publish_snapshot_versions_latest_pointer_and_prunes() {
+        let store = open_mem();
+        store
+            .ingest(vec![sample_event(60, EventKind::Protest, 1, 500)], vec![])
+            .wait()
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("publish");
+
+        let first = store
+            .publish_snapshot(root.clone(), Some(2))
+            .wait()
+            .unwrap();
+        assert_eq!(first.events, 1);
+        assert!(root.join(&first.version).join("manifest.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(root.join("LATEST")).unwrap(),
+            first.version
+        );
+
+        // A second publish repoints LATEST and both versions survive (keep_last=2).
+        let second = store
+            .publish_snapshot(root.clone(), Some(2))
+            .wait()
+            .unwrap();
+        assert_ne!(first.version, second.version);
+        assert_eq!(
+            std::fs::read_to_string(root.join("LATEST")).unwrap(),
+            second.version
+        );
+        assert!(root.join(&first.version).is_dir());
+
+        // A third publish with keep_last=1 prunes everything but itself.
+        let third = store
+            .publish_snapshot(root.clone(), Some(1))
+            .wait()
+            .unwrap();
+        assert!(!root.join(&first.version).exists());
+        assert!(!root.join(&second.version).exists());
+        assert!(root.join(&third.version).is_dir());
+
+        // Re-readable via read_parquet, same as a plain export.
+        let conn = Connection::open_in_memory().unwrap();
+        let glob = format!(
+            "{}/events/**/*.parquet",
+            sql_path(&root.join(&third.version))
+        );
+        let n: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM read_parquet('{glob}', hive_partitioning=1)"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
