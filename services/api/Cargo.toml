@@ -5,10 +5,20 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# M4 crate. The axum read API over published Parquet partitions lands here
-# after the desktop pipeline is proven. Stub until then.
+# M4: axum read API over services/workers' published Parquet snapshots. Only
+# opens ephemeral in-memory DuckDB connections against read_parquet globs —
+# never a .duckdb file (DuckDB is single-writer-per-file, docs/API.md).
 
 [dependencies]
+anyhow.workspace = true
+axum.workspace = true
+core-types.workspace = true
+duckdb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
