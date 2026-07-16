@@ -4923,8 +4923,14 @@ dependencies = [
 name = "source-acled"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "core-types",
- "thiserror 2.0.18",
+ "geo-utils",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

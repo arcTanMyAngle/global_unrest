@@ -1,9 +1,11 @@
 # Build artifacts
 /target/
 
-# Secrets — API keys live in env vars or .env files, never in git
+# Secrets — credentials live in env vars or .env files, never in git
 .env
 .env.*
+# ...except the committed template (contains no secrets)
+!.env.example
 
 # Local databases and data directories
 *.duckdb

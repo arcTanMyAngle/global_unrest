@@ -5,16 +5,28 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# M5 crate. ACLED access requires registered authorization; the live path is
-# feature-gated and compiles out by default. Key comes from ACLED_API_KEY.
+# M5 crate. ACLED access requires a registered myACLED account (OAuth password
+# grant — ACLED retired API keys in 2025, so there is no ACLED_API_KEY). The
+# live path is feature-gated and compiles out by default; credentials come from
+# ACLED_EMAIL/ACLED_PASSWORD env vars, never persisted or logged. Parsing and
+# normalization are pure and offline-testable regardless of the feature.
 
 [features]
 default = []
-live = []
+live = ["dep:reqwest", "dep:url"]
 
 [dependencies]
 core-types.workspace = true
-thiserror.workspace = true
+geo-utils.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+reqwest = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Mock ACLED server for the `live` integration tests (tests/live_mock.rs).
+tokio.workspace = true
 
 [lints]
 workspace = true
