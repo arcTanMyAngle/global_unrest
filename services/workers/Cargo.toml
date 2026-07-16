@@ -5,10 +5,21 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# M4 crate. Scheduled ingest worker that owns the ingest DuckDB and publishes
-# immutable date-partitioned Parquet (the cross-process handoff surface).
+# M4: scheduled ingest worker. Owns its own DuckDB (never shared with the
+# desktop or services/api) and publishes immutable date-partitioned Parquet
+# snapshots — the cross-process handoff surface (docs/API.md).
 
 [dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+core-types.workspace = true
+directories.workspace = true
+source-fixtures.workspace = true
+source-gdelt.workspace = true
+storage.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
