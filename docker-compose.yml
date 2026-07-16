@@ -1,0 +1,46 @@
+# M4: worker (owns the ingest DuckDB, publishes Parquet snapshots) + api
+# (reads only those snapshots). The `publish` volume is the entire
+# cross-process contract — nothing else is shared, and `worker-data` (the
+# worker's .duckdb) is never mounted into the api service.
+#
+# `docker compose up` — desktop dev machines can point LES_DATA_DIR at
+# something else entirely; this stack is independent of the desktop app.
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: services/workers/Dockerfile
+    environment:
+      LES_ONLINE: "1"
+      LES_RETENTION_DAYS: "35"
+      LES_PUBLISH_KEEP_LAST: "3"
+    volumes:
+      - worker-data:/data
+      - publish:/publish
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      LES_PUBLISH_DIR: /publish
+      LES_API_BIND: 0.0.0.0:8080
+    volumes:
+      - publish:/publish:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - worker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  worker-data:
+  publish:
