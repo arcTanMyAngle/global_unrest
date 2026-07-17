@@ -17,7 +17,7 @@ file, then [CLAUDE.md](CLAUDE.md), then skim [docs/PLAN.md](docs/PLAN.md).
 
 | | |
 |---|---|
-| Repo | `live-earth-signals/` — git, **no remote yet**; user approved a **public GitHub repo** (M6) |
+| Repo | `live-earth-signals/` — pushed to the user's **public repo** `github.com/arcTanMyAngle/global_unrest` (HTTPS origin, GCM-cached auth; the sibling `../global_unrest/` folder is an empty clone shell). CI is live on push. |
 | Commits | Clean PR-sized commits through M5 (`git log --oneline`) |
 | Tests | `cargo test --workspace` green; also `cargo test -p source-acled --features live` (mock server); clippy `-D warnings` clean across the feature matrix |
 | Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` — currently **rejected by ACLED** (`invalid_grant`); `.env.example` is the committed template |
@@ -83,7 +83,8 @@ RUST_LOG=info LES_ONLINE=1 \
 
 Part B of the plan file (`continue-to-m5-then-streamed-mochi.md`). Summary:
 
-- **M6 — public repo + CI live**: `gh repo create` (public), branch
+- **M6 — public repo + CI live**: ~~repo~~ **done — pushed to
+  `arcTanMyAngle/global_unrest` (public), CI running**; remaining: branch
   protection; cargo-deny + Dependabot; **CI compose smoke test** (build both
   Docker images on ubuntu, worker fixtures-publish → api `/health` — closes
   the M4 docker gap without local Docker); GHCR images on tags; tag-driven
