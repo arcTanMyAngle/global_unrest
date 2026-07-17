@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# ACLED live ingestion (M5): off by default — the network path and its deps
+# compile out entirely. Requires ACLED_EMAIL/ACLED_PASSWORD env vars at run
+# time (docs/SAFETY_AND_PRIVACY.md: authorized, attributed, not redistributed).
+[features]
+acled-live = ["dep:source-acled", "source-acled/live"]
+
 [dependencies]
 analytics.workspace = true
 anyhow.workspace = true
@@ -17,6 +23,7 @@ geo-utils.workspace = true
 renderer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+source-acled = { workspace = true, optional = true }
 source-fixtures.workspace = true
 source-gdelt.workspace = true
 storage.workspace = true

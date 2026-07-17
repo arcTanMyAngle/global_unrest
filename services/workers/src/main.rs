@@ -24,6 +24,49 @@ use tokio::time::{Instant, sleep_until};
 const DOC_LOOKBACK_MINS: i64 = 60;
 /// Versioned snapshots kept under the publish root unless overridden.
 const DEFAULT_KEEP_LAST_SNAPSHOTS: usize = 3;
+/// ACLED publishes weekly (plus corrections): poll twice a day with a
+/// lookback that absorbs late additions (dedup-by-id makes overlap idempotent).
+const ACLED_POLL_SECS: u64 = 12 * 60 * 60;
+const ACLED_LOOKBACK_DAYS: i64 = 14;
+
+/// Feature-gated ACLED handle; the stub keeps the loop cfg-free (with the
+/// feature off `make()` is always `None` and `source-acled` isn't compiled).
+/// Same pattern as the desktop's `ingest::acled`.
+#[cfg(feature = "acled-live")]
+mod acled {
+    pub use source_acled::AcledSource;
+    pub fn make() -> Result<Option<AcledSource>, core_types::SourceError> {
+        AcledSource::from_env()
+    }
+}
+#[cfg(not(feature = "acled-live"))]
+mod acled {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct AcledSource;
+    pub fn make() -> Result<Option<AcledSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for AcledSource {
+        fn id(&self) -> SourceId {
+            SourceId::Acled
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the acled-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the acled-live feature")
+        }
+    }
+}
+use acled::AcledSource;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -104,13 +147,39 @@ async fn run(
         None
     };
 
+    // ACLED (feature-gated + credentialed) rides the same worker on its own,
+    // much slower cadence.
+    let acled_src = if online {
+        match acled::make() {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!(error = %e, "acled source init failed; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if acled_src.is_some() {
+        tracing::info!("acled source enabled (poll every {}s)", ACLED_POLL_SECS);
+    }
+
     let Some(gdelt) = gdelt else {
+        // Fixtures-only mode never runs live loops, ACLED included.
         return Ok(());
     };
 
     let limiter = sched::request_limiter();
     let mut backoff = sched::Backoff::default();
     let mut next_at = Instant::now();
+    let acled_limiter = sched::request_limiter();
+    // First retry after a minute, capped at an hour — tuned to a twice-daily
+    // poll, not GDELT's 15-minute feed.
+    let mut acled_backoff = sched::Backoff::new(
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(3600),
+    );
+    let mut acled_next = Instant::now();
 
     loop {
         tokio::select! {
@@ -122,9 +191,60 @@ async fn run(
                 let delay = fetch_cycle(&gdelt, &limiter, &mut backoff, &store, &publish_root, keep_last).await;
                 next_at = Instant::now() + delay;
             }
+            _ = sleep_until(acled_next), if acled_src.is_some() => {
+                let acled_src = acled_src.as_ref().unwrap();
+                let delay = acled_cycle(acled_src, &acled_limiter, &mut acled_backoff, &store, &publish_root, keep_last).await;
+                acled_next = Instant::now() + delay;
+            }
         }
     }
     Ok(())
+}
+
+/// One ACLED poll: fetch the lookback window, ingest + republish when it
+/// produced anything, and return the wait before the next attempt.
+async fn acled_cycle(
+    acled: &AcledSource,
+    limiter: &sched::Limiter,
+    backoff: &mut sched::Backoff,
+    store: &StorageHandle,
+    publish_root: &std::path::Path,
+    keep_last: usize,
+) -> std::time::Duration {
+    limiter.until_ready().await;
+
+    let now = Utc::now();
+    let window = TimeWindow::new(now - ChronoDuration::days(ACLED_LOOKBACK_DAYS), now);
+
+    match acled.fetch(window, &SourceFilters::default()).await {
+        Ok(raws) => {
+            let (events, failures) = storage::partition_normalized(acled, &raws);
+            backoff.reset();
+            if !events.is_empty() || !failures.is_empty() {
+                let loaded = events.len();
+                match store.ingest(events, failures).wait() {
+                    Ok(report) => {
+                        tracing::info!(loaded, ?report, "acled cycle ingested");
+                        if let Err(e) = publish(store, publish_root, keep_last) {
+                            tracing::error!(error = %e, "snapshot publish failed");
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, "acled cycle ingest failed"),
+                }
+            }
+            std::time::Duration::from_secs(ACLED_POLL_SECS)
+        }
+        Err(e) => {
+            let d = backoff.after_error(&e, jitter01());
+            tracing::warn!(
+                retry_in_s = d.as_secs(),
+                attempt = backoff.attempt(),
+                error = %e,
+                "acled fetch failed; backing off"
+            );
+            d
+        }
+    }
 }
 
 /// Run one live fetch (DOC attention + Events dump); ingest and republish

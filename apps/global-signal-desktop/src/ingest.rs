@@ -1,7 +1,8 @@
 //! Ingest worker: a long-lived thread with a current-thread tokio runtime
 //! that (1) loads the offline fixtures once at startup and (2) — when online
-//! mode is enabled — polls GDELT on the feed cadence, normalizes, and streams
-//! incremental batches back to the UI.
+//! mode is enabled — polls the live sources on their own cadences (GDELT
+//! every feed interval; ACLED, when built with `acled-live` and credentialed,
+//! twice a day), normalizes, and streams incremental batches back to the UI.
 //!
 //! Fixture mode is the permanent offline base and always loads first; going
 //! online only *adds* live data on top. The UI thread owns storage, so the
@@ -28,9 +29,60 @@ use tokio::time::{Instant, sleep_until};
 /// overlap.
 const DOC_LOOKBACK_MINS: i64 = 60;
 
-/// Live-source status surfaced in the UI.
+/// ACLED publishes weekly (plus corrections), so its loop polls twice a day —
+/// nowhere near the GDELT cadence — and each poll looks back far enough to
+/// absorb late additions. Dedup-by-id makes the overlap idempotent (revisions
+/// that reuse an id are deliberately not re-applied; see HANDOFF.md).
+const ACLED_POLL_SECS: u64 = 12 * 60 * 60;
+const ACLED_LOOKBACK_DAYS: i64 = 14;
+
+/// Feature-gated ACLED handle. The stub keeps the ingest loop cfg-free: with
+/// the feature off `make()` is always `None`, so the ACLED select arm is dead
+/// code that still typechecks, and `source-acled` is not compiled at all.
+#[cfg(feature = "acled-live")]
+mod acled {
+    pub use source_acled::AcledSource;
+    /// Built with the live path; a missing source means missing credentials.
+    pub const BUILT: bool = true;
+    pub fn make() -> Result<Option<AcledSource>, core_types::SourceError> {
+        AcledSource::from_env()
+    }
+}
+#[cfg(not(feature = "acled-live"))]
+mod acled {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct AcledSource;
+    pub const BUILT: bool = false;
+    pub fn make() -> Result<Option<AcledSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for AcledSource {
+        fn id(&self) -> SourceId {
+            SourceId::Acled
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the acled-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the acled-live feature")
+        }
+    }
+}
+use acled::AcledSource;
+
+/// Live-source status surfaced in the UI — one per source, keyed by `name`.
 #[derive(Debug, Clone)]
 pub struct SourceStatus {
+    /// Which live source this line describes ("GDELT", "ACLED").
+    pub name: &'static str,
     pub online: bool,
     pub last_attempt_epoch_s: Option<i64>,
     pub last_success_epoch_s: Option<i64>,
@@ -42,8 +94,9 @@ pub struct SourceStatus {
 }
 
 impl SourceStatus {
-    fn offline() -> Self {
+    fn offline(name: &'static str) -> Self {
         Self {
+            name,
             online: false,
             last_attempt_epoch_s: None,
             last_success_epoch_s: None,
@@ -172,7 +225,32 @@ async fn worker(
     let mut backoff = sched::Backoff::default();
     let mut online = false;
     let mut next_at = Instant::now();
-    let mut status = SourceStatus::offline();
+    let mut status = SourceStatus::offline("GDELT");
+
+    // ACLED (feature-gated): its own source, limiter, backoff, and much
+    // slower cadence. `None` = feature off or no credentials.
+    let acled_src = match acled::make() {
+        Ok(src) => src,
+        Err(e) => {
+            tracing::warn!(error = %e, "acled source init failed; continuing without it");
+            None
+        }
+    };
+    let acled_limiter = sched::request_limiter();
+    // First retry after a minute, capped at an hour — tuned to a twice-daily
+    // poll, not GDELT's 15-minute feed.
+    let mut acled_backoff = sched::Backoff::new(
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(3600),
+    );
+    let mut acled_next = Instant::now();
+    let mut acled_status = SourceStatus::offline("ACLED");
+    if acled::BUILT && acled_src.is_none() {
+        // Built for ACLED but not credentialed: say why the line stays off.
+        acled_status.detail = "off — set ACLED_EMAIL / ACLED_PASSWORD".into();
+        let _ = tx.send(IngestMsg::Status(acled_status.clone()));
+        wake();
+    }
 
     loop {
         tokio::select! {
@@ -181,21 +259,36 @@ async fn worker(
                 Some(Ctl::SetOnline(on)) => {
                     online = on;
                     status.online = on;
+                    acled_status.online = on && acled_src.is_some();
                     if on {
                         status.detail = "online — fetching…".into();
                         next_at = Instant::now(); // fetch promptly
+                        if acled_src.is_some() {
+                            acled_status.detail = "online — fetching…".into();
+                            acled_next = Instant::now();
+                        }
                     } else {
                         backoff.reset();
                         status.degraded = false;
                         status.detail = "offline — fixture data only".into();
                         status.next_attempt_epoch_s = None;
+                        acled_backoff.reset();
+                        acled_status.degraded = false;
+                        acled_status.detail = "offline — fixture data only".into();
+                        acled_status.next_attempt_epoch_s = None;
                     }
                     let _ = tx.send(IngestMsg::Status(status.clone()));
+                    if acled::BUILT {
+                        let _ = tx.send(IngestMsg::Status(acled_status.clone()));
+                    }
                     wake();
                 }
                 Some(Ctl::FetchNow) => {
                     if online {
                         next_at = Instant::now();
+                        if acled_src.is_some() {
+                            acled_next = Instant::now();
+                        }
                     }
                 }
             },
@@ -204,8 +297,68 @@ async fn worker(
                 let delay = fetch_cycle(gdelt, &limiter, &mut backoff, &mut status, &tx, &wake).await;
                 next_at = Instant::now() + delay;
             }
+            _ = sleep_until(acled_next), if online && acled_src.is_some() => {
+                let acled_src = acled_src.as_ref().unwrap();
+                let delay = acled_cycle(acled_src, &acled_limiter, &mut acled_backoff, &mut acled_status, &tx, &wake).await;
+                acled_next = Instant::now() + delay;
+            }
         }
     }
+}
+
+/// One ACLED poll: fetch the lookback window, emit the normalized batch and
+/// an updated status, and return the wait before the next attempt (the poll
+/// interval on success, backoff on failure).
+async fn acled_cycle(
+    acled: &AcledSource,
+    limiter: &sched::Limiter,
+    backoff: &mut sched::Backoff,
+    status: &mut SourceStatus,
+    tx: &mpsc::Sender<IngestMsg>,
+    wake: &impl Fn(),
+) -> std::time::Duration {
+    limiter.until_ready().await;
+
+    let now = Utc::now();
+    status.last_attempt_epoch_s = Some(now.timestamp());
+    let window = TimeWindow::new(now - ChronoDuration::days(ACLED_LOOKBACK_DAYS), now);
+
+    let delay = match acled.fetch(window, &SourceFilters::default()).await {
+        Ok(raws) => {
+            let (events, failures) = storage::partition_normalized(acled, &raws);
+            backoff.reset();
+            status.degraded = false;
+            status.last_success_epoch_s = Some(now.timestamp());
+            status.detail = format!("online · {} records this cycle", events.len());
+            tracing::info!(records = events.len(), "acled cycle ok");
+            if !events.is_empty() || !failures.is_empty() {
+                let _ = tx.send(IngestMsg::Loaded {
+                    events,
+                    failures,
+                    origin: "acled",
+                });
+            }
+            std::time::Duration::from_secs(ACLED_POLL_SECS)
+        }
+        Err(e) => {
+            let d = backoff.after_error(&e, jitter01());
+            status.degraded = true;
+            status.detail = format!("degraded — showing cached data · {e}");
+            tracing::warn!(
+                retry_in_s = d.as_secs(),
+                attempt = backoff.attempt(),
+                error = %e,
+                "acled fetch failed; degraded, showing cached data"
+            );
+            d
+        }
+    };
+
+    status.next_attempt_epoch_s =
+        Some((Utc::now() + ChronoDuration::from_std(delay).unwrap_or_default()).timestamp());
+    let _ = tx.send(IngestMsg::Status(status.clone()));
+    wake();
+    delay
 }
 
 /// Run one live fetch (DOC attention + Events dump), emit any normalized batch

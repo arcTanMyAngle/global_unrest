@@ -164,10 +164,10 @@ pub struct App {
     /// Batches waiting to be handed to the storage actor (one ingest in flight
     /// at a time). Fed by fixture load + live GDELT cycles.
     ingest_queue: std::collections::VecDeque<Batch>,
-    /// Live GDELT online mode; drives the ingest worker.
+    /// Live online mode (all live sources); drives the ingest worker.
     pub online: bool,
-    /// Latest live-source status for the UI.
-    pub source_status: Option<SourceStatus>,
+    /// Latest per-source live status lines for the UI (ordered by name).
+    pub source_statuses: Vec<SourceStatus>,
     /// Events-table retention cap in days (`None` = keep everything). Applied to
     /// the storage actor; persisted in settings.
     pub retention_days: Option<u32>,
@@ -262,7 +262,7 @@ impl App {
             ingest_handle,
             ingest_queue: std::collections::VecDeque::new(),
             online: false,
-            source_status: None,
+            source_statuses: Vec::new(),
             retention_days,
             pending_ingest: None,
             ingest_report: None,
@@ -372,8 +372,21 @@ impl App {
                         self.ingest_queue.push_back((events, failures));
                     }
                     Ok(IngestMsg::Status(status)) => {
-                        self.online = status.online;
-                        self.source_status = Some(status);
+                        // Upsert this source's line; the app-level online flag
+                        // is the aggregate (a credential-less source reporting
+                        // offline must not clear it).
+                        match self
+                            .source_statuses
+                            .iter_mut()
+                            .find(|s| s.name == status.name)
+                        {
+                            Some(slot) => *slot = status,
+                            None => {
+                                self.source_statuses.push(status);
+                                self.source_statuses.sort_by_key(|s| s.name);
+                            }
+                        }
+                        self.online = self.source_statuses.iter().any(|s| s.online);
                     }
                     Ok(IngestMsg::Failed(msg)) => {
                         if !matches!(self.phase, Phase::Ready) {

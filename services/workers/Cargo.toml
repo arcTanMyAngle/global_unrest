@@ -9,7 +9,14 @@ rust-version.workspace = true
 # desktop or services/api) and publishes immutable date-partitioned Parquet
 # snapshots — the cross-process handoff surface (docs/API.md).
 
+# ACLED live ingestion (M5): off by default. Snapshots produced with this
+# feature contain ACLED-derived rows — local/authorized use only, never
+# publicly redistributed (docs/SAFETY_AND_PRIVACY.md).
+[features]
+acled-live = ["dep:source-acled", "source-acled/live"]
+
 [dependencies]
+source-acled = { workspace = true, optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 core-types.workspace = true

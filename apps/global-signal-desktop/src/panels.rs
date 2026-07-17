@@ -77,10 +77,11 @@ impl App {
                 // base; on = fixtures + live GDELT ingest on the feed cadence.
                 let mut online = self.online;
                 if ui
-                    .checkbox(&mut online, "GDELT live")
+                    .checkbox(&mut online, "live")
                     .on_hover_text(
-                        "Fetch live GDELT attention + events (keyless, attributed). \
-                         Fixtures always remain the offline base.",
+                        "Fetch live sources: GDELT (keyless, attributed) and — when \
+                         built with `acled-live` and credentialed — ACLED. Fixtures \
+                         always remain the offline base.",
                     )
                     .changed()
                 {
@@ -89,7 +90,7 @@ impl App {
                 if self.online
                     && ui
                         .button("↻")
-                        .on_hover_text("fetch the latest GDELT data now")
+                        .on_hover_text("fetch the latest live data now")
                         .clicked()
                 {
                     self.fetch_now();
@@ -229,25 +230,27 @@ impl App {
         });
     }
 
-    /// Compact live-source status shown next to the online toggle.
+    /// Compact live-source status shown next to the online toggle: one dot
+    /// per online source (hover for the cycle detail).
     fn source_status_label(&self, ui: &mut egui::Ui) {
-        match &self.source_status {
-            Some(s) if s.online => {
-                let (dot, color) = if s.degraded {
-                    ("●", Color32::from_rgb(255, 170, 90))
-                } else {
-                    ("●", Color32::from_rgb(120, 210, 140))
-                };
-                ui.colored_label(color, dot);
-                ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
-            }
-            _ => {
-                ui.label(
-                    RichText::new("offline fixture mode")
-                        .color(TEXT_DIM)
-                        .small(),
-                );
-            }
+        let mut any_online = false;
+        for s in self.source_statuses.iter().filter(|s| s.online) {
+            any_online = true;
+            let color = if s.degraded {
+                Color32::from_rgb(255, 170, 90)
+            } else {
+                Color32::from_rgb(120, 210, 140)
+            };
+            ui.colored_label(color, "●").on_hover_text(&s.detail);
+            ui.label(RichText::new(s.name).color(TEXT_DIM).small())
+                .on_hover_text(&s.detail);
+        }
+        if !any_online {
+            ui.label(
+                RichText::new("offline fixture mode")
+                    .color(TEXT_DIM)
+                    .small(),
+            );
         }
     }
 
@@ -401,72 +404,74 @@ impl App {
         }
     }
 
-    /// Live GDELT source indicator: online/degraded state, last & next fetch,
-    /// and attribution. When a fetch fails the app keeps showing cached data
-    /// and this panel makes the degraded state explicit (M3 acceptance).
+    /// Live-source indicators, one block per source: online/degraded state,
+    /// last & next fetch, and per-source attribution. When a fetch fails the
+    /// app keeps showing cached data and this panel makes the degraded state
+    /// explicit (M3 acceptance).
     fn live_source_panel(&self, ui: &mut egui::Ui) {
-        let Some(s) = &self.source_status else {
-            return;
-        };
-        ui.add_space(6.0);
-        ui.separator();
-        ui.label(RichText::new("Live source — GDELT").strong());
-
-        if !s.online {
-            ui.label(
-                RichText::new("offline · fixture data only")
-                    .color(TEXT_DIM)
-                    .small(),
-            );
-            return;
-        }
-
-        let (dot, color, state) = if s.degraded {
-            (
-                "▲",
-                Color32::from_rgb(255, 170, 90),
-                "degraded — showing cached data",
-            )
-        } else {
-            ("●", Color32::from_rgb(120, 210, 140), "online")
-        };
-        ui.horizontal(|ui| {
-            ui.colored_label(color, dot);
-            ui.label(RichText::new(state).color(color));
-        });
-        ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
-
         let now = chrono::Utc::now().timestamp();
-        if let Some(t) = s.last_attempt_epoch_s {
-            ui.label(
-                RichText::new(format!(
-                    "last fetch: {} ({})",
-                    fmt_ts(t),
-                    fmt_relative(t, now)
-                ))
-                .color(TEXT_DIM)
-                .small(),
-            );
-        }
-        if let Some(t) = s.last_success_epoch_s {
-            ui.label(
-                RichText::new(format!("last success: {}", fmt_relative(t, now)))
+        for s in &self.source_statuses {
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(RichText::new(format!("Live source — {}", s.name)).strong());
+
+            if !s.online {
+                ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
+                continue;
+            }
+
+            let (dot, color, state) = if s.degraded {
+                (
+                    "▲",
+                    Color32::from_rgb(255, 170, 90),
+                    "degraded — showing cached data",
+                )
+            } else {
+                ("●", Color32::from_rgb(120, 210, 140), "online")
+            };
+            ui.horizontal(|ui| {
+                ui.colored_label(color, dot);
+                ui.label(RichText::new(state).color(color));
+            });
+            ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
+
+            if let Some(t) = s.last_attempt_epoch_s {
+                ui.label(
+                    RichText::new(format!(
+                        "last fetch: {} ({})",
+                        fmt_ts(t),
+                        fmt_relative(t, now)
+                    ))
                     .color(TEXT_DIM)
                     .small(),
-            );
+                );
+            }
+            if let Some(t) = s.last_success_epoch_s {
+                ui.label(
+                    RichText::new(format!("last success: {}", fmt_relative(t, now)))
+                        .color(TEXT_DIM)
+                        .small(),
+                );
+            }
+            if let Some(t) = s.next_attempt_epoch_s {
+                ui.label(
+                    RichText::new(format!("next fetch: {}", fmt_relative(t, now)))
+                        .color(TEXT_DIM)
+                        .small(),
+                );
+            }
+            let attribution = match s.name {
+                "GDELT" => "Data: GDELT Project — free to use with attribution.",
+                "ACLED" => {
+                    "Data: ACLED (acleddata.com) — authorized access; attributed; \
+                     not redistributed."
+                }
+                _ => "",
+            };
+            if !attribution.is_empty() {
+                ui.label(RichText::new(attribution).color(TEXT_DIM).small());
+            }
         }
-        if let Some(t) = s.next_attempt_epoch_s {
-            ui.label(
-                RichText::new(format!("next fetch: {}", fmt_relative(t, now)))
-                    .color(TEXT_DIM)
-                    .small(),
-            );
-        }
-        ui.label(
-            RichText::new("Data: GDELT Project — free to use with attribution.")
-                .color(TEXT_DIM)
-                .small(),
-        );
     }
 
     fn inspector_selection(&mut self, ui: &mut egui::Ui, cell: u64) {
