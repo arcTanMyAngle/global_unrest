@@ -35,7 +35,9 @@ cargo test --workspace
 | `LES_ONLINE` | `1`/`true` auto-starts live GDELT mode (headless verification/automation). |
 | `LES_RETENTION_DAYS` | Events retention cap in days (overrides the saved setting; `0`/unset = keep everything). |
 | `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` | Point the live loop at a local/mock server (testing; reproduces the network-down path). |
-| `ACLED_API_KEY` | M5 only; never committed. Lives in your shell or a `.env` (gitignored). |
+| `ACLED_EMAIL` / `ACLED_PASSWORD` | myACLED OAuth credentials (M5, feature `acled-live`; ACLED retired API keys). Never committed — shell or gitignored `.env` only; see `.env.example`. |
+| `LES_ACLED_TOKEN_URL` / `LES_ACLED_ENDPOINT` | Point the ACLED adapter at a local/mock server (testing). |
+| `LES_NOAA_ENDPOINT` | Point the NOAA alerts adapter at a local/mock server (testing). |
 
 ## Where data lives
 

@@ -1,145 +1,141 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-07-16. **M0 + M1 + M2 + M3 + M4 complete.** M4 verified
-natively (worker→Parquet→api); the `docker compose up` path is written but
-unverified on this dev machine (no docker CLI installed). Next session starts
-**Milestone 5** (ACLED behind a cargo feature + authorized key; optional
-NOAA/AIS/CelesTrak layers). Read this file, then [CLAUDE.md](CLAUDE.md), then
-skim [docs/PLAN.md](docs/PLAN.md) and [docs/API.md](docs/API.md).
+Last session: 2026-07-17. **M0–M5 code-complete.** M5 shipped ACLED
+(feature `acled-live`, myACLED OAuth — **ACLED retired API keys**) and NOAA
+active alerts (feature `noaa-live`, keyless, **live-verified**). Two loose
+ends: (1) the ACLED *live* smoke run is blocked on working myACLED
+credentials — the real OAuth endpoint answered `400 invalid_grant "user
+credentials were incorrect"` for the pair in `.env`, so the user must
+register/verify the account or fix the password; (2) M4's
+`docker compose up` remains unverified locally (no docker CLI) — plan is to
+close it with a CI compose smoke test. Next: the **professional-level
+roadmap** (M6 public GitHub repo + CI live + releases; see the plan file
+`~/.claude/plans/continue-to-m5-then-streamed-mochi.md`, Part B). Read this
+file, then [CLAUDE.md](CLAUDE.md), then skim [docs/PLAN.md](docs/PLAN.md).
 
 ## Where things stand
 
 | | |
 |---|---|
-| Repo | `live-earth-signals/` — git initialized, **no remote yet** (CI workflow committed but dormant until pushed) |
-| Commits | Clean PR-sized commits through M4 (`git log --oneline`), working tree clean |
-| Tests | `cargo test --workspace` green; clippy `-D warnings` clean; fmt clean |
-| App | Desktop verified 2026-07-14 (offline + graceful degradation). M4 services verified 2026-07-16 (below). |
-| Brief | `../prompt_1.md` (original project prompt, outside the repo) |
-| Plan | [docs/PLAN.md](docs/PLAN.md) — user-approved plan; [docs/API.md](docs/API.md) — M4 API contract |
+| Repo | `live-earth-signals/` — git, **no remote yet**; user approved a **public GitHub repo** (M6) |
+| Commits | Clean PR-sized commits through M5 (`git log --oneline`) |
+| Tests | `cargo test --workspace` green; also `cargo test -p source-acled --features live` (mock server); clippy `-D warnings` clean across the feature matrix |
+| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` — currently **rejected by ACLED** (`invalid_grant`); `.env.example` is the committed template |
+| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); roadmap Part B in the plan file above |
 
-## Milestone 4 — done (services). What shipped
+## Milestone 5 — what shipped (PR-sized commits)
 
-Committed as PR-sized steps (see `git log`):
+1. **`source-acled` live adapter** — ACLED's 2025+ access model: OAuth
+   password grant (`https://acleddata.com/oauth/token`, `client_id=acled`,
+   `scope=authenticated`) → 24 h bearer + 14 d refresh, cached in memory,
+   401 → one re-auth; windowed paged reads
+   (`event_date=a|b`+`event_date_where=BETWEEN`, `limit`≤5000, `page` loop
+   capped at `MAX_PAGES`); 429 → `SourceError::RateLimited` for the shared
+   `sched::Backoff`. Pure `normalize_event` (always compiled): fixture-
+   compatible kind/precision/severity mappings, numeric `iso` → alpha-3 via
+   a full ISO 3166-1 table (`iso3.rs`; unknown codes → empty `country_iso`,
+   e.g. Kosovo=0), **`notes` never read** (metadata-only + no
+   redistribution). Mock-server tests cover auth/caching/re-auth/paging/429
+   (`tests/live_mock.rs`, hand-rolled tokio TCP server).
+2. **Wiring** — both ingest loops (desktop `ingest.rs`, `services/workers`)
+   gained the source behind `acled-live` with a cfg-free stub when off
+   (`make()` → `None`; `source-acled` not compiled). Own cadence: 12 h poll,
+   14-day lookback, backoff capped at 1 h. Desktop status is now
+   **per-source** (`SourceStatus.name`, upserted `Vec` in the app, aggregate
+   `online` = any) with per-source attribution lines; missing creds show as
+   "off — set ACLED_EMAIL / ACLED_PASSWORD".
+3. **`source-noaa`** — keyless api.weather.gov active alerts (feature
+   `noaa-live`, `LES_NOAA_ENDPOINT` override): `Disruption` at the polygon
+   centroid, Admin1 precision (shading only), NWS severity scale → 0..1,
+   `country_iso="USA"`, admin1 from the UGC state prefix. **Zone-scoped
+   alerts (no polygon) yield zero events by design** — never guess
+   coordinates. 10-min cadence via a shared generic `live_cycle` (ACLED uses
+   it too; GDELT keeps its bespoke two-feed cycle). New
+   `RawRecord::NoaaAlertJson` + `SourceId::Noaa` in core-types.
+4. **Docs** — SAFETY licensing rows (ACLED OAuth/no-redistribution/
+   corrections caveat; NOAA public-domain/US-only), README attribution,
+   CLAUDE.md, PLAN.md status, DEVELOPMENT.md env table, this file.
 
-1. **`storage::publish_snapshot`** — versioned Parquet publish: exports the
-   session to `{root}/v<millis>/` (reusing the M2 `export_parquet`
-   hive-partitioned layout), writes `manifest.json`, atomically repoints
-   `{root}/LATEST` (write-temp-then-rename). `keep_last` prunes older version
-   dirs. Unit-tested (versioning, LATEST flip, prune, re-read).
-2. **`docs/API.md`** — the read-API contract, written before the api/worker
-   split (endpoints, query params, JSON shapes, error envelope, snapshot
-   layout). Deliberately narrower than the desktop's storage queries —
-   `RegionDetail` and `ingest_log` stay desktop-only.
-3. **`services/workers`** — real ingest worker binary. Owns its **own**
-   DuckDB, ingests the fixture base once, then runs the same `source-gdelt`
-   rate-limit/backoff/cadence loop the desktop uses when online, and calls
-   `publish_snapshot` after every cycle. `LES_ONLINE=0` = fixtures-only
-   (publishes once, exits the live loop).
-4. **`services/api`** — real axum read API binary. `/health` `/meta`
-   `/buckets` `/events` read only the worker's snapshots via the `LATEST`
-   pointer; a fresh in-memory DuckDB `read_parquet` per request (on
-   `spawn_blocking`), never a `.duckdb` file. `503` until the first snapshot;
-   `400` on bad params.
-5. **Docker** — multi-stage Dockerfiles (build context = repo root; `cmake`
-   for bundled DuckDB) + `docker-compose.yml`. The `publish` volume is the
-   whole cross-process contract: rw in the worker, **ro** in the api; the
-   worker's DuckDB volume is never mounted into the api. API healthcheck
-   curls `/health`.
+### How M5 was verified
 
-**M4 acceptance (plan §12) — met (native), Docker unverified**: worker
-publishes versioned Parquet; api serves it with no shared-writer DuckDB; the
-desktop can consume the same snapshots (same `RegionBucket` JSON shape). The
-`docker compose up` orchestration is written but could not be run here —
-**no docker CLI on this machine** — so it needs one verification run on a box
-with Docker/WSL2 before calling it fully closed.
-
-### How M4 was verified (native, no Docker)
+- Gates: fmt, clippy (`-D warnings`) on the default build **and** every
+  feature combination of `acled-live`/`noaa-live` on both binaries, full
+  workspace tests, plus `cargo test -p source-acled --features live`.
+- **NOAA live** (real feed, 2026-07-17): worker with `noaa-live` fetched 612
+  active alerts → 122 polygon events ingested, 0 failures, snapshot
+  published (zone-only alerts correctly yielded nothing).
+- **ACLED**: mock-server suite green; against the **real** endpoints the
+  OAuth exchange is well-formed but the server rejects the credentials
+  (`invalid_grant`) — rerun the recipe below once the account works.
 
 ```sh
-# 1. Worker publishes a snapshot (fixtures only, no network needed):
-LES_ONLINE=0 LES_WORKER_DATA_DIR=<scratch>/data LES_PUBLISH_DIR=<scratch>/publish \
-  LES_FIXTURES_DIR=./fixtures cargo run -p workers
-#   → ingests 11043 fixtures, writes publish/v<millis>/{manifest.json,events/,
-#     region_buckets/,baselines.parquet} and publish/LATEST
-
-# 2. API serves it:
-LES_PUBLISH_DIR=<scratch>/publish LES_API_BIND=127.0.0.1:8080 cargo run -p api
-curl localhost:8080/health   # {"status":"ok","snapshot":{...events:11043...}}
-curl localhost:8080/meta     # time_extent + 22 themes
-curl "localhost:8080/buckets?start=<s>&end=<e>"          # 2839 RegionBucket rows
-curl "localhost:8080/events?start=<s>&end=<e>&kinds=protest"  # kind-filtered points
+# ACLED live smoke (once credentials are valid; bash syntax):
+set -a; . ./.env; set +a
+RUST_LOG=info LES_ONLINE=1 \
+  LES_WORKER_DATA_DIR=<scratch>/data LES_PUBLISH_DIR=<scratch>/publish \
+  LES_FIXTURES_DIR=./fixtures \
+  cargo run -p workers --features acled-live,noaa-live
+# expect: "acled token acquired", "acled fetched", "live cycle ingested origin=acled",
+# snapshot published; then curl the api over that publish dir.
 ```
 
-Confirmed: theme/kind filters, `400` (end≤start, bad kind), `503` (empty
-publish dir before first snapshot).
+## Next up — professional-level roadmap (user-approved)
 
-## Milestone 5 — next up (ACLED + optional layers)
+Part B of the plan file (`continue-to-m5-then-streamed-mochi.md`). Summary:
 
-Per the approved plan §5/§11. Suggested PR-sized order:
-
-1. **ACLED behind a `live` cargo feature** on `source-acled` (compiles out by
-   default; `ACLED_API_KEY` via env var only — never committed). The crate is
-   a stub today (`crates/source-acled`); `RawRecord::AcledJson` already exists
-   in core-types and the `SignalSource` trait is the interface. Authorized
-   access only — respect ToS and rate limits (same discipline as GDELT M3).
-2. Wire ACLED into the desktop ingest loop and the worker behind the same
-   feature flag; keep fixtures the permanent offline base.
-3. **Optional layers** (NOAA / AIS / CelesTrak) as separate feature-gated
-   sources if time allows — each with a fixture/offline path first.
-4. Revisit the **deferred walkers slippy-tile basemap** (see below) if an
-   online-tile design is wanted; still needs the Web-Mercator-vs-
-   equirectangular projection decision.
-
-M5 acceptance (plan §12): ACLED compiles out by default; with a key, ingests
-within ToS.
-
-## Deferred (optional stretch — not part of §12 acceptance)
-
-- **walkers 0.56 slippy-tile online basemap** (plan §11 step 7). Needs live
-  OSM tiles (unverifiable offline), an OSM tile-policy decision (SAFETY doc
-  has a placeholder row), and a projection strategy — walkers renders
-  Web-Mercator tiles while our renderer is a cached equirectangular layer
-  library. Pick this up as its own PR when online and when the projection
-  strategy is decided.
+- **M6 — public repo + CI live**: `gh repo create` (public), branch
+  protection; cargo-deny + Dependabot; **CI compose smoke test** (build both
+  Docker images on ubuntu, worker fixtures-publish → api `/health` — closes
+  the M4 docker gap without local Docker); GHCR images on tags; tag-driven
+  release workflow (Win/Linux/macOS desktop binaries); CHANGELOG
+  (0.5.0 at M5); portfolio README (screenshots via the run skill, diagram,
+  badges); CONTRIBUTING.md. CI should also cover the M5 feature matrix.
+- **M7 — service hardening**: axum middleware (timeouts, concurrency cap,
+  per-IP rate limit, CORS, compression, trace layer, graceful shutdown),
+  snapshot-version ETag, `/events` pagination, OpenAPI via utoipa,
+  Prometheus `/metrics`, snapshot-age alerting in `/health`, integration
+  suite over a committed fixture snapshot. **Never serve ACLED-bearing
+  snapshots publicly** (SAFETY).
+- **M8 — desktop polish + stretch**: walkers slippy-tile basemap (own
+  design pass: Web-Mercator vs equirectangular + OSM tile policy), settings
+  UI (creds stay env-only), About panel attributions, CelesTrak satellites
+  (sgp4) as the thematic stretch, AIS (aisstream.io key) only if wanted,
+  criterion benches in CI.
 
 ## Landmines and quirks (learned the hard way)
 
+- **ACLED auth (M5)**: no API keys anymore — OAuth password grant with
+  `client_id=acled`, `scope=authenticated`; refresh grant on expiry; the
+  token endpoint's `error_description` is surfaced in errors (never the
+  credentials). A `400 invalid_grant` means the account/password is wrong,
+  not the request. ACLED **corrections reuse event ids** — dedup-by-id means
+  revisions are not re-applied (accepted, documented).
+- **NOAA alerts**: most alerts are zone-scoped with `geometry: null` —
+  normalization returns `Ok(vec![])` for them (not an error, not a guess).
+  US coverage only. api.weather.gov wants a descriptive User-Agent.
+- **Feature stubs**: both binaries wrap ACLED/NOAA in tiny cfg modules
+  (`make() -> Option<Source>`) so the select loops stay cfg-free. Clippy the
+  matrix: default, `acled-live`, `noaa-live`, both.
+- **reqwest has no `json` feature here** (lean rustls pin): use
+  `.text()` + `serde_json::from_str`, like source-gdelt.
 - **egui 0.35 API**: `App::ui(&mut self, ui, frame)`; unified
-  `egui::Panel::top/bottom/right(id)`; `CentralPanel::default_margins()`;
-  `egui::Window` still takes `&Context`; **menu close is `ui.close()`**.
+  `egui::Panel::top/bottom/right(id)`; menu close is `ui.close()`.
   eframe 0.35 rides **wgpu 29** — do not bump wgpu independently.
-- **duckdb crate** `1.10504.0` = DuckDB 1.5.4. Connection is `!Sync` — all
-  access via one thread. The **api** honors this by opening a throwaway
-  in-memory connection **inside `spawn_blocking`** per request (no shared
-  connection, no cache to invalidate — snapshots are immutable). u64 via i64
-  bit-cast. DuckDB **cannot ALTER TABLE ADD non-null columns** — migrations
-  recreate derived tables.
-- **Single-writer rule (M4)**: the worker owns its `.duckdb`; the api reads
-  **only** Parquet snapshots. Never mount the worker's DB into the api, and
-  never point `LES_PUBLISH_DIR` at a `.duckdb` file. `LATEST` is flipped by
-  write-temp-then-rename so the api never sees a half-written pointer.
-- **M4 deps**: `axum` 0.8 (services/api only). Docker builds need `cmake` in
-  the builder stage (bundled DuckDB C++ compile — minutes; first cold build
-  also compiles the reqwest/rustls + arrow tree).
-- **M3 deps**: reqwest 0.12 **rustls-tls, `default-features=false`**; `zip` 6
-  needs **`deflate-flate2` + a direct `flate2` dep**; `governor` 0.10; tokio
-  needs `net` for the worker IO driver (`enable_all`).
-- **GDELT DOC has no per-article coordinates** — normalize to source-country
-  precision, never invent a point. Country tables in `source-gdelt::country`
-  (FIPS≠ISO traps: AU/AS, CH/SZ, CI). Events keeps only CAMEO roots 14–20.
-- **Retention assumes forward-moving ingest** — the online loop only sends
-  recent windows. Don't build a caller that re-sends events already past the
-  cap (churn: re-insert then re-prune).
-- Desktop app data: `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`.
-  The **worker** uses a *separate* namespace (`…-worker`) so the two never
-  collide. `ingest_log` grows 2 rows per app start (planted malformed
-  fixtures re-log).
-- First cold build compiles DuckDB C++ (minutes) plus reqwest/rustls/arrow;
-  cached in `target/` — don't `cargo clean` casually.
-- **GUI verification on this machine**: see `.claude/skills/run/SKILL.md`.
-  Focus-stealing prevention blocks `SetForegroundWindow`; **if another app
-  keeps taking foreground, the user is at the machine — stop sending input.**
+- **duckdb crate** `1.10504.0` = DuckDB 1.5.4. Connection `!Sync` — one
+  thread (storage actor); the api opens throwaway in-memory conns inside
+  `spawn_blocking`. No ALTER TABLE ADD non-null columns.
+- **Single-writer rule (M4)**: worker owns its `.duckdb`; api reads only
+  Parquet snapshots via the atomically-flipped `LATEST` pointer.
+- **M3/M4 deps**: reqwest 0.12 rustls `default-features=false`; `zip` 6
+  needs `deflate-flate2` + direct `flate2`; `governor` 0.10; axum 0.8 (api
+  only); Docker builder needs `cmake`.
+- **GDELT DOC has no per-article coordinates** — source-country precision
+  only; FIPS≠ISO traps (AU/AS, CH/SZ, CI); Events keeps CAMEO roots 14–20.
+- Desktop app data: `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`;
+  worker uses `…-worker`. First cold build compiles DuckDB C++ (minutes).
+- **GUI verification on this machine**: `.claude/skills/run/SKILL.md`;
+  focus-stealing prevention applies — if another app keeps taking
+  foreground, the user is at the machine; stop sending input.
 
 ## Quality gates (run after every step; CI runs the same)
 
@@ -147,4 +143,5 @@ within ToS.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test -p source-acled --features live   # M5 mock-server suite
 ```

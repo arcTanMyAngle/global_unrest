@@ -85,7 +85,8 @@ never opens a `.duckdb` file. Contract and endpoints: [API.md](API.md).
 | `crates/geo-utils` | Equirectangular viewport math, H3 cell assignment, antimeridian splitting, country point-in-polygon lookup. egui-free. |
 | `crates/source-fixtures` | Offline fixture adapter + `generate-fixtures` bin (35 days of synthetic data). |
 | `crates/source-gdelt` | M3 ✅: DOC 2.0 JSON API (`doc`) + 15-minute Events CSV-zip dumps (`events`), country/FIPS geocoding (`country`), and rate-limit/backoff/cadence policy (`sched`). Keyless; parsing/normalization pure and offline-testable, only `fetch*` touch the network. |
-| `crates/source-acled` | M5: feature-gated (`live`), requires registered ACLED authorization. Stub. |
+| `crates/source-acled` | M5: feature-gated (`live`) ACLED adapter — OAuth password/refresh grants (`ACLED_EMAIL`/`ACLED_PASSWORD`), paged windowed reads, pure normalization that never stores `notes`. |
+| `crates/source-noaa` | M5: feature-gated (`live`) NOAA/NWS active alerts — keyless, US coverage; polygon alerts only (zone-scoped alerts yield no events). |
 | `crates/analytics` | Bucket aggregation (M1); scoring, baselines, spike detection (M2). Pure functions. |
 | `crates/storage` | DuckDB actor (migrations, appender, queries, Parquet export) + rusqlite settings DB. |
 | `crates/renderer` | egui **layer library** (not a wgpu engine): cached-mesh basemap/heatmap/marker layers. |

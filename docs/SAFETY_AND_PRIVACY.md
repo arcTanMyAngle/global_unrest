@@ -28,7 +28,8 @@ features that would push it that way are out of scope by design.
 | Source | Terms we rely on | Notes |
 |---|---|---|
 | GDELT | Free for use with attribution | Keyless public API/dumps; attribute in README and UI About. |
-| ACLED | Registered authorization required | Feature-gated (`live` in `source-acled`), compiled out by default; no redistribution of raw ACLED data; key via `ACLED_API_KEY`. |
+| ACLED | Registered authorization required (myACLED account) | Feature-gated (`acled-live`), compiled out by default. OAuth password grant — ACLED retired API keys; credentials via `ACLED_EMAIL`/`ACLED_PASSWORD` env vars only. **No redistribution of raw ACLED data**: the `notes` narrative is never stored, only structural metadata, and worker snapshots containing ACLED rows are for local/authorized use — never served publicly. Attribution: "Armed Conflict Location & Event Data Project (ACLED); acleddata.com" (UI status panel + README). ACLED *corrections* reuse event ids and are not re-applied by dedup (documented limitation). |
+| NOAA/NWS active alerts | US-government public domain | Feature-gated (`noaa-live`), keyless; descriptive `User-Agent` per api.weather.gov policy. **US + territories coverage only** — a documented coverage bias, not a global weather layer. Zone-scoped alerts without polygon geometry yield no events (we never guess coordinates). |
 | Natural Earth | Public domain | Attributed anyway (basemap credit). |
 | OSM tiles (M3+, optional) | OSM tile usage policy | Documented before the tile layer lands; offline mode never touches them. |
 | Fixtures | Fully synthetic | Reserved `.example` outlet domains; imitates schemas, not publications. |

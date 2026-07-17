@@ -82,8 +82,10 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 - **M3 ✅** live GDELT ingestion (DOC 2.0 API + 15-min Events dumps),
   rate-limited fetch loop, retention, dedup, graceful degradation. Optional
   OSM slippy-tile layer deferred (stretch)
-- **M4** Dockerized services (axum API + ingest worker, Parquet handoff)
-- **M5** ACLED adapter (authorized access only), optional NOAA/AIS/CelesTrak layers
+- **M4 ✅** Dockerized services (axum API + ingest worker, Parquet handoff)
+- **M5 ✅** ACLED adapter (feature `acled-live`, authorized OAuth access only)
+  and NOAA/NWS active-alerts layer (feature `noaa-live`, keyless). AIS /
+  CelesTrak remain backlog stretch layers.
 
 ## Data & attribution
 
@@ -95,7 +97,14 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
   always shown at country precision — an imperfect, coverage-biased proxy.
 - Basemap: [Natural Earth](https://www.naturalearthdata.com/) 1:110m
   countries (public domain).
-- ACLED (M5) only with registered authorization.
+- ACLED (feature `acled-live`): data from the **Armed Conflict Location &
+  Event Data Project (ACLED)**, [acleddata.com](https://acleddata.com) —
+  authorized access only (free myACLED account; OAuth credentials via
+  `ACLED_EMAIL`/`ACLED_PASSWORD` env vars). Used with attribution; raw ACLED
+  data (including event narratives) is never stored or redistributed.
+- NOAA (feature `noaa-live`): **NOAA/NWS active weather alerts**
+  ([api.weather.gov](https://www.weather.gov/documentation/services-web-api)),
+  US-government public domain; US coverage only.
 
 ## License
 

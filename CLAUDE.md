@@ -1,10 +1,12 @@
 # CLAUDE.md — Live Earth Signals
 
 Desktop-first Rust geospatial dashboard visualizing global news-attention
-and unrest/event signals. Civic-data research/visualization only. **M4
-(services) done, verified 2026-07-16**; next is **M5 (ACLED + optional
-layers)** — see [HANDOFF.md](HANDOFF.md) for status and the next task list,
-and [docs/PLAN.md](docs/PLAN.md) for the approved plan.
+and unrest/event signals. Civic-data research/visualization only. **M5
+(ACLED + NOAA layers) code-complete 2026-07-17** — NOAA live-verified; the
+ACLED live smoke run is pending working myACLED credentials. Next: the
+professional-level roadmap (M6 public repo/CI). See [HANDOFF.md](HANDOFF.md)
+for status and the next task list, and [docs/PLAN.md](docs/PLAN.md) for the
+approved plan.
 
 ## Commands
 
@@ -18,7 +20,15 @@ cargo test -p global-signal-desktop --test pipeline    # E2E acceptance test
 cargo run -p workers                                   # M4 ingest worker (publishes Parquet snapshots)
 cargo run -p api                                       # M4 read API (needs LES_PUBLISH_DIR)
 docker compose up                                      # M4 worker + api stack (WSL2 on Windows)
+cargo test -p source-acled --features live             # M5 ACLED mock-server tests
+cargo run -p global-signal-desktop --features acled-live,noaa-live  # desktop with M5 live sources
+cargo run -p workers --features acled-live,noaa-live   # worker with M5 live sources
 ```
+
+M5 live sources are cargo features on both binaries: `acled-live` (needs
+`ACLED_EMAIL`/`ACLED_PASSWORD` — myACLED OAuth; ACLED retired API keys) and
+`noaa-live` (keyless). Both compile out by default; clippy the feature
+matrix when touching ingest loops.
 
 M4 services env: worker reads `LES_WORKER_DATA_DIR` (its own DuckDB),
 `LES_PUBLISH_DIR` (snapshot root), `LES_FIXTURES_DIR`, `LES_RETENTION_DAYS`,
@@ -34,7 +44,9 @@ DuckDB C++ (several minutes) — never `cargo clean` casually.
 
 - Public/authorized data sources only; no scraping restricted sources, no
   bypassing paywalls/auth/rate limits. Live APIs land only in their
-  milestone (GDELT M3, ACLED M5 feature-gated + key via env var).
+  milestone (GDELT M3; ACLED + NOAA M5, feature-gated, credentials via env
+  vars only). ACLED data is never redistributed — `notes` never stored,
+  ACLED-bearing snapshots never served publicly.
 - No person-level identification/tracking/targeting features. Aggregate
   signals only (H3 cells, countries).
 - Store headline/URL/outlet-domain **metadata only**, never article bodies.
@@ -86,7 +98,14 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
 - `services/api` — M4 axum read API over the worker's published Parquet
   snapshots (`/health` `/meta` `/buckets` `/events`); ephemeral in-memory
   DuckDB `read_parquet` per request, never a `.duckdb` file (docs/API.md).
-- `source-acled` — stub until M5 (feature-gated, authorized key only).
+- `crates/source-acled` — M5 live ACLED: OAuth password/refresh grants
+  (`live.rs`, feature `live`), paged windowed reads, pure `normalize_event`
+  (never stores `notes`), full ISO-3166 numeric→alpha3 table (`iso3.rs`).
+  Mock-server tests: `cargo test -p source-acled --features live`.
+- `crates/source-noaa` — M5 NOAA/NWS active alerts (keyless, feature
+  `live`): polygon alerts → `Disruption` at polygon centroid, Admin1
+  precision; zone-only alerts yield zero events by design (never guess
+  coordinates). US coverage only.
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).

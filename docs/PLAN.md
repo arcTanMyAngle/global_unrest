@@ -3,13 +3,17 @@
 > User-approved 2026-07-13 (original at
 > `~/.claude/plans/prompt-1-md-recursive-rossum.md`; brief at
 > `../prompt_1.md` outside the repo). Vendored so future sessions don't
-> depend on machine-local paths. **Status: M0–M4 complete** (M0–M3
-> 2026-07-14, M4 2026-07-16; §12-M1/M2/M3/M4 acceptance verified — M4's
-> `docker compose up` path is written but unverified on the dev machine, no
-> docker CLI; worker→api handoff verified natively). The walkers slippy-tile
-> stretch in §11 step 7 is deferred — see HANDOFF.md. Next: M5 (ACLED +
-> optional layers). Version pins in §3 were correct as of 2026-07;
-> re-verify before bumping.
+> depend on machine-local paths. **Status: M0–M5 complete** (M0–M3
+> 2026-07-14, M4 2026-07-16, M5 2026-07-17; §12 acceptance verified — two
+> loose ends: M4's `docker compose up` is written but unverified locally
+> (no docker CLI; to be closed by a CI compose smoke test), and M5's ACLED
+> *live* smoke run awaits working myACLED credentials — NOAA was verified
+> against the real feed, ACLED against a mock plus the real OAuth endpoint).
+> The walkers slippy-tile stretch in §11 step 7 remains deferred — see
+> HANDOFF.md. Next: professional-level roadmap (M6+: public repo, CI live,
+> releases, hardening). Version pins in §3 were correct as of 2026-07;
+> re-verify before bumping. **Note (2026-07): ACLED retired API keys** —
+> §5's `ACLED_API_KEY` became `ACLED_EMAIL`/`ACLED_PASSWORD` (OAuth).
 
 ## Context
 
@@ -143,8 +147,9 @@ permanent supported path. See [DEVELOPMENT.md](DEVELOPMENT.md).
   api + ingest worker split, Parquet snapshot handoff (versioned `LATEST`
   pointer, no shared-writer DuckDB), Docker Compose. Worker→api verified
   natively; `docker compose up` unverified (no docker CLI on the dev box).
-- **M5 — ACLED + optional layers** ⬅ next: feature-gated ACLED (authorized
-  key only), optional NOAA/AIS/CelesTrak.
+- **M5 — ACLED + optional layers** ✅ feature-gated ACLED (`acled-live`,
+  myACLED OAuth) + NOAA active alerts (`noaa-live`, keyless, live-verified).
+  AIS/CelesTrak stay backlog stretch layers.
 
 ## 12. Acceptance criteria
 
@@ -164,7 +169,11 @@ permanent supported path. See [DEVELOPMENT.md](DEVELOPMENT.md).
   anywhere); `docker compose up` brings up both (compose written, not run on
   the dev box). Verified natively: worker ingests 11043 fixtures → publishes
   `v<millis>` with `LATEST`+manifest → api serves real JSON; 400/503 paths hold.
-- **M5**: ACLED compiles out by default; with key, ingests within ToS.
+- **M5** ✅ ACLED compiles out by default (no deps, no creds touched); with
+  credentials, ingests within ToS (limiter + 12 h cadence + paged reads +
+  attribution + no `notes`/no redistribution). NOAA live-verified (612
+  alerts → 122 polygon events, zero failures). ACLED live smoke pending
+  working credentials (adapter verified against mock + real OAuth endpoint).
 
 ## 13. Risks & mitigations
 
