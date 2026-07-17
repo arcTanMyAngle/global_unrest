@@ -204,8 +204,22 @@ impl AcledSource {
             });
         }
         if !status.is_success() {
+            // Surface the server's own description (e.g. "The user credentials
+            // were incorrect.") — it names the problem without echoing secrets.
+            let detail = resp
+                .text()
+                .await
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .and_then(|v| {
+                    v.get("error_description")
+                        .or_else(|| v.get("error"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
             return Err(SourceError::Http(format!(
-                "acled token endpoint returned {status} — check ACLED_EMAIL/ACLED_PASSWORD"
+                "acled token endpoint returned {status} ({detail}) — check ACLED_EMAIL/ACLED_PASSWORD"
             )));
         }
         let text = resp
