@@ -2135,6 +2135,7 @@ dependencies = [
  "source-acled",
  "source-fixtures",
  "source-gdelt",
+ "source-noaa",
  "storage",
  "tempfile",
  "tokio",
@@ -4965,6 +4966,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "source-noaa"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "core-types",
+ "geo-utils",
+ "reqwest",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "spade"
 version = "2.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6446,6 +6459,7 @@ dependencies = [
  "source-acled",
  "source-fixtures",
  "source-gdelt",
+ "source-noaa",
  "storage",
  "tokio",
  "tracing",

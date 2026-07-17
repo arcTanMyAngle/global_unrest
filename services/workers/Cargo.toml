@@ -14,9 +14,12 @@ rust-version.workspace = true
 # publicly redistributed (docs/SAFETY_AND_PRIVACY.md).
 [features]
 acled-live = ["dep:source-acled", "source-acled/live"]
+# NOAA/NWS active alerts (M5 optional layer): keyless, US coverage.
+noaa-live = ["dep:source-noaa", "source-noaa/live"]
 
 [dependencies]
 source-acled = { workspace = true, optional = true }
+source-noaa = { workspace = true, optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 core-types.workspace = true

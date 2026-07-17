@@ -28,6 +28,8 @@ const DEFAULT_KEEP_LAST_SNAPSHOTS: usize = 3;
 /// lookback that absorbs late additions (dedup-by-id makes overlap idempotent).
 const ACLED_POLL_SECS: u64 = 12 * 60 * 60;
 const ACLED_LOOKBACK_DAYS: i64 = 14;
+/// NOAA active alerts are a *now* snapshot; poll politely every 10 minutes.
+const NOAA_POLL_SECS: u64 = 10 * 60;
 
 /// Feature-gated ACLED handle; the stub keeps the loop cfg-free (with the
 /// feature off `make()` is always `None` and `source-acled` isn't compiled).
@@ -66,7 +68,43 @@ mod acled {
         }
     }
 }
-use acled::AcledSource;
+
+/// Feature-gated NOAA handle — same stub pattern as [`acled`]; keyless, so
+/// with the feature on `make()` is effectively always `Some`.
+#[cfg(feature = "noaa-live")]
+mod noaa {
+    pub use source_noaa::NoaaSource;
+    pub fn make() -> Result<Option<NoaaSource>, core_types::SourceError> {
+        NoaaSource::from_env().map(Some)
+    }
+}
+#[cfg(not(feature = "noaa-live"))]
+mod noaa {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct NoaaSource;
+    pub fn make() -> Result<Option<NoaaSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for NoaaSource {
+        fn id(&self) -> SourceId {
+            SourceId::Noaa
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the noaa-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the noaa-live feature")
+        }
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -164,8 +202,24 @@ async fn run(
         tracing::info!("acled source enabled (poll every {}s)", ACLED_POLL_SECS);
     }
 
+    // NOAA (feature-gated, keyless): a fast *now*-snapshot feed.
+    let noaa_src = if online {
+        match noaa::make() {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!(error = %e, "noaa source init failed; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if noaa_src.is_some() {
+        tracing::info!("noaa source enabled (poll every {}s)", NOAA_POLL_SECS);
+    }
+
     let Some(gdelt) = gdelt else {
-        // Fixtures-only mode never runs live loops, ACLED included.
+        // Fixtures-only mode never runs live loops, ACLED/NOAA included.
         return Ok(());
     };
 
@@ -180,6 +234,9 @@ async fn run(
         std::time::Duration::from_secs(3600),
     );
     let mut acled_next = Instant::now();
+    let noaa_limiter = sched::request_limiter();
+    let mut noaa_backoff = sched::Backoff::default();
+    let mut noaa_next = Instant::now();
 
     loop {
         tokio::select! {
@@ -193,18 +250,34 @@ async fn run(
             }
             _ = sleep_until(acled_next), if acled_src.is_some() => {
                 let acled_src = acled_src.as_ref().unwrap();
-                let delay = acled_cycle(acled_src, &acled_limiter, &mut acled_backoff, &store, &publish_root, keep_last).await;
+                let window_span = ChronoDuration::days(ACLED_LOOKBACK_DAYS);
+                let delay = live_cycle(acled_src, "acled", window_span, ACLED_POLL_SECS,
+                    &acled_limiter, &mut acled_backoff, &store, &publish_root, keep_last).await;
                 acled_next = Instant::now() + delay;
+            }
+            _ = sleep_until(noaa_next), if noaa_src.is_some() => {
+                let noaa_src = noaa_src.as_ref().unwrap();
+                // The alerts feed is a now-snapshot; the window is nominal.
+                let window_span = ChronoDuration::hours(1);
+                let delay = live_cycle(noaa_src, "noaa", window_span, NOAA_POLL_SECS,
+                    &noaa_limiter, &mut noaa_backoff, &store, &publish_root, keep_last).await;
+                noaa_next = Instant::now() + delay;
             }
         }
     }
     Ok(())
 }
 
-/// One ACLED poll: fetch the lookback window, ingest + republish when it
-/// produced anything, and return the wait before the next attempt.
-async fn acled_cycle(
-    acled: &AcledSource,
+/// One poll of a simple single-feed live source (ACLED, NOAA): fetch the
+/// lookback window, ingest + republish when it produced anything, and return
+/// the wait before the next attempt (`poll_secs` on success, backoff on
+/// failure). GDELT keeps its bespoke two-feed [`fetch_cycle`].
+#[allow(clippy::too_many_arguments)] // internal plumbing, mirrors fetch_cycle
+async fn live_cycle<S: SignalSource>(
+    src: &S,
+    origin: &'static str,
+    lookback: ChronoDuration,
+    poll_secs: u64,
     limiter: &sched::Limiter,
     backoff: &mut sched::Backoff,
     store: &StorageHandle,
@@ -214,33 +287,34 @@ async fn acled_cycle(
     limiter.until_ready().await;
 
     let now = Utc::now();
-    let window = TimeWindow::new(now - ChronoDuration::days(ACLED_LOOKBACK_DAYS), now);
+    let window = TimeWindow::new(now - lookback, now);
 
-    match acled.fetch(window, &SourceFilters::default()).await {
+    match src.fetch(window, &SourceFilters::default()).await {
         Ok(raws) => {
-            let (events, failures) = storage::partition_normalized(acled, &raws);
+            let (events, failures) = storage::partition_normalized(src, &raws);
             backoff.reset();
             if !events.is_empty() || !failures.is_empty() {
                 let loaded = events.len();
                 match store.ingest(events, failures).wait() {
                     Ok(report) => {
-                        tracing::info!(loaded, ?report, "acled cycle ingested");
+                        tracing::info!(loaded, ?report, origin, "live cycle ingested");
                         if let Err(e) = publish(store, publish_root, keep_last) {
                             tracing::error!(error = %e, "snapshot publish failed");
                         }
                     }
-                    Err(e) => tracing::error!(error = %e, "acled cycle ingest failed"),
+                    Err(e) => tracing::error!(error = %e, origin, "live cycle ingest failed"),
                 }
             }
-            std::time::Duration::from_secs(ACLED_POLL_SECS)
+            std::time::Duration::from_secs(poll_secs)
         }
         Err(e) => {
             let d = backoff.after_error(&e, jitter01());
             tracing::warn!(
                 retry_in_s = d.as_secs(),
                 attempt = backoff.attempt(),
+                origin,
                 error = %e,
-                "acled fetch failed; backing off"
+                "live fetch failed; backing off"
             );
             d
         }

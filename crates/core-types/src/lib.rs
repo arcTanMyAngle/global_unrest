@@ -47,6 +47,7 @@ pub enum SourceId {
     Fixtures,
     Gdelt,
     Acled,
+    Noaa,
 }
 
 impl SourceId {
@@ -55,6 +56,7 @@ impl SourceId {
             SourceId::Fixtures => "fixtures",
             SourceId::Gdelt => "gdelt",
             SourceId::Acled => "acled",
+            SourceId::Noaa => "noaa",
         }
     }
 
@@ -63,6 +65,7 @@ impl SourceId {
             "fixtures" => Some(SourceId::Fixtures),
             "gdelt" => Some(SourceId::Gdelt),
             "acled" => Some(SourceId::Acled),
+            "noaa" => Some(SourceId::Noaa),
             _ => None,
         }
     }
@@ -311,15 +314,18 @@ pub enum RawRecord {
     GdeltEventCsv(String),
     /// One event record from the ACLED API (M5, authorized access only).
     AcledJson(serde_json::Value),
+    /// One GeoJSON alert feature from the NOAA/NWS active-alerts API (M5).
+    NoaaAlertJson(serde_json::Value),
 }
 
 impl RawRecord {
     /// Short excerpt for `ingest_log` (bounded so the log stays small).
     pub fn excerpt(&self, max_len: usize) -> String {
         let full = match self {
-            RawRecord::FixtureJson(v) | RawRecord::GdeltDocJson(v) | RawRecord::AcledJson(v) => {
-                v.to_string()
-            }
+            RawRecord::FixtureJson(v)
+            | RawRecord::GdeltDocJson(v)
+            | RawRecord::AcledJson(v)
+            | RawRecord::NoaaAlertJson(v) => v.to_string(),
             RawRecord::GdeltEventCsv(s) => s.clone(),
         };
         let mut cut = full;

@@ -466,6 +466,10 @@ impl App {
                     "Data: ACLED (acleddata.com) — authorized access; attributed; \
                      not redistributed."
                 }
+                "NOAA" => {
+                    "Data: NOAA/NWS active alerts — US public domain (US coverage \
+                     only)."
+                }
                 _ => "",
             };
             if !attribution.is_empty() {

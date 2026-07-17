@@ -9,6 +9,7 @@ members = [
     "crates/source-acled",
     "crates/source-fixtures",
     "crates/source-gdelt",
+    "crates/source-noaa",
     "crates/storage",
     "services/api",
     "services/workers",
@@ -29,6 +30,7 @@ renderer = { path = "crates/renderer" }
 source-acled = { path = "crates/source-acled" }
 source-fixtures = { path = "crates/source-fixtures" }
 source-gdelt = { path = "crates/source-gdelt" }
+source-noaa = { path = "crates/source-noaa" }
 storage = { path = "crates/storage" }
 
 # External crates — pinned at the workspace level; do not re-declare versions
