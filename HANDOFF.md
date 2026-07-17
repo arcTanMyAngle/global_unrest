@@ -1,19 +1,19 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-07-17. **M0–M5 code-complete.** M5 shipped ACLED
-(feature `acled-live`, myACLED OAuth — **ACLED retired API keys**) and NOAA
-active alerts (feature `noaa-live`, keyless, **live-verified**). Two loose
-ends: (1) **ACLED live data is gated on account tier, not code**: with the
-user's working credentials the adapter acquires a real token (200), but
-`api/acled/read` returns `403 {"message":"Access denied"}` — per ACLED's
-myACLED FAQ, **API access requires the Research/Partner/Enterprise tier
-(institutional email); Open-tier (personal Gmail) accounts have no API
-access**. The adapter's full chain (auth → paged read → normalize → ingest
-→ publish) is otherwise verified via mock + real endpoints, and the worker
-degrades gracefully (token ok → 403 → backoff) while GDELT/NOAA continue.
-To close fully: register with an institutional email or request a tier
-upgrade from ACLED. (2) M4's `docker compose up` remains unverified locally
-(no docker CLI) — plan is to close it with a CI compose smoke test.
+Last session: 2026-07-17. **M0–M5 complete and fully live-verified.** M5
+shipped ACLED (feature `acled-live`, myACLED OAuth — **ACLED retired API
+keys**) and NOAA active alerts (feature `noaa-live`, keyless). **ACLED
+end-to-end live proof (2026-07-17)**: institutional-tier account
+(`.env`, csus.edu) → token → 4 paged reads → **17,560 real events
+normalized with 0 failures** → snapshot → served by the api. Account-tier
+notes that cost hours: personal-email accounts are Open tier = **no API
+access at all** (`403 Access denied` with a valid token); the user's
+institutional account is date-restricted to events **older than 12 months**
+(`data_query_restrictions.date_recency` in every response), so the rolling
+14-day lookback is always empty for it — that's what `LES_ACLED_WINDOW`
+(fixed `YYYY-MM-DD|YYYY-MM-DD` window, both loops) exists for. One loose
+end: M4's `docker compose up` remains unverified locally (no docker CLI) —
+close it with the M6 CI compose smoke test.
 **Next session: visualization batch V1** (timeline histogram, spike halos,
 severity markers, recency fade) per
 **[docs/VISUALIZATION.md](docs/VISUALIZATION.md)** — the user's explicit

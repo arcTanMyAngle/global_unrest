@@ -233,6 +233,10 @@ async fn run(
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(3600),
     );
+    // Fixed-window override for date-restricted ACLED tiers (some accounts
+    // may only read events older than N months, so a rolling recent window
+    // would always be empty). Dedup keeps the repeat polls idempotent.
+    let acled_window = fixed_window_env("LES_ACLED_WINDOW");
     let mut acled_next = Instant::now();
     let noaa_limiter = sched::request_limiter();
     let mut noaa_backoff = sched::Backoff::default();
@@ -250,16 +254,20 @@ async fn run(
             }
             _ = sleep_until(acled_next), if acled_src.is_some() => {
                 let acled_src = acled_src.as_ref().unwrap();
-                let window_span = ChronoDuration::days(ACLED_LOOKBACK_DAYS);
-                let delay = live_cycle(acled_src, "acled", window_span, ACLED_POLL_SECS,
+                let window = acled_window.unwrap_or_else(|| {
+                    let now = Utc::now();
+                    TimeWindow::new(now - ChronoDuration::days(ACLED_LOOKBACK_DAYS), now)
+                });
+                let delay = live_cycle(acled_src, "acled", window, ACLED_POLL_SECS,
                     &acled_limiter, &mut acled_backoff, &store, &publish_root, keep_last).await;
                 acled_next = Instant::now() + delay;
             }
             _ = sleep_until(noaa_next), if noaa_src.is_some() => {
                 let noaa_src = noaa_src.as_ref().unwrap();
                 // The alerts feed is a now-snapshot; the window is nominal.
-                let window_span = ChronoDuration::hours(1);
-                let delay = live_cycle(noaa_src, "noaa", window_span, NOAA_POLL_SECS,
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::hours(1), now);
+                let delay = live_cycle(noaa_src, "noaa", window, NOAA_POLL_SECS,
                     &noaa_limiter, &mut noaa_backoff, &store, &publish_root, keep_last).await;
                 noaa_next = Instant::now() + delay;
             }
@@ -268,15 +276,36 @@ async fn run(
     Ok(())
 }
 
-/// One poll of a simple single-feed live source (ACLED, NOAA): fetch the
-/// lookback window, ingest + republish when it produced anything, and return
-/// the wait before the next attempt (`poll_secs` on success, backoff on
+/// Parse a fixed `YYYY-MM-DD|YYYY-MM-DD` window from an env var (both dates
+/// inclusive → half-open window ending at the day after the second date).
+/// Invalid values are ignored with a warning rather than killing the loop.
+fn fixed_window_env(var: &str) -> Option<TimeWindow> {
+    let raw = std::env::var(var).ok()?;
+    let parse = |s: &str| chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok();
+    let window = raw.split_once('|').and_then(|(a, b)| {
+        let (start, end) = (parse(a)?, parse(b)?);
+        let start = Utc.from_utc_datetime(&start.and_hms_opt(0, 0, 0)?);
+        let end = Utc.from_utc_datetime(&(end + ChronoDuration::days(1)).and_hms_opt(0, 0, 0)?);
+        (start < end).then(|| TimeWindow::new(start, end))
+    });
+    match &window {
+        Some(w) => tracing::info!(%var, start = %w.start, end = %w.end, "fixed window override"),
+        None => {
+            tracing::warn!(%var, raw, "ignoring unparseable window (want YYYY-MM-DD|YYYY-MM-DD)")
+        }
+    }
+    window
+}
+
+/// One poll of a simple single-feed live source (ACLED, NOAA): fetch
+/// `window`, ingest + republish when it produced anything, and return the
+/// wait before the next attempt (`poll_secs` on success, backoff on
 /// failure). GDELT keeps its bespoke two-feed [`fetch_cycle`].
 #[allow(clippy::too_many_arguments)] // internal plumbing, mirrors fetch_cycle
 async fn live_cycle<S: SignalSource>(
     src: &S,
     origin: &'static str,
-    lookback: ChronoDuration,
+    window: TimeWindow,
     poll_secs: u64,
     limiter: &sched::Limiter,
     backoff: &mut sched::Backoff,
@@ -285,9 +314,6 @@ async fn live_cycle<S: SignalSource>(
     keep_last: usize,
 ) -> std::time::Duration {
     limiter.until_ready().await;
-
-    let now = Utc::now();
-    let window = TimeWindow::new(now - lookback, now);
 
     match src.fetch(window, &SourceFilters::default()).await {
         Ok(raws) => {

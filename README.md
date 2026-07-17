@@ -72,6 +72,9 @@ ACLED retired API keys). Note: ACLED grants **API** access only to
 Research/Partner/Enterprise-tier myACLED accounts (institutional email);
 Open-tier accounts authenticate but receive `403 Access denied` on data
 reads. Without credentials the ACLED status line simply reports itself off.
+Some tiers are also **date-restricted** (e.g. only events older than
+12 months) — set `LES_ACLED_WINDOW=YYYY-MM-DD|YYYY-MM-DD` to fetch a fixed
+historical window instead of the rolling recent one.
 
 The M4 services take the same features: `cargo run -p workers --features
 acled-live,noaa-live` ingests live and publishes Parquet snapshots that

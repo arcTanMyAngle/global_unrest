@@ -37,6 +37,7 @@ cargo test --workspace
 | `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` | Point the live loop at a local/mock server (testing; reproduces the network-down path). |
 | `ACLED_EMAIL` / `ACLED_PASSWORD` | myACLED OAuth credentials (M5, feature `acled-live`; ACLED retired API keys). Never committed — shell or gitignored `.env` only; see `.env.example`. |
 | `LES_ACLED_TOKEN_URL` / `LES_ACLED_ENDPOINT` | Point the ACLED adapter at a local/mock server (testing). |
+| `LES_ACLED_WINDOW` | Fixed `YYYY-MM-DD\|YYYY-MM-DD` fetch window (inclusive) replacing the rolling 14-day lookback — for date-restricted ACLED tiers (e.g. accounts limited to events older than 12 months). |
 | `LES_NOAA_ENDPOINT` | Point the NOAA alerts adapter at a local/mock server (testing). |
 
 ## Where data lives

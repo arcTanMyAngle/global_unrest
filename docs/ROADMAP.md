@@ -10,7 +10,7 @@ interleave.
 
 | | Status |
 |---|---|
-| ACLED live data | Code-complete and auth-verified; **blocked on account tier** — myACLED API access requires Research/Partner/Enterprise (institutional email); Open-tier (personal Gmail) gets `403 Access denied` on every read. Rerun the HANDOFF smoke recipe once upgraded. |
+| ACLED live data | **Fully live-verified 2026-07-17** (institutional account): 17,560 real events → normalize (0 failures) → snapshot → api. The account is date-restricted to events older than 12 months, so use `LES_ACLED_WINDOW` for ingest windows. |
 | `docker compose up` | Written, never run locally (no docker CLI, user chose not to install). Close via the M6 CI compose smoke test. |
 
 ## M6 — Repo hygiene, CI depth, releases
