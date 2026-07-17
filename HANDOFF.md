@@ -3,12 +3,17 @@
 Last session: 2026-07-17. **M0–M5 code-complete.** M5 shipped ACLED
 (feature `acled-live`, myACLED OAuth — **ACLED retired API keys**) and NOAA
 active alerts (feature `noaa-live`, keyless, **live-verified**). Two loose
-ends: (1) the ACLED *live* smoke run is blocked on working myACLED
-credentials — the real OAuth endpoint answered `400 invalid_grant "user
-credentials were incorrect"` for the pair in `.env`, so the user must
-register/verify the account or fix the password; (2) M4's
-`docker compose up` remains unverified locally (no docker CLI) — plan is to
-close it with a CI compose smoke test. Next: the **professional-level
+ends: (1) **ACLED live data is gated on account tier, not code**: with the
+user's working credentials the adapter acquires a real token (200), but
+`api/acled/read` returns `403 {"message":"Access denied"}` — per ACLED's
+myACLED FAQ, **API access requires the Research/Partner/Enterprise tier
+(institutional email); Open-tier (personal Gmail) accounts have no API
+access**. The adapter's full chain (auth → paged read → normalize → ingest
+→ publish) is otherwise verified via mock + real endpoints, and the worker
+degrades gracefully (token ok → 403 → backoff) while GDELT/NOAA continue.
+To close fully: register with an institutional email or request a tier
+upgrade from ACLED. (2) M4's `docker compose up` remains unverified locally
+(no docker CLI) — plan is to close it with a CI compose smoke test. Next: the **professional-level
 roadmap** (M6 public GitHub repo + CI live + releases; see the plan file
 `~/.claude/plans/continue-to-m5-then-streamed-mochi.md`, Part B). Read this
 file, then [CLAUDE.md](CLAUDE.md), then skim [docs/PLAN.md](docs/PLAN.md).
