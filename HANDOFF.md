@@ -13,10 +13,14 @@ access**. The adapter's full chain (auth → paged read → normalize → ingest
 degrades gracefully (token ok → 403 → backoff) while GDELT/NOAA continue.
 To close fully: register with an institutional email or request a tier
 upgrade from ACLED. (2) M4's `docker compose up` remains unverified locally
-(no docker CLI) — plan is to close it with a CI compose smoke test. Next: the **professional-level
-roadmap** (M6 public GitHub repo + CI live + releases; see the plan file
-`~/.claude/plans/continue-to-m5-then-streamed-mochi.md`, Part B). Read this
-file, then [CLAUDE.md](CLAUDE.md), then skim [docs/PLAN.md](docs/PLAN.md).
+(no docker CLI) — plan is to close it with a CI compose smoke test.
+**Next session: visualization batch V1** (timeline histogram, spike halos,
+severity markers, recency fade) per
+**[docs/VISUALIZATION.md](docs/VISUALIZATION.md)** — the user's explicit
+direction is *original, detailed* views, never copies of provider
+dashboards. The forward plan is vendored at
+**[docs/ROADMAP.md](docs/ROADMAP.md)** (M6 repo/CI items can interleave).
+Read this file, then [CLAUDE.md](CLAUDE.md), then those two docs.
 
 ## Where things stand
 
@@ -86,7 +90,9 @@ RUST_LOG=info LES_ONLINE=1 \
 
 ## Next up — professional-level roadmap (user-approved)
 
-Part B of the plan file (`continue-to-m5-then-streamed-mochi.md`). Summary:
+Canonical version: **[docs/ROADMAP.md](docs/ROADMAP.md)** (+
+[docs/VISUALIZATION.md](docs/VISUALIZATION.md) for the V1–V3 view batches,
+which take priority per the user). Summary:
 
 - **M6 — public repo + CI live**: ~~repo~~ **done — pushed to
   `arcTanMyAngle/global_unrest` (public), CI running**; remaining: branch

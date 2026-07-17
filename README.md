@@ -6,10 +6,11 @@ visualization only: public or properly authorized sources, aggregate-level
 signals, transparent (non-ML) scoring, and a hard separation between "media
 attention" and "verified event data."
 
-**Milestones 1–3 complete.** Runs 100% offline from committed synthetic
-fixtures by default (no network, no API keys); **M3 adds optional live GDELT
-ingestion** — keyless, attributed, with a 15-minute fetch cadence, retention,
-and graceful degradation when the network is unavailable.
+**Milestones 1–5 complete.** Runs 100% offline from committed synthetic
+fixtures by default (no network, no credentials). Optional live sources:
+**GDELT** (M3, keyless), **ACLED** (M5, feature-gated, authorized myACLED
+account) and **NOAA/NWS active alerts** (M5, feature-gated, keyless) — all
+rate-limited, attributed, and degrading gracefully offline.
 
 ## Quickstart
 
@@ -41,18 +42,40 @@ You get a dark world map with:
 
 Pan by dragging, zoom with the scroll wheel, `reset view` in the top bar.
 
-### Live GDELT mode (M3)
+### Live mode
 
-Tick **GDELT live** in the top bar to add live data on top of the fixtures
-(fixtures always remain the offline base). The ingest worker polls the GDELT
-DOC 2.0 API (media attention, geocoded to source country) and the 15-minute
-Events dumps (discrete CAMEO events) on the feed cadence, rate-limited and
-politely backed off. `↻` forces an immediate fetch; the inspector's **Live
-source** panel shows last/next fetch and, if the network drops, a *degraded —
-showing cached data* state (the last-known data stays on screen). Cap the
-events table with the **retention** menu (≥ 30 days keeps the 28-day baselines
-warm). No API key is needed. Env knobs: `LES_ONLINE=1` (auto-start live),
-`LES_RETENTION_DAYS`, `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL`.
+Tick **live** in the top bar to add live data on top of the fixtures
+(fixtures always remain the offline base). GDELT is always available when
+live (keyless): the DOC 2.0 API (media attention, geocoded to source
+country) plus the 15-minute Events dumps (discrete CAMEO events),
+rate-limited and politely backed off. `↻` forces an immediate fetch; the
+inspector's **Live source** panels show per-source state and, if the
+network drops, a *degraded — showing cached data* badge (last-known data
+stays on screen). Cap the events table with the **retention** menu
+(≥ 30 days keeps the 28-day baselines warm). Env knobs: `LES_ONLINE=1`
+(auto-start live), `LES_RETENTION_DAYS`.
+
+### M5 live sources (opt-in cargo features)
+
+```sh
+# NOAA/NWS active weather alerts (keyless, US coverage):
+cargo run -p global-signal-desktop --features noaa-live
+
+# ACLED (requires a Research-tier myACLED account; see below) + NOAA:
+#   put credentials in .env (copy .env.example), load them into the shell,
+#   then:
+cargo run -p global-signal-desktop --features acled-live,noaa-live
+```
+
+ACLED credentials are `ACLED_EMAIL` / `ACLED_PASSWORD` env vars (OAuth —
+ACLED retired API keys). Note: ACLED grants **API** access only to
+Research/Partner/Enterprise-tier myACLED accounts (institutional email);
+Open-tier accounts authenticate but receive `403 Access denied` on data
+reads. Without credentials the ACLED status line simply reports itself off.
+
+The M4 services take the same features: `cargo run -p workers --features
+acled-live,noaa-live` ingests live and publishes Parquet snapshots that
+`cargo run -p api` serves (see [docs/API.md](docs/API.md)).
 
 ## Commands
 
@@ -68,6 +91,8 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 |---|---|
 | [HANDOFF.md](HANDOFF.md) | Session handoff: current status, next task list, known quirks |
 | [docs/PLAN.md](docs/PLAN.md) | The approved project plan, with milestone status |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Forward plan: M6 repo/CI/releases, M7 service hardening, M8 stretch layers |
+| [docs/VISUALIZATION.md](docs/VISUALIZATION.md) | Visualization design plan (V1–V3): timeline, anomaly halos, divergence view, ledger |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate map, threading model, rendering strategy, single-writer rule |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | `GeoTemporalEvent`, buckets, DuckDB schema, fixtures |
 | [docs/SCORING.md](docs/SCORING.md) | Transparent scoring formulas, baseline/spike design (M2) |
