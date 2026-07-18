@@ -12,7 +12,9 @@ services:
       context: .
       dockerfile: services/workers/Dockerfile
     environment:
-      LES_ONLINE: "1"
+      # Overridable from the shell so CI's compose-smoke job can force
+      # fixtures-only mode (LES_ONLINE=0) without touching this file.
+      LES_ONLINE: "${LES_ONLINE:-1}"
       LES_RETENTION_DAYS: "35"
       LES_PUBLISH_KEEP_LAST: "3"
     volumes:

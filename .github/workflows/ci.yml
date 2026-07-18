@@ -32,3 +32,91 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  # M5 added acled-live/noaa-live as cargo features on the desktop app and
+  # the worker binary; default CI above never compiles them. One OS is
+  # enough here — the feature code itself isn't OS-specific, only the
+  # bundled-DuckDB build in `check` needs the Windows/Ubuntu split.
+  feature-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["acled-live", "noaa-live", "acled-live,noaa-live"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-${{ matrix.features }}
+      - name: Clippy (${{ matrix.features }})
+        run: |
+          cargo clippy -p global-signal-desktop -p workers \
+            --features "${{ matrix.features }}" --all-targets -- -D warnings
+      - name: Test (${{ matrix.features }})
+        run: |
+          cargo test -p global-signal-desktop -p workers \
+            --features "${{ matrix.features }}"
+
+  # source-acled's `live` feature carries its own mock-OAuth-server suite
+  # (tests/live_mock.rs) — real credentials are never needed for this.
+  acled-live-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: source-acled live mock suite
+        run: cargo test -p source-acled --features live
+
+  # Closes the M4 verification gap: `docker compose up` was written but
+  # never run locally (no docker CLI on the dev machine). Runs fixtures-only
+  # (LES_ONLINE=0) so it needs no network or credentials.
+  compose-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: docker compose build
+      - name: Start stack (fixtures only)
+        run: docker compose up -d
+        env:
+          LES_ONLINE: "0"
+      - name: Wait for api /health and assert events > 0
+        run: |
+          status=""
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health -o /tmp/health.json; then
+              status="ok"
+              break
+            fi
+            echo "waiting for api ($i/30)..."
+            sleep 5
+          done
+          if [ -z "$status" ]; then
+            echo "api never became healthy"
+            exit 1
+          fi
+          cat /tmp/health.json
+          events=$(jq '.snapshot.events' /tmp/health.json)
+          echo "snapshot events=$events"
+          if [ "$events" -lt 1 ]; then
+            echo "expected at least one event from the fixtures-only stack"
+            exit 1
+          fi
+      - name: Logs (always, for debugging)
+        if: always()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
