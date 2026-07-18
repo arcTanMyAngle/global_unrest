@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # M4: axum read API over services/workers' published Parquet snapshots. Only
 # opens ephemeral in-memory DuckDB connections against read_parquet globs —

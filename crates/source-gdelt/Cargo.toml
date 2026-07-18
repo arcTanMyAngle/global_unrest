@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # M3 crate. Live GDELT ingestion: the DOC 2.0 JSON API (this file's `doc`
 # module) and, next, the 15-minute Events CSV-zip dumps. reqwest rides the

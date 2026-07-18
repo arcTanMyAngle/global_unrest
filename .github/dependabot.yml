@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Root workspace: all crate versions are pinned in the root Cargo.toml
+  # ([workspace.dependencies]) — this is the only place Dependabot needs to
+  # open PRs against.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-dependencies:
+        patterns:
+          - "*"
+    # eframe/egui/wgpu are version-locked together (see CLAUDE.md: eframe
+    # 0.35 rides wgpu 29 — do not bump wgpu independently); bump that trio
+    # by hand, not via an automated PR that only touches one of them.
+    ignore:
+      - dependency-name: "wgpu"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-dependencies:
+        patterns:
+          - "*"

@@ -16,10 +16,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# Version is milestone-tied (0.<milestone>.0), not SemVer — see
+# CHANGELOG.md and docs/ROADMAP.md's M6 version-bump policy.
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.96"
+# None of these crates/binaries are meant for crates.io — internal-only
+# workspace members. Also lets cargo-deny's allow-wildcard-paths treat our
+# unversioned path deps as intentional rather than a publish hazard.
+publish = false
 
 [workspace.dependencies]
 # Internal crates

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # M5 crate. ACLED access requires a registered myACLED account (OAuth password
 # grant — ACLED retired API keys in 2025, so there is no ACLED_API_KEY). The

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # egui LAYER LIBRARY, not a wgpu engine: projection + cached epaint meshes
 # for basemap / heatmap / marker layers. Never tessellates paths per frame.

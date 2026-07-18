@@ -179,7 +179,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "analytics"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "core-types",
@@ -240,7 +240,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "api"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "geo-utils"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "geo",
  "geojson",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "global-signal-desktop"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "analytics",
  "anyhow",
@@ -4323,7 +4323,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "renderer"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "core-types",
  "earcutr",
@@ -4923,7 +4923,7 @@ dependencies = [
 
 [[package]]
 name = "source-acled"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "core-types",
@@ -4937,7 +4937,7 @@ dependencies = [
 
 [[package]]
 name = "source-fixtures"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "core-types",
@@ -4950,7 +4950,7 @@ dependencies = [
 
 [[package]]
 name = "source-gdelt"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "core-types",
@@ -4967,7 +4967,7 @@ dependencies = [
 
 [[package]]
 name = "source-noaa"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "core-types",
@@ -5042,7 +5042,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storage"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "analytics",
  "chrono",
@@ -6450,7 +6450,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "workers"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",

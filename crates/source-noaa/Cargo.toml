@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # M5 crate. NOAA/NWS active weather alerts (api.weather.gov) — keyless US-gov
 # public-domain data; the API asks only for a descriptive User-Agent. The live

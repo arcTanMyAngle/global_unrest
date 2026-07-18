@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # ACLED live ingestion (M5): off by default — the network path and its deps
 # compile out entirely. Requires ACLED_EMAIL/ACLED_PASSWORD env vars at run
