@@ -45,7 +45,7 @@ anyhow = "1"
 # M4 services/api only.
 axum = "0.8"
 chrono = { version = "0.4.45", features = ["serde"] }
-criterion = "0.7"
+criterion = "0.8"
 directories = "6"
 duckdb = { version = "1.10504.0", features = ["bundled"] }
 earcutr = "0.5"
@@ -68,7 +68,7 @@ thiserror = "2"
 url = "2"
 # GDELT Events dumps are single-entry DEFLATE zips; pure-Rust miniz_oxide
 # backend keeps CI OpenSSL/zlib-free. No aes/bzip2/lzma/zstd.
-zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # "net" gives the current-thread runtime its IO driver (reqwest needs it for
 # the live GDELT ingest loop); "rt" only, no multi-thread.
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net"] }
