@@ -11,28 +11,42 @@ interleave.
 | | Status |
 |---|---|
 | ACLED live data | **Fully live-verified 2026-07-17** (institutional account): 17,560 real events → normalize (0 failures) → snapshot → api. The account is date-restricted to events older than 12 months, so use `LES_ACLED_WINDOW` for ingest windows. |
-| `docker compose up` | Written, never run locally (no docker CLI, user chose not to install). Close via the M6 CI compose smoke test. |
+| `docker compose up` | **Closed 2026-07-18** — CI's `compose-smoke` job builds both images and runs the stack with `LES_ONLINE=0`, asserting `/health` reports events > 0. Still never run interactively on the dev machine (no local docker CLI), but the stack is now exercised on every push/PR. |
+| Branch protection on `main` | **Not done** — `gh` is installed but not authenticated on this machine, so it can't be scripted here. Manual step (once, via GitHub → repo Settings → Branches, or `gh auth login` then `gh api repos/arcTanMyAngle/global_unrest/branches/main/protection -X PUT ...`): require the `check` and `feature-matrix` jobs to pass before merge. |
 
-## M6 — Repo hygiene, CI depth, releases
+## M6 — Repo hygiene, CI depth, releases ✅ (2026-07-18, except branch protection — see above)
 
 Repo is live and public: `github.com/arcTanMyAngle/global_unrest` (pushed
 2026-07-17, CI active on push).
 
-1. CI matrix: add the M5 feature combinations (`acled-live`, `noaa-live`,
-   both) to clippy/test jobs, plus `cargo test -p source-acled --features
-   live` (mock suite).
-2. **Compose smoke job** (ubuntu): build both Docker images, run the stack
-   with `LES_ONLINE=0` (fixtures only), assert api `/health` → 200 with
-   events > 0 — closes the M4 verification gap without local Docker.
-3. Supply chain: `cargo-deny` (advisories + MIT/Apache-2.0-compatible
-   license allowlist) as a CI job; Dependabot config (cargo + actions).
-4. Releases: tag-driven workflow building desktop binaries for
-   Windows/Linux/macOS attached to GitHub Releases; images to GHCR on tags;
-   `CHANGELOG.md` (Keep-a-Changelog; 0.5.0 = M5); version bump policy tied
-   to milestones.
-5. Portfolio README: screenshots of the shipped views (run-skill recipe),
-   architecture diagram, CI/license badges, quickstart, attribution +
-   ethics section. `CONTRIBUTING.md`. Branch protection on `main`.
+1. ✅ CI matrix: `feature-matrix` job covers the M5 feature combinations
+   (`acled-live`, `noaa-live`, both) on the desktop app + worker binary;
+   `acled-live-mock` job runs `cargo test -p source-acled --features live`.
+2. ✅ **Compose smoke job** (ubuntu): builds both Docker images, runs the
+   stack with `LES_ONLINE=0` (fixtures only), asserts `/health` → 200 with
+   `snapshot.events > 0` — closes the M4 verification gap without local
+   Docker. `docker-compose.yml`'s `LES_ONLINE` is now shell-overridable
+   (`${LES_ONLINE:-1}`) to make this possible.
+3. ✅ Supply chain: `cargo-deny` job (`deny.toml`) — advisories (with two
+   documented, justified `ignore`s: quick-xml's DoS-class CVEs are
+   build-time-only via `wayland-scanner`'s bundled protocol XML, never
+   attacker input; `ttf-parser` is unmaintained with no upstream fix,
+   reached only through the Linux Wayland clipboard's font fallback) +
+   license allowlist (added `BSL-1.0`/`OFL-1.1`/`Ubuntu-font-1.0`/
+   `CDLA-Permissive-2.0` after running the tool for real). Dependabot
+   config (`.github/dependabot.yml`, cargo + actions, weekly, `wgpu`
+   excluded since it's locked to `eframe`).
+4. ✅ Releases: `.github/workflows/release.yml`, tag-driven (`v*`) — desktop
+   binaries for Windows/Linux/macOS attached to GitHub Releases, worker/api
+   images to GHCR. `CHANGELOG.md` (Keep-a-Changelog; retroactive 0.1.0–0.5.0
+   per milestone, 0.6.0 = this M6 work). Version bump policy: workspace
+   version is milestone-tied (`0.<milestone>.0`, all crates `publish =
+   false` — none of this is meant for crates.io); bumped to 0.6.0.
+5. ✅ Portfolio README: a real screenshot (offline fixture mode, `assets/
+   screenshots/map-overview.png`, captured via the run skill), a mermaid
+   architecture diagram, CI/license/rust-version badges, an "Ethics & data
+   policy" section summarizing SAFETY_AND_PRIVACY.md. `CONTRIBUTING.md`.
+   ⏳ Branch protection on `main` — manual, see the loose-ends table above.
 
 ## V1–V3 — Visualization batches
 

@@ -1,12 +1,16 @@
 # CLAUDE.md — Live Earth Signals
 
 Desktop-first Rust geospatial dashboard visualizing global news-attention
-and unrest/event signals. Civic-data research/visualization only. **M5
-(ACLED + NOAA layers) code-complete 2026-07-17** — NOAA live-verified; the
-ACLED live smoke run is pending working myACLED credentials. Next: the
-professional-level roadmap (M6 public repo/CI). See [HANDOFF.md](HANDOFF.md)
-for status and the next task list, and [docs/PLAN.md](docs/PLAN.md) for the
-approved plan.
+and unrest/event signals. Civic-data research/visualization only.
+**M0–M6 complete 2026-07-18** — M5 (ACLED + NOAA) fully live-verified; M6
+shipped repo hygiene (CI feature matrix, `docker compose` smoke test,
+cargo-deny, Dependabot, tag-driven releases, CHANGELOG, portfolio README,
+CONTRIBUTING.md). Branch protection on `main` is the one M6 item left, and
+it's a manual GitHub-settings step (no authenticated `gh`/API access from
+this machine) — see HANDOFF.md. Next: visualization batch V1
+(docs/VISUALIZATION.md), interleaved with M7 service hardening. See
+[HANDOFF.md](HANDOFF.md) for status and the next task list, and
+[docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
 ## Commands
 
@@ -23,6 +27,7 @@ docker compose up                                      # M4 worker + api stack (
 cargo test -p source-acled --features live             # M5 ACLED mock-server tests
 cargo run -p global-signal-desktop --features acled-live,noaa-live  # desktop with M5 live sources
 cargo run -p workers --features acled-live,noaa-live   # worker with M5 live sources
+cargo deny check                                       # M6 gate: advisories + license allowlist
 ```
 
 M5 live sources are cargo features on both binaries: `acled-live` (needs

@@ -3,17 +3,21 @@
 > User-approved 2026-07-13 (original at
 > `~/.claude/plans/prompt-1-md-recursive-rossum.md`; brief at
 > `../prompt_1.md` outside the repo). Vendored so future sessions don't
-> depend on machine-local paths. **Status: M0–M5 complete** (M0–M3
-> 2026-07-14, M4 2026-07-16, M5 2026-07-17; §12 acceptance verified — two
-> loose ends: M4's `docker compose up` is written but unverified locally
-> (no docker CLI; to be closed by a CI compose smoke test), and M5's ACLED
-> *live* smoke run awaits working myACLED credentials — NOAA was verified
-> against the real feed, ACLED against a mock plus the real OAuth endpoint).
-> The walkers slippy-tile stretch in §11 step 7 remains deferred — see
-> HANDOFF.md. Next: professional-level roadmap (M6+: public repo, CI live,
-> releases, hardening). Version pins in §3 were correct as of 2026-07;
-> re-verify before bumping. **Note (2026-07): ACLED retired API keys** —
-> §5's `ACLED_API_KEY` became `ACLED_EMAIL`/`ACLED_PASSWORD` (OAuth).
+> depend on machine-local paths. This document only covers §0–§12 (M0–M5,
+> the original brief); the post-brief professional-level roadmap (M6+) is
+> tracked separately in [ROADMAP.md](ROADMAP.md), not here. **Status:
+> M0–M5 complete and fully live-verified** (M0–M3 2026-07-14, M4 2026-07-16,
+> M5 2026-07-17 — ACLED's real endpoint verified with 17,560 events, NOAA
+> with 612 real alerts; §12 acceptance verified). M4's `docker compose up`
+> loose end was closed in M6 by a CI compose-smoke job (still never run
+> interactively on the dev machine — no local docker CLI). The walkers
+> slippy-tile stretch in §11 step 7 remains deferred — see HANDOFF.md.
+> **M6 (repo hygiene, CI depth, releases) is done as of 2026-07-18** — see
+> ROADMAP.md; branch protection on `main` is the one item left, blocked on
+> an authenticated `gh`/GitHub session. Version pins in §3 were correct as
+> of 2026-07; re-verify before bumping. **Note (2026-07): ACLED retired API
+> keys** — §5's `ACLED_API_KEY` became `ACLED_EMAIL`/`ACLED_PASSWORD`
+> (OAuth).
 
 ## Context
 
