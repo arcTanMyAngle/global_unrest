@@ -1,16 +1,68 @@
 # Live Earth Signals
 
+[![CI](https://github.com/arcTanMyAngle/global_unrest/actions/workflows/ci.yml/badge.svg)](https://github.com/arcTanMyAngle/global_unrest/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
+
 A desktop-first, Rust-based geospatial dashboard that visualizes global
 news-attention and unrest/event signals over time. Civic-data research and
 visualization only: public or properly authorized sources, aggregate-level
 signals, transparent (non-ML) scoring, and a hard separation between "media
 attention" and "verified event data."
 
-**Milestones 1–5 complete.** Runs 100% offline from committed synthetic
+**Milestones 1–6 complete** (M6 = repo hygiene/CI/releases; see
+[CHANGELOG.md](CHANGELOG.md)). Runs 100% offline from committed synthetic
 fixtures by default (no network, no credentials). Optional live sources:
 **GDELT** (M3, keyless), **ACLED** (M5, feature-gated, authorized myACLED
 account) and **NOAA/NWS active alerts** (M5, feature-gated, keyless) — all
 rate-limited, attributed, and degrading gracefully offline.
+
+![Map view: H3 heatmap and precision-aware event markers over offline fixture data](assets/screenshots/map-overview.png)
+
+*Offline fixture mode — H3-cell heatmap (event-count mode) with protest/
+conflict/disruption markers. Every visual layer here is original to this
+app, not a copy of any upstream provider's dashboard.*
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Sources["Live sources (feature-gated, keyless-first)"]
+        GDELT["source-gdelt\n(M3, keyless)"]
+        ACLED["source-acled\n(M5, acled-live)"]
+        NOAA["source-noaa\n(M5, noaa-live)"]
+        FIX["source-fixtures\n(deterministic, offline base)"]
+    end
+
+    subgraph Core["Pure core (no I/O)"]
+        CT["core-types\nGeoTemporalEvent, SignalSource"]
+        AN["analytics\nscore_buckets, baselines"]
+        GEO["geo-utils\nH3, viewport, precision"]
+    end
+
+    subgraph Storage["storage — DuckDB actor thread"]
+        DB[("!Sync connection\nsingle-writer-per-file")]
+    end
+
+    Sources --> CT --> Storage
+    Storage --> AN
+
+    subgraph Desktop["apps/global-signal-desktop (eframe)"]
+        UI["map / timeline / inspector\ncached-mesh renderer"]
+    end
+
+    subgraph Services["services/* (M4, Docker)"]
+        WORKER["workers\nown DuckDB, publish Parquet"]
+        API["api\naxum, read-only, Parquet-only"]
+    end
+
+    Storage --> UI
+    WORKER --> DB
+    WORKER -- "atomic LATEST pointer" --> SNAP[("Parquet snapshots")]
+    API -- "read_parquet, never .duckdb" --> SNAP
+```
+
+Full crate-by-crate map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quickstart
 
@@ -86,7 +138,15 @@ acled-live,noaa-live` ingests live and publishes Parquet snapshots that
 cargo test --workspace                          # all tests (headless)
 cargo run -p source-fixtures --bin generate-fixtures   # regenerate fixtures
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check                                 # advisories + license allowlist (needs `cargo install cargo-deny`)
+docker compose up                                # M4 worker+api stack (see docker-compose.yml)
 ```
+
+CI (`.github/workflows/ci.yml`) runs all of the above plus the M5 feature
+matrix (`acled-live`/`noaa-live`/both), the `source-acled` live-mock suite,
+and a `docker compose` smoke test. Tag-driven releases
+(`.github/workflows/release.yml`) build desktop binaries for Windows/Linux/
+macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Documentation
 
@@ -101,6 +161,8 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 | [docs/SCORING.md](docs/SCORING.md) | Transparent scoring formulas, baseline/spike design (M2) |
 | [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) | Hard rules, licensing, biases, retention |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup, env vars, build notes |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | PR workflow, quality gates, feature-gating rules for new sources |
+| [CHANGELOG.md](CHANGELOG.md) | Milestone-tied version history |
 
 ## Roadmap
 
@@ -114,6 +176,28 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 - **M5 ✅** ACLED adapter (feature `acled-live`, authorized OAuth access only)
   and NOAA/NWS active-alerts layer (feature `noaa-live`, keyless). AIS /
   CelesTrak remain backlog stretch layers.
+- **M6 ✅** repo hygiene: CI feature matrix + compose smoke test, cargo-deny,
+  Dependabot, tag-driven releases (desktop binaries + GHCR images),
+  CHANGELOG, this README, CONTRIBUTING.md.
+- **Next**: visualization batches V1–V3 ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)),
+  M7 service hardening, M8 stretch layers — see
+  [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Ethics & data policy
+
+This is a civic-data research tool, not a surveillance or targeting one —
+see [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) for the full
+policy. In short:
+
+- **Aggregate-level only** — no person-level identification, tracking, or
+  profiling; signals are keyed to H3 cells/countries and times.
+- **Metadata, not article bodies** — headlines, URLs, outlet domains only.
+- **Attention ≠ truth** — media attention and event data are always shown
+  as separate, transparent components, never a single blended score.
+- **Public/authorized sources only**, rate-limited client-side, never
+  bypassing paywalls or auth. ACLED data specifically is never
+  redistributed (no `notes` narrative stored; ACLED-bearing snapshots are
+  never served publicly — see M7's hardening policy).
 
 ## Data & attribution
 
