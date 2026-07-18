@@ -1,0 +1,106 @@
+name: Release
+
+# Tag-driven: push a `v*` tag (e.g. `v0.6.0`, matching the CHANGELOG entry
+# and workspace.package.version) to build desktop binaries for every
+# platform and push worker/api images to GHCR. Nothing here runs on a
+# normal branch push — see ci.yml for that.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop-binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bin: global-signal-desktop.exe
+            asset: live-earth-signals-desktop-windows-x86_64.zip
+          - os: ubuntu-latest
+            bin: global-signal-desktop
+            asset: live-earth-signals-desktop-linux-x86_64.tar.gz
+          - os: macos-latest
+            bin: global-signal-desktop
+            asset: live-earth-signals-desktop-macos-aarch64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release -p global-signal-desktop
+      # Fixtures are the permanent offline base — ship them alongside the
+      # binary so the release artifact runs standalone, no network needed.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/${{ matrix.bin }} dist/
+          Copy-Item -Recurse fixtures dist/fixtures
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.asset }}
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/${{ matrix.bin }} dist/
+          cp -r fixtures dist/fixtures
+          tar -czf ${{ matrix.asset }} -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  ghcr-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [workers, api]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/global-unrest-${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  github-release:
+    needs: [desktop-binaries, ghcr-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          # CHANGELOG.md is hand-maintained per tag; this just points
+          # release-readers at it rather than duplicating the text.
+          body: |
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            Worker/api images: `ghcr.io/${{ github.repository_owner }}/global-unrest-workers:${{ github.ref_name }}`, `ghcr.io/${{ github.repository_owner }}/global-unrest-api:${{ github.ref_name }}`
+          files: artifacts/*/*
+          generate_release_notes: true
