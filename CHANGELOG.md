@@ -8,6 +8,17 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+### Changed
+
+- Desktop runtime is live-data-only: live polling defaults on, ACLED/NOAA are
+  default features, `.env` is loaded automatically, and synthetic fixtures are
+  retained solely as test assets.
+- Startup removes legacy `source=fixtures` rows and rebuilds derived buckets
+  while preserving live records; an empty database now waits for live data.
+- Source status distinguishes partial GDELT success, abbreviates request
+  errors, reports last-ingest inserts/duplicates accurately, resets fixture-era
+  theme filters, and shows unavailable confidence as N/A.
+
 ## [0.6.0] — 2026-07-18 — M6: repo hygiene, CI depth, releases
 
 ### Added

@@ -11,17 +11,10 @@ signals, transparent (non-ML) scoring, and a hard separation between "media
 attention" and "verified event data."
 
 **Milestones 1–6 complete** (M6 = repo hygiene/CI/releases; see
-[CHANGELOG.md](CHANGELOG.md)). Runs 100% offline from committed synthetic
-fixtures by default (no network, no credentials). Optional live sources:
-**GDELT** (M3, keyless), **ACLED** (M5, feature-gated, authorized myACLED
-account) and **NOAA/NWS active alerts** (M5, feature-gated, keyless) — all
-rate-limited, attributed, and degrading gracefully offline.
-
-![Map view: H3 heatmap and precision-aware event markers over offline fixture data](assets/screenshots/map-overview.png)
-
-*Offline fixture mode — H3-cell heatmap (event-count mode) with protest/
-conflict/disruption markers. Every visual layer here is original to this
-app, not a copy of any upstream provider's dashboard.*
+[CHANGELOG.md](CHANGELOG.md)). The desktop runtime is **live-data-only**:
+**GDELT** (keyless), **ACLED** (authorized myACLED account), and **NOAA/NWS
+active alerts** (keyless). Synthetic fixtures remain test assets but are
+never loaded into or displayed by the desktop app.
 
 ## Architecture
 
@@ -31,7 +24,7 @@ flowchart LR
         GDELT["source-gdelt\n(M3, keyless)"]
         ACLED["source-acled\n(M5, acled-live)"]
         NOAA["source-noaa\n(M5, noaa-live)"]
-        FIX["source-fixtures\n(deterministic, offline base)"]
+        FIX["source-fixtures\n(test-only regression data)"]
     end
 
     subgraph Core["Pure core (no I/O)"]
@@ -44,7 +37,11 @@ flowchart LR
         DB[("!Sync connection\nsingle-writer-per-file")]
     end
 
-    Sources --> CT --> Storage
+    GDELT --> CT
+    ACLED --> CT
+    NOAA --> CT
+    FIX -. tests only .-> CT
+    CT --> Storage
     Storage --> AN
 
     subgraph Desktop["apps/global-signal-desktop (eframe)"]
@@ -67,7 +64,8 @@ Full crate-by-crate map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Quickstart
 
 ```sh
-# From this directory (first build compiles bundled DuckDB — several minutes)
+# Copy .env.example to .env and add authorized ACLED credentials if available.
+# The first build compiles bundled DuckDB and can take several minutes.
 cargo run -p global-signal-desktop
 ```
 
@@ -79,7 +77,7 @@ You get a dark world map with:
 - **Event markers** — protests/conflicts/disruptions as colored diamonds.
   Only city/exact-precision records render as points; country/admin
   centroids shade regions instead of faking hotspots.
-- **Time slider** — replay 35 days of data in 6-hour buckets (▶ loops).
+- **Time slider** — replay the retained live-data extent in 6-hour buckets.
 - **Region inspector** — click anywhere: counts by kind, attention vs.
   events (always separate), **score components as separate bars**
   (attention / unrest / spike-vs-baseline / combined, per
@@ -94,29 +92,21 @@ You get a dark world map with:
 
 Pan by dragging, zoom with the scroll wheel, `reset view` in the top bar.
 
-### Live mode
+### Live updates
 
-Tick **live** in the top bar to add live data on top of the fixtures
-(fixtures always remain the offline base). GDELT is always available when
-live (keyless): the DOC 2.0 API (media attention, geocoded to source
-country) plus the 15-minute Events dumps (discrete CAMEO events),
-rate-limited and politely backed off. `↻` forces an immediate fetch; the
+Live updates start automatically. GDELT uses the DOC 2.0 API (media
+attention, geocoded to source country) plus the 15-minute Events dumps
+(discrete CAMEO events), rate-limited and politely backed off. `↻` forces an immediate fetch; the
 inspector's **Live source** panels show per-source state and, if the
-network drops, a *degraded — showing cached data* badge (last-known data
-stays on screen). Cap the events table with the **retention** menu
-(≥ 30 days keeps the 28-day baselines warm). Env knobs: `LES_ONLINE=1`
-(auto-start live), `LES_RETENTION_DAYS`.
+network drops, a degraded/partial badge (last-known real data stays on
+screen). The **live updates** checkbox pauses network requests without
+switching to synthetic data. `LES_ONLINE=0` starts paused.
 
-### M5 live sources (opt-in cargo features)
+### ACLED and NOAA
 
 ```sh
-# NOAA/NWS active weather alerts (keyless, US coverage):
-cargo run -p global-signal-desktop --features noaa-live
-
-# ACLED (requires a Research-tier myACLED account; see below) + NOAA:
-#   put credentials in .env (copy .env.example), load them into the shell,
-#   then:
-cargo run -p global-signal-desktop --features acled-live,noaa-live
+# Both adapters are desktop defaults; `.env` is loaded automatically.
+cargo run -p global-signal-desktop
 ```
 
 ACLED credentials are `ACLED_EMAIL` / `ACLED_PASSWORD` env vars (OAuth —

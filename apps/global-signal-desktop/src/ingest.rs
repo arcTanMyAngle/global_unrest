@@ -1,25 +1,20 @@
 //! Ingest worker: a long-lived thread with a current-thread tokio runtime
-//! that (1) loads the offline fixtures once at startup and (2) — when online
-//! mode is enabled — polls the live sources on their own cadences (GDELT
+//! that polls live sources on their own cadences (GDELT
 //! every feed interval; ACLED, when built with `acled-live` and credentialed,
 //! twice a day), normalizes, and streams incremental batches back to the UI.
 //!
-//! Fixture mode is the permanent offline base and always loads first; going
-//! online only *adds* live data on top. The UI thread owns storage, so the
-//! worker never touches the database: it hands `(events, failures)` back over a
-//! channel and the app ingests them (storage dedups by event id, so re-fetching
-//! overlapping windows never double-counts). Live failures degrade gracefully —
-//! the last-known data stays on screen and the worker reports a degraded status
-//! and backs off (docs/PLAN.md §12 M3 acceptance).
+//! The desktop runtime never loads synthetic fixtures. The UI thread owns
+//! storage, so the worker never touches the database: it hands `(events,
+//! failures)` back over a channel and the app ingests them. Live failures
+//! degrade gracefully: last-known real data stays visible while the worker
+//! reports status and backs off.
 
-use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use core_types::{
     GeoTemporalEvent, IngestFailure, SignalSource, SourceError, SourceFilters, TimeWindow,
 };
-use source_fixtures::FixtureSource;
 use source_gdelt::{GdeltSource, sched};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{Instant, sleep_until};
@@ -131,6 +126,8 @@ pub struct SourceStatus {
     pub detail: String,
     /// The last attempt failed; the UI shows cached data with a degraded badge.
     pub degraded: bool,
+    /// One part of a multi-feed source failed while another succeeded.
+    pub partial: bool,
 }
 
 impl SourceStatus {
@@ -141,8 +138,9 @@ impl SourceStatus {
             last_attempt_epoch_s: None,
             last_success_epoch_s: None,
             next_attempt_epoch_s: None,
-            detail: "offline — fixture data only".into(),
+            detail: "live updates paused — cached real data only".into(),
             degraded: false,
+            partial: false,
         }
     }
 }
@@ -156,7 +154,7 @@ pub enum IngestMsg {
     },
     /// Updated live-source status.
     Status(SourceStatus),
-    /// Fatal: the offline fixture base could not be loaded.
+    /// Fatal worker initialization failure.
     Failed(String),
 }
 
@@ -181,29 +179,10 @@ impl IngestHandle {
     }
 }
 
-/// Locate the fixtures directory: `LES_FIXTURES_DIR` env override, then
-/// `fixtures/` in the working directory or any ancestor (covers `cargo run`
-/// from the workspace root and from crate directories).
-pub fn find_fixtures_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("LES_FIXTURES_DIR") {
-        let p = PathBuf::from(dir);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let cwd = std::env::current_dir().ok()?;
-    cwd.ancestors()
-        .map(|a| a.join("fixtures"))
-        .find(|p| p.is_dir())
-}
-
 /// Spawn the ingest worker. Results arrive on the returned channel; `wake`
 /// (a repaint request) fires after every message so the UI polls promptly.
 /// The returned handle controls online mode and stops the worker when dropped.
-pub fn spawn(
-    fixtures_dir: PathBuf,
-    wake: impl Fn() + Send + 'static,
-) -> (mpsc::Receiver<IngestMsg>, IngestHandle) {
+pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Receiver<IngestMsg>, IngestHandle) {
     let (tx_res, rx_res) = mpsc::channel();
     let (tx_ctl, rx_ctl) = tokio_mpsc::unbounded_channel();
     std::thread::Builder::new()
@@ -220,36 +199,18 @@ pub fn spawn(
                     return;
                 }
             };
-            runtime.block_on(worker(fixtures_dir, tx_res, rx_ctl, wake));
+            runtime.block_on(worker(tx_res, rx_ctl, wake));
         })
         .expect("spawn ingest thread");
     (rx_res, IngestHandle { ctl: tx_ctl })
 }
 
 async fn worker(
-    fixtures_dir: PathBuf,
     tx: mpsc::Sender<IngestMsg>,
     mut rx_ctl: tokio_mpsc::UnboundedReceiver<Ctl>,
     wake: impl Fn(),
 ) {
-    // 1. Offline base: load fixtures once. A failure here is fatal (no data).
-    match load_fixtures(&fixtures_dir).await {
-        Ok((events, failures)) => {
-            let _ = tx.send(IngestMsg::Loaded {
-                events,
-                failures,
-                origin: "fixtures",
-            });
-            wake();
-        }
-        Err(msg) => {
-            let _ = tx.send(IngestMsg::Failed(msg));
-            wake();
-            return;
-        }
-    }
-
-    // 2. Live GDELT loop, driven by control messages and the feed cadence.
+    // Live GDELT loop, driven by control messages and the feed cadence.
     // Endpoint env overrides let tests/mocks point the loop at a local server
     // (and reproduce the network-down path deterministically).
     let gdelt = GdeltSource::new().ok().map(|mut g| {
@@ -320,19 +281,23 @@ async fn worker(
                     noaa_status.online = on && noaa_src.is_some();
                     if on {
                         status.detail = "online — fetching…".into();
+                        status.partial = false;
                         next_at = Instant::now(); // fetch promptly
                         if acled_src.is_some() {
                             acled_status.detail = "online — fetching…".into();
+                            acled_status.partial = false;
                             acled_next = Instant::now();
                         }
                         if noaa_src.is_some() {
                             noaa_status.detail = "online — fetching…".into();
+                            noaa_status.partial = false;
                             noaa_next = Instant::now();
                         }
                     } else {
                         backoff.reset();
                         status.degraded = false;
-                        status.detail = "offline — fixture data only".into();
+                        status.partial = false;
+                        status.detail = "live updates paused — cached real data only".into();
                         status.next_attempt_epoch_s = None;
                         for (b, s) in [
                             (&mut acled_backoff, &mut acled_status),
@@ -340,7 +305,8 @@ async fn worker(
                         ] {
                             b.reset();
                             s.degraded = false;
-                            s.detail = "offline — fixture data only".into();
+                            s.partial = false;
+                            s.detail = "live updates paused — cached real data only".into();
                             s.next_attempt_epoch_s = None;
                         }
                     }
@@ -440,6 +406,7 @@ async fn live_cycle<S: SignalSource>(
             let (events, failures) = storage::partition_normalized(src, &raws);
             backoff.reset();
             status.degraded = false;
+            status.partial = false;
             status.last_success_epoch_s = Some(now.timestamp());
             status.detail = format!("online · {} records this cycle", events.len());
             tracing::info!(records = events.len(), origin, "live cycle ok");
@@ -455,7 +422,11 @@ async fn live_cycle<S: SignalSource>(
         Err(e) => {
             let d = backoff.after_error(&e, jitter01());
             status.degraded = true;
-            status.detail = format!("degraded — showing cached data · {e}");
+            status.partial = false;
+            status.detail = format!(
+                "degraded — showing cached real data · {}",
+                compact_error(&e)
+            );
             tracing::warn!(
                 retry_in_s = d.as_secs(),
                 attempt = backoff.attempt(),
@@ -519,6 +490,7 @@ async fn fetch_cycle(
         let err = pick_backoff_error(&doc_err, &events_err);
         let d = backoff.after_error(err, jitter01());
         status.degraded = true;
+        status.partial = false;
         status.detail = format!(
             "degraded — showing cached data · {}",
             errors_summary(&doc_err, &events_err)
@@ -535,6 +507,7 @@ async fn fetch_cycle(
         status.degraded = false;
         status.last_success_epoch_s = Some(now.timestamp());
         let partial = errors_summary(&doc_err, &events_err);
+        status.partial = !partial.is_empty();
         status.detail = if partial.is_empty() {
             format!("online · {} new records this cycle", events.len())
         } else {
@@ -583,12 +556,28 @@ fn pick_backoff_error<'a>(
 fn errors_summary(doc_err: &Option<SourceError>, events_err: &Option<SourceError>) -> String {
     let mut parts = Vec::new();
     if let Some(e) = doc_err {
-        parts.push(format!("doc: {e}"));
+        parts.push(format!("DOC: {}", compact_error(e)));
     }
     if let Some(e) = events_err {
-        parts.push(format!("events: {e}"));
+        parts.push(format!("Events: {}", compact_error(e)));
     }
     parts.join("; ")
+}
+
+fn compact_error(error: &SourceError) -> String {
+    let text = error.to_string();
+    let without_url = text
+        .split_once(" for url (")
+        .map_or(text.as_str(), |(summary, _)| summary);
+    const MAX_CHARS: usize = 180;
+    if without_url.chars().count() <= MAX_CHARS {
+        without_url.to_owned()
+    } else {
+        format!(
+            "{}…",
+            without_url.chars().take(MAX_CHARS).collect::<String>()
+        )
+    }
 }
 
 /// Cheap sub-second jitter in [0, 1) from the wall clock (no `rand` dep needed
@@ -597,30 +586,24 @@ fn jitter01() -> f64 {
     f64::from(Utc::now().timestamp_subsec_nanos()) / 1e9
 }
 
-/// Load and normalize all committed fixtures (the offline base). The fixture
-/// span is fixed and synthetic, so fetch everything.
-async fn load_fixtures(dir: &Path) -> Result<(Vec<GeoTemporalEvent>, Vec<IngestFailure>), String> {
-    let source =
-        FixtureSource::from_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
-    if source.files().is_empty() {
-        return Err(format!(
-            "no fixture files in {} — run `cargo run -p source-fixtures --bin generate-fixtures`",
-            dir.display()
-        ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_error_drops_request_urls() {
+        let error = SourceError::Http(
+            "error sending request for url (https://example.invalid/private?long=query)".into(),
+        );
+        let summary = compact_error(&error);
+        assert_eq!(summary, "http error: error sending request");
+        assert!(!summary.contains("https://"));
     }
-    let window = TimeWindow::new(
-        Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
-        Utc.with_ymd_and_hms(2100, 1, 1, 0, 0, 0).unwrap(),
-    );
-    let raws = source
-        .fetch(window, &SourceFilters::default())
-        .await
-        .map_err(|e| format!("fixture fetch: {e}"))?;
-    let (events, failures) = storage::partition_normalized(&source, &raws);
-    tracing::info!(
-        events = events.len(),
-        failures = failures.len(),
-        "fixtures normalized"
-    );
-    Ok((events, failures))
+
+    #[test]
+    fn compact_error_bounds_unstructured_messages() {
+        let summary = compact_error(&SourceError::Other("x".repeat(300)));
+        assert_eq!(summary.chars().count(), 181);
+        assert!(summary.ends_with('…'));
+    }
 }

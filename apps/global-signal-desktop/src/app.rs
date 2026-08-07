@@ -7,7 +7,8 @@
 use std::sync::mpsc;
 
 use core_types::{
-    BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, RegionBucket, bucket_start_epoch,
+    BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, RegionBucket, SourceId,
+    bucket_start_epoch,
 };
 use geo_utils::CountryIndex;
 use renderer::{BasemapLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
@@ -161,8 +162,8 @@ pub struct App {
     pub phase: Phase,
     ingest_rx: Option<mpsc::Receiver<IngestMsg>>,
     ingest_handle: IngestHandle,
-    /// Batches waiting to be handed to the storage actor (one ingest in flight
-    /// at a time). Fed by fixture load + live GDELT cycles.
+    /// Batches waiting to be handed to the storage actor (one live ingest in
+    /// flight at a time).
     ingest_queue: std::collections::VecDeque<Batch>,
     /// Live online mode (all live sources); drives the ingest worker.
     pub online: bool,
@@ -232,7 +233,9 @@ impl App {
             Box::new(move || ctx.request_repaint()),
         )?;
         let settings = SettingsDb::open(&data_dir.join("settings.sqlite"))?;
-        let filters: Filters = settings.get("filters")?.unwrap_or_default();
+        // Do not carry fixture-era theme selections into the live-only UI.
+        // Subsequent live selections persist under this new key normally.
+        let filters: Filters = settings.get("filters_live_v1")?.unwrap_or_default();
 
         // Retention: env override wins, else the saved setting, else unbounded.
         let retention_days: Option<u32> = match std::env::var("LES_RETENTION_DAYS") {
@@ -241,13 +244,21 @@ impl App {
         };
         store.set_retention(retention_days);
 
-        // Always spawn the worker; if fixtures are missing it reports the fatal
-        // error itself (keeps the online-mode handle unconditional).
-        let fixtures_dir =
-            ingest::find_fixtures_dir().unwrap_or_else(|| std::path::PathBuf::from("fixtures"));
+        // Migrate the legacy mixed database in place: only fixture-attributed
+        // rows/logs are removed, preserving every real record. Finish before
+        // opening the window so synthetic data can never flash on screen or
+        // survive an early close.
+        let removed = store.purge_source(SourceId::Fixtures).wait()?;
+        if removed > 0 {
+            tracing::info!(removed, "legacy synthetic events removed");
+        }
+        let pending_extent = Some(store.time_extent());
+        let pending_log = Some(store.ingest_log(20));
+        let pending_vocab = Some(store.theme_vocab());
+
         let ctx = cc.egui_ctx.clone();
-        let (ingest_rx, ingest_handle) = ingest::spawn(fixtures_dir, move || ctx.request_repaint());
-        let phase = Phase::Loading("loading fixtures…".into());
+        let (ingest_rx, ingest_handle) = ingest::spawn(move || ctx.request_repaint());
+        let phase = Phase::Loading("loading live data…".into());
 
         let mut app = Self {
             store,
@@ -266,12 +277,12 @@ impl App {
             retention_days,
             pending_ingest: None,
             ingest_report: None,
-            pending_log: None,
+            pending_log,
             ingest_log: None,
             show_log_window: false,
-            pending_extent: None,
+            pending_extent,
             extent: None,
-            pending_vocab: None,
+            pending_vocab,
             theme_vocab: None,
             timeline: Timeline {
                 len: WindowLen::D1,
@@ -293,10 +304,12 @@ impl App {
             detail: None,
         };
 
-        // Optional auto-start of live mode (headless verification/automation).
-        if std::env::var("LES_ONLINE").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes")) {
-            app.set_online(true);
-        }
+        // Live updates are the desktop default. LES_ONLINE=0 remains a useful
+        // explicit pause for testing cached real data without network access.
+        let online = std::env::var("LES_ONLINE")
+            .map(|v| !matches!(v.trim(), "0" | "false" | "no"))
+            .unwrap_or(true);
+        app.set_online(online);
         Ok(app)
     }
 
@@ -358,8 +371,7 @@ impl App {
 
     /// Poll every async reply; drive the phase machine.
     fn poll_async(&mut self) {
-        // 1a. Drain all worker messages: queue batches, apply status, note a
-        // fatal fixture failure. The worker stays alive for live GDELT cycles.
+        // 1a. Drain all worker messages: queue live batches and apply status.
         if let Some(rx) = &self.ingest_rx {
             loop {
                 match rx.try_recv() {
@@ -421,9 +433,7 @@ impl App {
             match result {
                 Ok(report) => {
                     self.ingest_report = Some(report);
-                    self.pending_extent = Some(self.store.time_extent());
-                    self.pending_log = Some(self.store.ingest_log(20));
-                    self.pending_vocab = Some(self.store.theme_vocab());
+                    self.refresh_metadata();
                 }
                 Err(e) => self.phase = Phase::Error(format!("ingest: {e}")),
             }
@@ -445,7 +455,14 @@ impl App {
                     self.dirty = true;
                 }
                 Ok(None) => {
-                    self.phase = Phase::Error("store is empty after ingest".into());
+                    self.extent = None;
+                    self.timeline.start_bucket = 0;
+                    self.window_buckets.clear();
+                    self.bucket_count = 0;
+                    self.map.heatmap = HeatmapLayer::empty();
+                    self.map.markers = MarkerLayer::new(Vec::new());
+                    self.map.marker_rows.clear();
+                    self.phase = Phase::Ready;
                 }
                 Err(e) => self.phase = Phase::Error(format!("extent: {e}")),
             }
@@ -615,11 +632,17 @@ impl App {
 
     fn persist_settings(&mut self) {
         if self.filters != self.last_saved_filters {
-            if let Err(e) = self.settings.set("filters", &self.filters) {
+            if let Err(e) = self.settings.set("filters_live_v1", &self.filters) {
                 tracing::warn!("saving filters: {e}");
             }
             self.last_saved_filters = self.filters.clone();
         }
+    }
+
+    fn refresh_metadata(&mut self) {
+        self.pending_extent = Some(self.store.time_extent());
+        self.pending_log = Some(self.store.ingest_log(20));
+        self.pending_vocab = Some(self.store.theme_vocab());
     }
 
     pub fn select_cell(&mut self, cell: u64, lonlat: Option<(f64, f64)>) {

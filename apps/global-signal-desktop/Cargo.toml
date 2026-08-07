@@ -6,10 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-# ACLED live ingestion (M5): off by default — the network path and its deps
-# compile out entirely. Requires ACLED_EMAIL/ACLED_PASSWORD env vars at run
-# time (docs/SAFETY_AND_PRIVACY.md: authorized, attributed, not redistributed).
+# The user-facing desktop is live-only, so its authorized/keyless live source
+# adapters are included by default. Credentials remain runtime env vars.
 [features]
+default = ["acled-live", "noaa-live"]
 acled-live = ["dep:source-acled", "source-acled/live"]
 # NOAA/NWS active alerts (M5 optional layer): keyless, US coverage.
 noaa-live = ["dep:source-noaa", "source-noaa/live"]
@@ -20,6 +20,7 @@ anyhow.workspace = true
 chrono.workspace = true
 core-types.workspace = true
 directories.workspace = true
+dotenvy.workspace = true
 eframe.workspace = true
 egui.workspace = true
 geo-utils.workspace = true
@@ -27,7 +28,6 @@ renderer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 source-acled = { workspace = true, optional = true }
-source-fixtures.workspace = true
 source-gdelt.workspace = true
 source-noaa = { workspace = true, optional = true }
 storage.workspace = true
@@ -36,6 +36,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+source-fixtures.workspace = true
 tempfile = "3"
 
 [lints]

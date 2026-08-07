@@ -7,13 +7,13 @@
   from source — the **first** build takes several minutes and is memory
   hungry; later builds hit the cache).
 - Linux: a C/C++ toolchain (`build-essential`).
-- No network is required to run the app — offline fixture mode is the
-  default and permanent regression path.
+- The desktop is live-data-only and needs network access to ingest data.
+  Committed fixtures remain a headless regression harness only.
 
 ## Common commands
 
 ```sh
-# Run the desktop app (offline, fixtures)
+# Run the live-only desktop (GDELT + NOAA, and ACLED when credentialed)
 cargo run -p global-signal-desktop
 
 # Regenerate synthetic fixtures (deterministic; commit the result)
@@ -31,8 +31,8 @@ cargo test --workspace
 |---|---|
 | `RUST_LOG` | tracing filter, e.g. `RUST_LOG=global_signal_desktop=debug`. |
 | `WGPU_BACKEND` | Override the wgpu backend (`dx12`, `vulkan`, `gl`) if a driver misbehaves. |
-| `LES_DATA_DIR` / `LES_FIXTURES_DIR` | Override the data dir / fixtures dir. |
-| `LES_ONLINE` | `1`/`true` auto-starts live GDELT mode (headless verification/automation). |
+| `LES_DATA_DIR` | Override the desktop data directory. |
+| `LES_ONLINE` | Live updates default on; `0`/`false` starts with network polling paused. |
 | `LES_RETENTION_DAYS` | Events retention cap in days (overrides the saved setting; `0`/unset = keep everything). |
 | `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` | Point the live loop at a local/mock server (testing; reproduces the network-down path). |
 | `ACLED_EMAIL` / `ACLED_PASSWORD` | myACLED OAuth credentials (M5, feature `acled-live`; ACLED retired API keys). Never committed — shell or gitignored `.env` only; see `.env.example`. |
@@ -42,9 +42,10 @@ cargo test --workspace
 
 ## Where data lives
 
-- Analytics DuckDB + settings SQLite: the per-user data dir
-  (`%APPDATA%\live-earth-signals` on Windows, XDG dirs on Linux).
-- Delete that directory to reset; the app re-ingests fixtures on next start.
+- Analytics DuckDB + settings SQLite: the per-user local data dir (for
+  example `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data` on Windows).
+- On startup, the desktop removes any legacy rows attributed to `fixtures`
+  and rebuilds its aggregates before showing data.
 
 ## Dependency policy
 

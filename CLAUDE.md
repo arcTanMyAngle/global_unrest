@@ -15,7 +15,7 @@ this machine) — see HANDOFF.md. Next: visualization batch V1
 ## Commands
 
 ```sh
-cargo run -p global-signal-desktop                     # run the app (offline, fixtures)
+cargo run -p global-signal-desktop                     # run live-only desktop (live sources default on)
 cargo test --workspace                                 # all tests, headless, no GPU
 cargo fmt --all --check                                # gate 1
 cargo clippy --workspace --all-targets -- -D warnings  # gate 2
@@ -25,15 +25,15 @@ cargo run -p workers                                   # M4 ingest worker (publi
 cargo run -p api                                       # M4 read API (needs LES_PUBLISH_DIR)
 docker compose up                                      # M4 worker + api stack (WSL2 on Windows)
 cargo test -p source-acled --features live             # M5 ACLED mock-server tests
-cargo run -p global-signal-desktop --features acled-live,noaa-live  # desktop with M5 live sources
+cargo run -p global-signal-desktop                     # ACLED + NOAA are desktop defaults
 cargo run -p workers --features acled-live,noaa-live   # worker with M5 live sources
 cargo deny check                                       # M6 gate: advisories + license allowlist
 ```
 
 M5 live sources are cargo features on both binaries: `acled-live` (needs
 `ACLED_EMAIL`/`ACLED_PASSWORD` — myACLED OAuth; ACLED retired API keys) and
-`noaa-live` (keyless). Both compile out by default; clippy the feature
-matrix when touching ingest loops.
+`noaa-live` (keyless). Both are desktop default features; the worker keeps
+them opt-in. Clippy the feature matrix when touching ingest loops.
 
 M4 services env: worker reads `LES_WORKER_DATA_DIR` (its own DuckDB),
 `LES_PUBLISH_DIR` (snapshot root), `LES_FIXTURES_DIR`, `LES_RETENTION_DAYS`,
@@ -58,8 +58,8 @@ DuckDB C++ (several minutes) — never `cargo clean` casually.
 - "Media attention" and "event data" are computed and displayed
   **separately**; score components are always shown, never only the
   combined number. Media attention ≠ ground truth.
-- One milestone at a time; offline fixture mode is a permanent supported
-  path (it is the regression harness).
+- One milestone at a time; synthetic fixtures remain a permanent headless
+  regression harness but must never enter the desktop runtime database/map.
 - API keys in env vars only; `.gitignore` covers `.env` and databases.
 
 ## Architecture in 30 seconds
@@ -94,7 +94,8 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   normalize pure and offline golden-tested, only `fetch*` touch the network.
 - `apps/global-signal-desktop` — eframe 0.35 shell; state machine in
   `app.rs`, map widget in `map_view.rs`, panels in `panels.rs`. `ingest.rs`
-  is a long-lived worker: fixtures (offline base) + the online GDELT loop.
+  is a long-lived, live-only GDELT/ACLED/NOAA worker. Startup purges legacy
+  `source=fixtures` rows and treats an empty database as valid.
   UI thread never blocks on storage; it ingests worker batches (dedup makes
   re-fetch idempotent).
 - `services/workers` — M4 ingest worker binary: owns its own DuckDB, ingests

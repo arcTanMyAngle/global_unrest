@@ -1,4 +1,4 @@
-//! Live Earth Signals — desktop app (Milestone 1: offline fixture mode).
+//! Live Earth Signals — live-data-only desktop app.
 //!
 //! Media attention is an imperfect, biased proxy — not ground truth. The UI
 //! keeps "media attention" and "event data" separated and shows score
@@ -14,6 +14,12 @@ mod panels;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eframe::Result {
+    // Local development credentials/config remain in the gitignored `.env`.
+    // Existing process environment variables win, so deployments can keep
+    // injecting secrets without a file.
+    let _ = dotenvy::dotenv();
+    let _ = dotenvy::from_filename(".env.local");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()

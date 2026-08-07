@@ -162,6 +162,10 @@ enum Cmd {
     SetRetention {
         days: Option<u32>,
     },
+    PurgeSource {
+        source: core_types::SourceId,
+        reply: mpsc::Sender<Result<usize, StorageError>>,
+    },
     TimeExtent {
         reply: mpsc::Sender<Result<Option<EpochWindow>, StorageError>>,
     },
@@ -290,6 +294,16 @@ impl StorageHandle {
         self.send(Cmd::SetRetention { days });
     }
 
+    /// Remove every event and ingest-log row attributed to `source`, then
+    /// rebuild derived buckets and baselines. The desktop uses this once at
+    /// startup to migrate legacy mixed fixture/live databases to live-only
+    /// data without discarding real records.
+    pub fn purge_source(&self, source: core_types::SourceId) -> Reply<usize> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::PurgeSource { source, reply });
+        Reply(rx)
+    }
+
     /// (min, max+1) event timestamp — i.e. a half-open window covering all
     /// data — or None when the store is empty.
     pub fn time_extent(&self) -> Reply<Option<EpochWindow>> {
@@ -405,7 +419,7 @@ impl Drop for StorageHandle {
     }
 }
 
-fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() + Send>) {
+fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() + Send>) {
     // Retention cap in days, held by the actor (the connection's owner). `None`
     // keeps everything (fixture default); online mode sets a finite window.
     let mut retention_days: Option<u32> = None;
@@ -421,6 +435,9 @@ fn actor_loop(conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn Fn() 
             Cmd::SetRetention { days } => {
                 retention_days = days.filter(|d| *d > 0);
                 continue; // no reply, no repaint needed
+            }
+            Cmd::PurgeSource { source, reply } => {
+                let _ = reply.send(do_purge_source(&mut conn, source));
             }
             Cmd::TimeExtent { reply } => {
                 let _ = reply.send(do_time_extent(&conn));
@@ -601,6 +618,43 @@ fn do_ingest(
         failures: failures.len(),
         pruned,
     })
+}
+
+fn do_purge_source(conn: &Connection, source: core_types::SourceId) -> Result<usize, StorageError> {
+    let source_name = source.as_str();
+    let deleted: i64 = conn.query_row(
+        "SELECT count(*) FROM events WHERE source = ?",
+        params![source_name],
+        |r| r.get(0),
+    )?;
+
+    if deleted == 0 {
+        return Ok(0);
+    }
+
+    // Shadow-table migration to avoid a large DELETE, which can be slow
+    // or hit memory/concurrency bugs. This is atomic and safer.
+    let tx = conn.transaction()?;
+    tx.execute(
+        "CREATE TABLE events_purged AS SELECT * FROM events WHERE source != ?",
+        params![source_name],
+    )?;
+    tx.execute("DROP TABLE events", [])?;
+    tx.execute("ALTER TABLE events_purged RENAME TO events", [])?;
+
+    // Ingest log is small, direct DELETE is fine.
+    tx.execute(
+        "DELETE FROM ingest_log WHERE source = ?",
+        params![source_name],
+    )?;
+
+    tx.commit()?;
+
+    // Rebuild aggregates *after* the new table is in place.
+    rebuild_buckets(conn)?;
+
+    tracing::info!(source = source_name, deleted, "source data purged");
+    Ok(deleted as usize)
 }
 
 /// Drop events older than `retention_days` relative to the newest event, so the
@@ -1266,6 +1320,30 @@ mod tests {
         let (total, rows) = store.ingest_log(10).wait().unwrap();
         assert_eq!(total, 1);
         assert!(rows[0].reason.contains("coordinates out of range"));
+    }
+
+    #[test]
+    fn purge_source_removes_only_that_sources_rows_and_rebuilds_aggregates() {
+        let store = open_mem();
+        let fixture = sample_event(1, EventKind::Protest, 2, 100);
+        let mut live = sample_event(2, EventKind::Conflict, 8, 200);
+        live.source = SourceId::Gdelt;
+        live.source_event_id = "gdelt-2".into();
+        live.id = event_id(SourceId::Gdelt, &live.source_event_id);
+
+        store
+            .ingest(vec![fixture, live], vec![failure()])
+            .wait()
+            .unwrap();
+        assert_eq!(store.purge_source(SourceId::Fixtures).wait().unwrap(), 1);
+
+        let (min_ts, max_ts) = store.time_extent().wait().unwrap().unwrap();
+        let buckets = store.query_buckets((min_ts, max_ts), None).wait().unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].h3_cell, 200);
+        assert_eq!(buckets[0].event_count, 1);
+        assert_eq!(store.ingest_log(10).wait().unwrap().0, 0);
+        assert_eq!(store.purge_source(SourceId::Fixtures).wait().unwrap(), 0);
     }
 
     #[test]

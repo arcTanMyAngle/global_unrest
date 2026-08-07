@@ -47,6 +47,7 @@ axum = "0.8"
 chrono = { version = "0.4.45", features = ["serde"] }
 criterion = "0.7"
 directories = "6"
+dotenvy = "0.15"
 duckdb = { version = "1.10504.0", features = ["bundled"] }
 earcutr = "0.5"
 eframe = "0.35"

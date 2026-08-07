@@ -54,11 +54,12 @@ jobs:
       - name: Clippy (${{ matrix.features }})
         run: |
           cargo clippy -p global-signal-desktop -p workers \
-            --features "${{ matrix.features }}" --all-targets -- -D warnings
+            --no-default-features --features "${{ matrix.features }}" \
+            --all-targets -- -D warnings
       - name: Test (${{ matrix.features }})
         run: |
           cargo test -p global-signal-desktop -p workers \
-            --features "${{ matrix.features }}"
+            --no-default-features --features "${{ matrix.features }}"
 
   # source-acled's `live` feature carries its own mock-OAuth-server suite
   # (tests/live_mock.rs) — real credentials are never needed for this.

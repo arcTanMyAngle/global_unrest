@@ -38,8 +38,8 @@ DuckDB `events` → bucket aggregation (H3 res 3 × 6-hour bucket) →
   `duckdb::Connection` is `!Sync`; the actor serializes all access. Results
   are sent back over channels and the actor fires a repaint notifier.
 - **Ingest thread**: a long-lived worker with a current-thread tokio runtime.
-  It loads the fixtures once (the permanent offline base) and then, when
-  **online mode** is enabled, runs a `select!` loop driven by control messages
+  It never loads fixtures in the desktop runtime. With live updates enabled,
+  it runs a `select!` loop driven by control messages
   (toggle online / fetch now) and the 15-minute feed cadence. Each live cycle
   is rate-limited (`governor`), fetches GDELT DOC attention + the latest Events
   dump, normalizes, and streams an incremental batch plus a `SourceStatus` back
@@ -83,7 +83,7 @@ never opens a `.duckdb` file. Contract and endpoints: [API.md](API.md).
 |---|---|
 | `crates/core-types` | Domain types: `GeoTemporalEvent`, enums, `TimeWindow`, `RegionBucket`, `SignalSource` trait, `RawRecord`. No I/O. |
 | `crates/geo-utils` | Equirectangular viewport math, H3 cell assignment, antimeridian splitting, country point-in-polygon lookup. egui-free. |
-| `crates/source-fixtures` | Offline fixture adapter + `generate-fixtures` bin (35 days of synthetic data). |
+| `crates/source-fixtures` | Test-only fixture adapter + deterministic generator; never linked into the production desktop runtime. |
 | `crates/source-gdelt` | M3 ✅: DOC 2.0 JSON API (`doc`) + 15-minute Events CSV-zip dumps (`events`), country/FIPS geocoding (`country`), and rate-limit/backoff/cadence policy (`sched`). Keyless; parsing/normalization pure and offline-testable, only `fetch*` touch the network. |
 | `crates/source-acled` | M5: feature-gated (`live`) ACLED adapter — OAuth password/refresh grants (`ACLED_EMAIL`/`ACLED_PASSWORD`), paged windowed reads, pure normalization that never stores `notes`. |
 | `crates/source-noaa` | M5: feature-gated (`live`) NOAA/NWS active alerts — keyless, US coverage; polygon alerts only (zone-scoped alerts yield no events). |
@@ -109,8 +109,9 @@ before M3.
 Dependency rule: eframe 0.35 rides wgpu 29. Never bump wgpu independently of
 eframe; upgrades happen in one dedicated PR per egui release.
 
-## Offline-first invariant
+## Live-only desktop invariant
 
-Fixture mode is a permanent supported path, not a development crutch: it is
-the regression harness for every later milestone. Anything that breaks
-`cargo run` with no network is a regression.
+The desktop database and map contain only records from live sources. Synthetic
+fixtures remain a permanent, headless regression harness for tests and the
+explicit service smoke-test path; they are never loaded by the desktop binary.
+An empty live database is a valid state and renders as “waiting for live data.”

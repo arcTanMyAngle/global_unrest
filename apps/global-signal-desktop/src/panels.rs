@@ -73,15 +73,14 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Live Earth Signals").strong());
 
-                // Live GDELT online toggle. Off = permanent offline fixture
-                // base; on = fixtures + live GDELT ingest on the feed cadence.
+                // Pause/resume network polling. Cached rows are always real;
+                // the desktop runtime never loads synthetic fixtures.
                 let mut online = self.online;
                 if ui
-                    .checkbox(&mut online, "live")
+                    .checkbox(&mut online, "live updates")
                     .on_hover_text(
-                        "Fetch live sources: GDELT (keyless, attributed) and — when \
-                         built with `acled-live` and credentialed — ACLED. Fixtures \
-                         always remain the offline base.",
+                        "Fetch GDELT, ACLED, and NOAA. Turning this off pauses \
+                         network requests but keeps cached real data visible.",
                     )
                     .changed()
                 {
@@ -236,7 +235,7 @@ impl App {
         let mut any_online = false;
         for s in self.source_statuses.iter().filter(|s| s.online) {
             any_online = true;
-            let color = if s.degraded {
+            let color = if s.degraded || s.partial {
                 Color32::from_rgb(255, 170, 90)
             } else {
                 Color32::from_rgb(120, 210, 140)
@@ -246,11 +245,12 @@ impl App {
                 .on_hover_text(&s.detail);
         }
         if !any_online {
-            ui.label(
-                RichText::new("offline fixture mode")
-                    .color(TEXT_DIM)
-                    .small(),
-            );
+            let label = if self.online {
+                "connecting live sources…"
+            } else {
+                "live updates paused"
+            };
+            ui.label(RichText::new(label).color(TEXT_DIM).small());
         }
     }
 
@@ -364,15 +364,15 @@ impl App {
             Phase::Ready => {
                 if let Some(r) = self.ingest_report {
                     let mut line = format!(
-                        "{} events stored ({} new, {} duplicate)",
-                        r.inserted + r.duplicates,
-                        r.inserted,
-                        r.duplicates
+                        "Last ingest: {} inserted, {} duplicate",
+                        r.inserted, r.duplicates
                     );
                     if r.pruned > 0 {
                         line.push_str(&format!(", {} pruned", r.pruned));
                     }
                     ui.label(line);
+                } else if self.extent.is_none() {
+                    ui.label("No live records stored yet.");
                 }
                 if let Some(days) = self.retention_days {
                     ui.label(
@@ -424,7 +424,13 @@ impl App {
                 (
                     "▲",
                     Color32::from_rgb(255, 170, 90),
-                    "degraded — showing cached data",
+                    "degraded — showing cached real data",
+                )
+            } else if s.partial {
+                (
+                    "▲",
+                    Color32::from_rgb(255, 170, 90),
+                    "partial — one feed unavailable",
                 )
             } else {
                 ("●", Color32::from_rgb(120, 210, 140), "online")
@@ -580,10 +586,14 @@ impl App {
 
         ui.add_space(6.0);
         ui.label(RichText::new("Location confidence (mean)").strong());
-        ui.add(
-            egui::ProgressBar::new(detail.mean_confidence)
-                .text(format!("{:.0}%", f64::from(detail.mean_confidence) * 100.0)),
-        );
+        if detail.counts_by_kind.is_empty() {
+            ui.label(RichText::new("N/A — no records in window").color(TEXT_DIM));
+        } else {
+            ui.add(
+                egui::ProgressBar::new(detail.mean_confidence)
+                    .text(format!("{:.0}%", f64::from(detail.mean_confidence) * 100.0)),
+            );
+        }
 
         if !detail.top_themes.is_empty() {
             ui.add_space(6.0);
@@ -681,22 +691,22 @@ impl App {
             .small(),
         );
         ui.add_space(4.0);
-        let data_note = if self.online {
-            "Media attention is an imperfect, biased proxy — not ground truth. \
-             Attention and event data are computed and shown separately. \
-             Live data: GDELT Project (free, with attribution); synthetic \
-             fixtures remain the offline base."
+        let update_state = if self.online {
+            "Live updates are enabled."
         } else {
+            "Live updates are paused; cached real data remains visible."
+        };
+        let data_note = format!(
             "Media attention is an imperfect, biased proxy — not ground truth. \
              Attention and event data are computed and shown separately. \
-             All current data is synthetic fixture data."
-        };
+             The desktop stores and displays live-source data only. {update_state}"
+        );
         ui.label(RichText::new(data_note).color(TEXT_DIM).small());
         ui.add_space(4.0);
         ui.label(
             RichText::new(
-                "Basemap: Natural Earth (public domain). \
-                 Event/attention data: GDELT Project when live.",
+                "Basemap: Natural Earth (public domain). Data sources: GDELT, \
+                 authorized ACLED, and NOAA/NWS.",
             )
             .color(TEXT_DIM)
             .small(),
