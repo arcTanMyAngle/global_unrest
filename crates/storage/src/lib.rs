@@ -620,7 +620,10 @@ fn do_ingest(
     })
 }
 
-fn do_purge_source(conn: &Connection, source: core_types::SourceId) -> Result<usize, StorageError> {
+fn do_purge_source(
+    conn: &mut Connection,
+    source: core_types::SourceId,
+) -> Result<usize, StorageError> {
     let source_name = source.as_str();
     let deleted: i64 = conn.query_row(
         "SELECT count(*) FROM events WHERE source = ?",
@@ -629,18 +632,52 @@ fn do_purge_source(conn: &Connection, source: core_types::SourceId) -> Result<us
     )?;
 
     if deleted == 0 {
+        conn.execute(
+            "DELETE FROM ingest_log WHERE source = ?",
+            params![source_name],
+        )?;
         return Ok(0);
     }
 
-    // Shadow-table migration to avoid a large DELETE, which can be slow
-    // or hit memory/concurrency bugs. This is atomic and safer.
+    // DuckDB 1.5 can fail a large predicate DELETE against this table's
+    // primary-key ART index ("Failed to delete all rows from index"). Build
+    // a fully constrained shadow table and atomically swap it instead.
     let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS events_purged;
+         CREATE TABLE events_purged (
+            id BIGINT PRIMARY KEY,
+            source VARCHAR NOT NULL,
+            source_event_id VARCHAR NOT NULL,
+            kind VARCHAR NOT NULL,
+            themes VARCHAR NOT NULL,
+            ts_epoch_s BIGINT NOT NULL,
+            ingested_at_epoch_s BIGINT NOT NULL,
+            lat DOUBLE NOT NULL,
+            lon DOUBLE NOT NULL,
+            location_precision VARCHAR NOT NULL,
+            location_confidence REAL NOT NULL,
+            country_iso VARCHAR NOT NULL,
+            admin1 VARCHAR,
+            h3_cell BIGINT NOT NULL,
+            article_count INTEGER NOT NULL,
+            distinct_source_count INTEGER NOT NULL,
+            severity REAL,
+            headline VARCHAR,
+            outlet_domains VARCHAR NOT NULL,
+            urls VARCHAR NOT NULL
+         );",
+    )?;
     tx.execute(
-        "CREATE TABLE events_purged AS SELECT * FROM events WHERE source != ?",
+        "INSERT INTO events_purged SELECT * FROM events WHERE source <> ?",
         params![source_name],
     )?;
-    tx.execute("DROP TABLE events", [])?;
-    tx.execute("ALTER TABLE events_purged RENAME TO events", [])?;
+    tx.execute_batch(
+        "DROP TABLE events;
+         ALTER TABLE events_purged RENAME TO events;
+         CREATE INDEX idx_events_ts ON events (ts_epoch_s);
+         CREATE INDEX idx_events_cell ON events (h3_cell);",
+    )?;
 
     // Ingest log is small, direct DELETE is fine.
     tx.execute(
@@ -648,13 +685,14 @@ fn do_purge_source(conn: &Connection, source: core_types::SourceId) -> Result<us
         params![source_name],
     )?;
 
+    // Keep the table swap and all derived analytics atomic.
+    rebuild_buckets(&tx)?;
     tx.commit()?;
 
-    // Rebuild aggregates *after* the new table is in place.
-    rebuild_buckets(conn)?;
-
+    let deleted = usize::try_from(deleted)
+        .map_err(|_| StorageError::Corrupt("negative source row count".into()))?;
     tracing::info!(source = source_name, deleted, "source data purged");
-    Ok(deleted as usize)
+    Ok(deleted)
 }
 
 /// Drop events older than `retention_days` relative to the newest event, so the
@@ -1344,6 +1382,36 @@ mod tests {
         assert_eq!(buckets[0].event_count, 1);
         assert_eq!(store.ingest_log(10).wait().unwrap().0, 0);
         assert_eq!(store.purge_source(SourceId::Fixtures).wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn purge_source_handles_more_than_one_index_chunk() {
+        let store = open_mem();
+        let mut events = Vec::with_capacity(2_501);
+        for seq in 0..2_500 {
+            events.push(sample_event(
+                seq,
+                EventKind::Protest,
+                seq % 24,
+                100 + u64::from(seq % 4),
+            ));
+        }
+        let mut live = sample_event(3_000, EventKind::Conflict, 8, 200);
+        live.source = SourceId::Acled;
+        live.source_event_id = "acled-live-row".into();
+        live.id = event_id(SourceId::Acled, &live.source_event_id);
+        events.push(live);
+        store.ingest(events, vec![]).wait().unwrap();
+
+        assert_eq!(
+            store.purge_source(SourceId::Fixtures).wait().unwrap(),
+            2_500
+        );
+        let extent = store.time_extent().wait().unwrap().unwrap();
+        let buckets = store.query_buckets(extent, None).wait().unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].h3_cell, 200);
+        assert_eq!(buckets[0].event_count, 1);
     }
 
     #[test]
