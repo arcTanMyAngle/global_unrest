@@ -85,6 +85,35 @@ are defined there and are binding.
 - criterion benches wired into CI as regression checks; profiling pass
   toward 1M-event retention.
 
+## M9 — Voluntary on-scene channels
+
+Build opt-in channels that journalists and other field contributors can use
+to publish live or recently recorded video, audio, text, and supporting media.
+Viewers can follow a channel in real time, while the publisher controls exact
+location disclosure, broadcast delay, retention, and audience access.
+
+This milestone begins with a threat model and a small end-to-end prototype,
+not a public broadcast launch. Its required foundations are:
+
+- publisher and newsroom authentication, signed media provenance, and capture
+  time kept distinct from upload and display time;
+- explicit evidence states (`unreviewed firsthand`, `identity verified`,
+  `independently corroborated`, `disputed`, and `corrected`) instead of a
+  guaranteed-truth badge;
+- approximate/hidden location by default, optional safety delay, emergency
+  cutoff, metadata stripping, expiring sessions, and publisher-controlled
+  retention;
+- channel discovery and playback, reconnecting low-bandwidth ingest, and a
+  text-only fallback for dangerous or unreliable network conditions;
+- moderation, impersonation resistance, bystander privacy, deepfake/replay
+  warnings, audit trails, and rapid correction/retraction distribution;
+- a documented incident-response and legal/licensing review before any hosted
+  deployment.
+
+Field reports remain a separate evidence class from media attention, provider
+events, and official alerts. Corroboration links these classes without
+silently blending them into one score.
+
 ## Standing quality bar (unchanged, every session)
 
 `cargo fmt --all --check` · `cargo clippy --workspace --all-targets -- -D

@@ -18,6 +18,13 @@ project with no published crate API to stabilize against.
 - Source status distinguishes partial GDELT success, abbreviates request
   errors, reports last-ingest inserts/duplicates accurately, resets fixture-era
   theme filters, and shows unavailable confidence as N/A.
+- End-user documentation now distinguishes shipped live-source capabilities
+  from the planned voluntary on-scene channel system, documents source refresh
+  cadence and evidence classes, and removes the stale synthetic-default claim.
+- Safety policy now explicitly supports consent-based field publishing while
+  requiring publisher-controlled location, delay, provenance, corroboration,
+  and correction states; it continues to prohibit covert tracking and
+  targeting.
 
 ## [0.6.0] — 2026-07-18 — M6: repo hygiene, CI depth, releases
 

@@ -4,11 +4,19 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
 
-A desktop-first, Rust-based geospatial dashboard that visualizes global
-news-attention and unrest/event signals over time. Civic-data research and
-visualization only: public or properly authorized sources, aggregate-level
-signals, transparent (non-ML) scoring, and a hard separation between "media
-attention" and "verified event data."
+A desktop-first geospatial dashboard for seeing where public-interest events
+are being reported, how coverage changes over time, and which claims are
+supported by event-data providers. It is intended to grow into a place where
+journalists and other people on the scene can publish opt-in, real-time field
+channels that viewers can follow much like a live broadcast.
+
+The application uses only live, public, or properly authorized sources at
+runtime. It preserves source provenance and keeps media attention, provider-
+verified events, and future firsthand field reports visibly separate. It does
+not call any source "guaranteed ground truth": even sincere eyewitnesses can
+be mistaken, delayed, coerced, or impersonated. Instead, the product direction
+is **traceable evidence**—identity and consent signals, timestamps, source
+history, corroboration, corrections, and a clear confidence state.
 
 **Milestones 1–6 complete** (M6 = repo hygiene/CI/releases; see
 [CHANGELOG.md](CHANGELOG.md)). The desktop runtime is **live-data-only**:
@@ -16,16 +24,63 @@ attention" and "verified event data."
 active alerts** (keyless). Synthetic fixtures remain test assets but are
 never loaded into or displayed by the desktop app.
 
+## Who this is for
+
+- **Journalists and newsrooms** monitoring developing stories, comparing
+  coverage with structured event reports, and eventually publishing or
+  following consent-based field channels.
+- **People in affected areas** seeking a provenance-rich view of nearby
+  reports and official alerts without treating a viral post as confirmed.
+- **Humanitarian, civic, conflict, and OSINT researchers** studying aggregate
+  patterns, coverage gaps, and changes over time.
+- **Emergency and weather analysts** viewing US NOAA/NWS polygon alerts
+  alongside other signals.
+- **Educators and developers** exploring a transparent Rust, DuckDB, H3, and
+  Parquet geospatial pipeline.
+
+This is a situational-awareness aid, not a substitute for official emergency
+instructions or a promise that an area is safe. The current build does not
+provide person-level tracking or live video channels.
+
+## What is available today
+
+| Capability | Status | What it means |
+|---|---|---|
+| GDELT media attention and events | Live | Global news metadata and CAMEO event records; coverage is not confirmation. |
+| ACLED event data | Live with authorized credentials | Curated conflict and civic-event records; access and available dates depend on the account. |
+| NOAA/NWS alerts | Live | Active US and territory alerts with polygon geometry; zone-only alerts are not placed at guessed coordinates. |
+| Map, filters, replay, and inspector | Available | Explore heat, markers, sources, themes, confidence, and six-hour analysis buckets. |
+| Local Parquet export and ingest log | Available | Export normalized session data and inspect rejected records. |
+| On-scene publisher channels | Planned | Opt-in live video/audio/text with publisher safety controls, provenance, and corroboration states. |
+
+### How to read the evidence
+
+The interface treats these as different evidence classes:
+
+1. **Media attention** says that outlets are covering something. It does not
+   prove the underlying claim or that the publisher is located at the event.
+2. **Provider event data** is normalized from GDELT Events or an authorized
+   provider such as ACLED. It may be curated or corrected later, but is still
+   a report rather than infallible truth.
+3. **Official alerts** are authoritative notices from their issuing agency,
+   within that agency's coverage and update cycle.
+4. **Firsthand field reports** are a planned class. They should show whether
+   the publisher is authenticated, whether time/location evidence is present,
+   whether independent sources corroborate the report, and whether it has been
+   corrected or disputed. A `live`, `verified identity`, or `on scene` badge
+   must never be presented as proof that every claim is true.
+
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Sources["Live sources (feature-gated, keyless-first)"]
+    subgraph Sources["Live runtime sources"]
         GDELT["source-gdelt\n(M3, keyless)"]
         ACLED["source-acled\n(M5, acled-live)"]
         NOAA["source-noaa\n(M5, noaa-live)"]
-        FIX["source-fixtures\n(test-only regression data)"]
     end
+
+    FIX["source-fixtures\ntests only; never displayed"]
 
     subgraph Core["Pure core (no I/O)"]
         CT["core-types\nGeoTemporalEvent, SignalSource"]
@@ -96,11 +151,22 @@ Pan by dragging, zoom with the scroll wheel, `reset view` in the top bar.
 
 Live updates start automatically. GDELT uses the DOC 2.0 API (media
 attention, geocoded to source country) plus the 15-minute Events dumps
-(discrete CAMEO events), rate-limited and politely backed off. `↻` forces an immediate fetch; the
-inspector's **Live source** panels show per-source state and, if the
-network drops, a degraded/partial badge (last-known real data stays on
-screen). The **live updates** checkbox pauses network requests without
+(discrete CAMEO events), rate-limited and politely backed off. `↻` forces an
+immediate fetch; the inspector's **Live source** panels show per-source state
+and, if the network drops, a degraded/partial badge. Last-known real data stays
+on screen. The **live updates** checkbox pauses network requests without
 switching to synthetic data. `LES_ONLINE=0` starts paused.
+
+| Source | Normal fetch cadence | Important limitation |
+|---|---:|---|
+| GDELT | 15 minutes | Upstream DOC or Events feeds can be partial, delayed, or temporarily unavailable. |
+| NOAA/NWS | 10 minutes | US and territories only; only alerts with usable geometry appear on the map. |
+| ACLED | 12 hours | Credentials, license tier, curation delay, and account date restrictions apply. |
+
+Three times are deliberately kept distinct: the **event/publish time** from
+the source, the **ingest time** when this app received it, and the **six-hour
+analysis bucket** used by the timeline and scores. A frequent fetch does not
+mean that every underlying event is current or independently confirmed.
 
 ### ACLED and NOAA
 
@@ -173,14 +239,50 @@ macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.
   M7 service hardening, M8 stretch layers — see
   [docs/ROADMAP.md](docs/ROADMAP.md).
 
+### Product direction: on-scene channels
+
+A future release is intended to let approved journalists and voluntary field
+contributors run channels that viewers can tune into in real time. A channel
+may carry live or recently recorded video, audio, text updates, and supporting
+media. This is **publishing by a consenting source**, not covert tracking.
+
+The feature should ship only with the following foundations:
+
+- **Publisher safety controls:** approximate or hidden location by default,
+  optional broadcast delay, emergency stream cutoff, expiring sessions, and
+  the ability to remove location metadata before media is distributed.
+- **Authentication and provenance:** signed uploads, account and newsroom
+  verification where available, original capture time separated from upload
+  time, an audit trail for edits, and preserved source attribution.
+- **Verification states:** clear labels such as `unreviewed firsthand`,
+  `identity verified`, `independently corroborated`, `disputed`, and
+  `corrected`; no universal "ground truth" badge.
+- **Corroboration:** links between a field report, independent reporters,
+  official alerts, and structured event providers without silently blending
+  them into one score.
+- **Abuse resistance:** reporting and moderation, anti-impersonation controls,
+  rate limits, replay/deepfake warnings, and restricted access when a public
+  broadcast could endanger a source or bystander.
+- **Bystander privacy:** no face recognition, involuntary identity search, or
+  precise persistent location histories; retention and download permissions
+  remain under an explicit policy.
+
+Real-time delivery and safety can conflict. The publisher—not the viewer—must
+control whether exact location and true-live timing are disclosed. Emergency
+services and local safety guidance remain authoritative when they differ from
+a channel.
+
 ## Ethics & data policy
 
-This is a civic-data research tool, not a surveillance or targeting one —
-see [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) for the full
-policy. In short:
+This is a civic-data and voluntary field-publishing tool, not a covert
+surveillance or targeting system — see
+[docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) for the full policy.
+An on-scene contributor choosing to publish a channel is supported; locating,
+profiling, or following a person without consent is not. In short:
 
-- **Aggregate-level only** — no person-level identification, tracking, or
-  profiling; signals are keyed to H3 cells/countries and times.
+- **Aggregate by default** — existing data signals are keyed to H3
+  cells/countries and times. A future publisher may opt into a channel, but
+  exact location is never inferred or exposed by default.
 - **Metadata, not article bodies** — headlines, URLs, outlet domains only.
 - **Attention ≠ truth** — media attention and event data are always shown
   as separate, transparent components, never a single blended score.
@@ -191,20 +293,21 @@ policy. In short:
 
 ## Data & attribution
 
-- Offline (default): all data is **synthetic** fixture data; outlet names use
-  reserved `.example` domains and headlines are tagged `[synthetic]`.
-- Live mode: data is from the **[GDELT Project](https://www.gdeltproject.org/)**,
+- Desktop runtime data is live/real-source only. Synthetic fixtures use
+  reserved `.example` domains and remain isolated to automated tests; they are
+  never loaded into or displayed by the desktop application.
+- GDELT data is from the **[GDELT Project](https://www.gdeltproject.org/)**,
   used **with attribution** per its terms (keyless, no redistribution of raw
   dumps). GDELT DOC attention is geocoded only to the *source country* and is
-  always shown at country precision — an imperfect, coverage-biased proxy.
+  always shown at country precision—an imperfect, coverage-biased proxy.
 - Basemap: [Natural Earth](https://www.naturalearthdata.com/) 1:110m
   countries (public domain).
-- ACLED (feature `acled-live`): data from the **Armed Conflict Location &
+- ACLED (included in desktop defaults): data from the **Armed Conflict Location &
   Event Data Project (ACLED)**, [acleddata.com](https://acleddata.com) —
   authorized access only (free myACLED account; OAuth credentials via
   `ACLED_EMAIL`/`ACLED_PASSWORD` env vars). Used with attribution; raw ACLED
   data (including event narratives) is never stored or redistributed.
-- NOAA (feature `noaa-live`): **NOAA/NWS active weather alerts**
+- NOAA (included in desktop defaults): **NOAA/NWS active weather alerts**
   ([api.weather.gov](https://www.weather.gov/documentation/services-web-api)),
   US-government public domain; US coverage only.
 
