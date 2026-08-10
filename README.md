@@ -50,6 +50,7 @@ provide person-level tracking or live video channels.
 | ACLED event data | Live with authorized credentials | Curated conflict and civic-event records; access and available dates depend on the account. |
 | NOAA/NWS alerts | Live | Active US and territory alerts with polygon geometry; zone-only alerts are not placed at guessed coordinates. |
 | Map, filters, replay, and inspector | Available | Explore heat, markers, sources, themes, confidence, and six-hour analysis buckets. |
+| Related video and source links | Available | Click a region to open video URLs carried by its real source records, inspect source pages that may contain media, or launch a clearly labeled external YouTube search. |
 | Local Parquet export and ingest log | Available | Export normalized session data and inspect rejected records. |
 | On-scene publisher channels | Planned | Opt-in live video/audio/text with publisher safety controls, provenance, and corroboration states. |
 
@@ -137,7 +138,10 @@ You get a dark world map with:
   events (always separate), **score components as separate bars**
   (attention / unrest / spike-vs-baseline / combined, per
   [docs/SCORING.md](docs/SCORING.md)), low-confidence badges (baseline cold
-  start, coarse geocoding), top themes, outlet diversity, headline metadata.
+  start, coarse geocoding), top themes, outlet diversity, headline metadata,
+  source links, and related-video actions. Known video hosts/direct media URLs
+  are labeled as candidates; external search results remain explicitly
+  unverified.
 - **Filters** — event kinds, themes (vocabulary from the data), minimum
   location confidence, layer toggles.
 - **Parquet export** — one click writes the session as date-partitioned

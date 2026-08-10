@@ -8,6 +8,13 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+### Added
+
+- The region inspector now exposes real source URLs for the selected area,
+  identifies direct/known-host video candidates, and offers an opt-in external
+  YouTube search using the area and event context. Nothing is fetched or
+  opened until the user clicks, and search results are labeled unverified.
+
 ### Changed
 
 - Desktop runtime is live-data-only: live polling defaults on, ACLED/NOAA are

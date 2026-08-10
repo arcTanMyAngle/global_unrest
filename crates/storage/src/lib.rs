@@ -19,7 +19,8 @@ use std::sync::mpsc;
 
 use chrono::Utc;
 use core_types::{
-    EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, RegionBucket, bucket_start_epoch,
+    EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, RegionBucket, SourceId,
+    bucket_start_epoch,
 };
 use duckdb::{Connection, params};
 
@@ -32,6 +33,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
 const MAX_POINT_ROWS: usize = 100_000;
 /// Rows examined for a region detail; plenty for one cell and one window.
 const MAX_DETAIL_ROWS: usize = 5_000;
+/// Source-link groups retained for one inspector query. Each row can contain
+/// more than one URL, while global URL dedup prevents repeated actions.
+const MAX_SOURCE_LINK_ROWS: usize = 40;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -86,6 +90,19 @@ pub struct HeadlineRow {
     pub article_count: u32,
 }
 
+/// Real source links associated with one record in the selected region.
+/// The UI identifies known video hosts/direct media URLs, but retains the
+/// original source and headline so it never implies a stronger match than the
+/// upstream record provides.
+#[derive(Debug, Clone)]
+pub struct SourceLinkRow {
+    pub ts_epoch_s: i64,
+    pub source: SourceId,
+    pub kind: EventKind,
+    pub headline: Option<String>,
+    pub urls: Vec<String>,
+}
+
 /// Aggregated detail for one region (H3 cell) over a window.
 #[derive(Debug, Clone, Default)]
 pub struct RegionDetail {
@@ -93,6 +110,7 @@ pub struct RegionDetail {
     pub counts_by_kind: Vec<(EventKind, u32)>,
     pub top_themes: Vec<(String, u32)>,
     pub headlines: Vec<HeadlineRow>,
+    pub source_links: Vec<SourceLinkRow>,
     pub distinct_outlets: u32,
     pub mean_confidence: f32,
     pub total_articles: u64,
@@ -896,6 +914,10 @@ fn parse_precision(s: &str) -> Result<LocationPrecision, StorageError> {
         .ok_or_else(|| StorageError::Corrupt(format!("unknown precision `{s}`")))
 }
 
+fn parse_source(s: &str) -> Result<SourceId, StorageError> {
+    SourceId::parse(s).ok_or_else(|| StorageError::Corrupt(format!("unknown source `{s}`")))
+}
+
 fn do_query_points(
     conn: &Connection,
     window: EpochWindow,
@@ -966,8 +988,9 @@ fn do_region_detail(
     window: EpochWindow,
 ) -> Result<RegionDetail, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT kind, themes, headline, outlet_domains, location_confidence,
-                location_precision, article_count, ts_epoch_s
+        "SELECT source, kind, themes, headline, outlet_domains, urls,
+                location_confidence, location_precision, article_count,
+                ts_epoch_s
          FROM events
          WHERE h3_cell = ? AND ts_epoch_s >= ? AND ts_epoch_s < ?
          ORDER BY article_count DESC, ts_epoch_s DESC
@@ -979,12 +1002,14 @@ fn do_region_detail(
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, f32>(4)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
+                r.get::<_, f32>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
             ))
         },
     )?;
@@ -997,16 +1022,30 @@ fn do_region_detail(
         std::collections::BTreeMap::new();
     let mut theme_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut outlets: HashSet<String> = HashSet::new();
+    let mut seen_urls: HashSet<String> = HashSet::new();
     let mut conf_sum = 0.0f64;
     let mut n_rows = 0u32;
     let mut n_coarse = 0u32;
 
     for row in rows {
-        let (kind_s, themes_s, headline, domains_s, confidence, precision_s, articles, ts) = row?;
+        let (
+            source_s,
+            kind_s,
+            themes_s,
+            headline,
+            domains_s,
+            urls_s,
+            confidence,
+            precision_s,
+            articles,
+            ts,
+        ) = row?;
+        let source = parse_source(&source_s)?;
         let kind = parse_kind(&kind_s)?;
         let precision = parse_precision(&precision_s)?;
         let themes: Vec<String> = serde_json::from_str(&themes_s).unwrap_or_default();
         let domains: Vec<String> = serde_json::from_str(&domains_s).unwrap_or_default();
+        let urls: Vec<String> = serde_json::from_str(&urls_s).unwrap_or_default();
 
         n_coarse += u32::from(!precision.renders_as_point());
         kind_counts.entry(kind.as_str()).or_insert((kind, 0)).1 += 1;
@@ -1019,6 +1058,22 @@ fn do_region_detail(
         conf_sum += f64::from(confidence);
         n_rows += 1;
         detail.total_articles += articles.max(0) as u64;
+
+        if detail.source_links.len() < MAX_SOURCE_LINK_ROWS {
+            let unique_urls: Vec<String> = urls
+                .into_iter()
+                .filter(|url| seen_urls.insert(url.clone()))
+                .collect();
+            if !unique_urls.is_empty() {
+                detail.source_links.push(SourceLinkRow {
+                    ts_epoch_s: ts,
+                    source,
+                    kind,
+                    headline: headline.clone(),
+                    urls: unique_urls,
+                });
+            }
+        }
 
         if let Some(headline) = headline
             && detail.headlines.len() < 30
@@ -1513,9 +1568,13 @@ mod tests {
     #[test]
     fn region_detail_aggregates_one_cell() {
         let store = open_mem();
+        let mut video = sample_event(20, EventKind::Protest, 1, 400);
+        video.urls = vec!["https://www.youtube.com/watch?v=real-report".into()];
+        let mut article = sample_event(21, EventKind::Protest, 2, 400);
+        article.urls = vec!["https://news.example/report/21".into()];
         let events = vec![
-            sample_event(20, EventKind::Protest, 1, 400),
-            sample_event(21, EventKind::Protest, 2, 400),
+            video,
+            article,
             sample_event(22, EventKind::NewsAttention, 3, 400),
             sample_event(23, EventKind::Conflict, 3, 999), // other cell
         ];
@@ -1533,6 +1592,9 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(detail.distinct_outlets, 2);
         assert_eq!(detail.headlines.len(), 3);
+        assert_eq!(detail.source_links.len(), 2);
+        assert_eq!(detail.source_links[0].source, SourceId::Fixtures);
+        assert_eq!(detail.source_links[0].urls.len(), 1);
         assert_eq!(detail.total_articles, 30);
         assert!((detail.mean_confidence - 0.85).abs() < 1e-6);
         assert_eq!(detail.top_themes[0].1, 3); // protest & labor appear 3x each

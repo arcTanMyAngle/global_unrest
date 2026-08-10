@@ -22,6 +22,65 @@ fn fmt_ts(epoch_s: i64) -> String {
         .unwrap_or_else(|| format!("t={epoch_s}"))
 }
 
+fn host_matches(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn web_url(raw: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(raw).ok()?;
+    if matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some() {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+/// Conservative media classification: only direct video/playlist extensions
+/// and hosts whose primary product is video are labeled as video. Ordinary
+/// news pages remain source links because an article URL alone does not prove
+/// that it contains footage of this event.
+fn looks_like_video_url(raw: &str) -> bool {
+    let Some(parsed) = web_url(raw) else {
+        return false;
+    };
+    let path = parsed.path().to_ascii_lowercase();
+    if [".mp4", ".webm", ".mov", ".m4v", ".m3u8"]
+        .iter()
+        .any(|extension| path.ends_with(extension))
+    {
+        return true;
+    }
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    [
+        "youtube.com",
+        "youtu.be",
+        "vimeo.com",
+        "twitch.tv",
+        "tiktok.com",
+        "dailymotion.com",
+        "streamable.com",
+        "rumble.com",
+    ]
+    .iter()
+    .any(|domain| host_matches(&host, domain))
+}
+
+fn link_host(raw: &str) -> String {
+    web_url(raw)
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "source".into())
+}
+
+fn youtube_search_url(query: &str) -> String {
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    format!("https://www.youtube.com/results?search_query={encoded}")
+}
+
 /// Compact relative time vs. `now` (both epoch seconds): "12s ago", "in 14m".
 fn fmt_relative(epoch_s: i64, now: i64) -> String {
     let d = epoch_s - now;
@@ -539,6 +598,116 @@ impl App {
             ui.label(RichText::new("none in window").color(TEXT_DIM));
         }
 
+        // Video is opt-in: show only URLs carried by real source metadata as
+        // candidates, and never fetch or autoplay third-party content. A
+        // manual external search is available even when no direct link was
+        // attached, but is labeled unverified rather than silently joined to
+        // this region's events.
+        ui.add_space(6.0);
+        ui.label(RichText::new("Related video and source media").strong());
+        let mut video_links = Vec::new();
+        let mut source_links = Vec::new();
+        for row in &detail.source_links {
+            for source_url in &row.urls {
+                if web_url(source_url).is_none() {
+                    continue;
+                } else if looks_like_video_url(source_url) {
+                    video_links.push((row, source_url));
+                } else {
+                    source_links.push((row, source_url));
+                }
+            }
+        }
+
+        if video_links.is_empty() {
+            ui.label(
+                RichText::new("No direct video URL is attached to these records.").color(TEXT_DIM),
+            );
+        } else {
+            ui.label(format!(
+                "{} video candidate{} from source metadata",
+                video_links.len(),
+                if video_links.len() == 1 { "" } else { "s" }
+            ));
+            for (row, source_url) in video_links.into_iter().take(10) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.hyperlink_to("▶ open video ↗", source_url);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {} · {}",
+                            link_host(source_url),
+                            row.source,
+                            fmt_ts(row.ts_epoch_s)
+                        ))
+                        .color(TEXT_DIM)
+                        .small(),
+                    );
+                });
+                if let Some(headline) = &row.headline {
+                    ui.label(RichText::new(headline).small());
+                }
+            }
+            ui.label(
+                RichText::new(
+                    "Candidate means the upstream record supplied the URL; review the footage and provenance before relying on it.",
+                )
+                .color(TEXT_DIM)
+                .small(),
+            );
+        }
+
+        let area = self.selected_label.as_deref().unwrap_or("selected area");
+        let context = detail
+            .source_links
+            .iter()
+            .find_map(|row| row.headline.as_deref())
+            .or_else(|| detail.headlines.first().map(|row| row.headline.as_str()))
+            .unwrap_or("incident event");
+        let search_terms: String = format!("{area} {context} video")
+            .chars()
+            .take(220)
+            .collect();
+        ui.hyperlink_to(
+            "search YouTube for related video ↗",
+            youtube_search_url(&search_terms),
+        );
+        ui.label(
+            RichText::new(
+                "External search opens only when clicked. Its results are unverified and may show a different place, time, or event.",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+
+        if !source_links.is_empty() {
+            ui.collapsing(
+                format!(
+                    "source pages that may contain media ({})",
+                    source_links.len()
+                ),
+                |ui| {
+                    for (row, source_url) in source_links.into_iter().take(10) {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.hyperlink_to(
+                                format!("open {} ↗", link_host(source_url)),
+                                source_url,
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {} · {}",
+                                    row.source,
+                                    row.kind.label(),
+                                    fmt_ts(row.ts_epoch_s)
+                                ))
+                                .color(TEXT_DIM)
+                                .small(),
+                            );
+                        });
+                    }
+                },
+            );
+        }
+
         // Score components — always all four, never only the combined number
         // (hard project rule; docs/SCORING.md).
         ui.add_space(6.0);
@@ -799,5 +968,40 @@ impl App {
         if !open {
             self.show_log_window = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_video_url, youtube_search_url};
+
+    #[test]
+    fn video_urls_are_classified_conservatively() {
+        assert!(looks_like_video_url(
+            "https://www.youtube.com/watch?v=report"
+        ));
+        assert!(looks_like_video_url(
+            "https://media.example.org/capture.MP4?token=redacted"
+        ));
+        assert!(!looks_like_video_url(
+            "https://news.example.org/article-with-video"
+        ));
+        assert!(!looks_like_video_url(
+            "https://youtube.com.attacker.example/watch?v=false"
+        ));
+        assert!(!looks_like_video_url("file:///private/capture.mp4"));
+    }
+
+    #[test]
+    fn external_video_search_encodes_user_visible_context() {
+        let search = youtube_search_url("Mexico City protest & safety");
+        assert!(search.starts_with("https://www.youtube.com/results?search_query="));
+        assert!(!search.contains(' '));
+        let parsed = url::Url::parse(&search).unwrap();
+        let query = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "search_query")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(query.as_deref(), Some("Mexico City protest & safety"));
     }
 }
