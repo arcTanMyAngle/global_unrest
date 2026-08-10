@@ -70,6 +70,13 @@ pub mod weights {
     /// …and below this much history a bucket is cold-start: neutral spike,
     /// low-confidence badge in the UI.
     pub const MIN_BASELINE_DAYS: u32 = 7;
+
+    /// A cell's spike halo (docs/VISUALIZATION.md V1 item 2) lights up once
+    /// `spike_score` clears this — comfortably above `SPIKE_NEUTRAL`.
+    pub const SPIKE_HALO_THRESHOLD: f64 = 0.8;
+    /// Cap on cells rendered with a halo at once, so a broad spike doesn't
+    /// paint hundreds of rings.
+    pub const SPIKE_HALO_MAX_CELLS: usize = 40;
 }
 
 /// Aggregate events into fully scored (H3 res-3 cell × 6-hour bucket) rows.
@@ -320,6 +327,35 @@ pub fn compose_window(buckets: &[RegionBucket], window: (i64, i64)) -> Option<Wi
         combined: scoring::combined_signal(attention, unrest, spike) as f32,
         spike_cold_start: cold,
     })
+}
+
+/// Cells worth a spike halo (docs/VISUALIZATION.md V1 item 2): for each
+/// cell, the max `spike_score` among its **non-cold-start** buckets in
+/// `buckets` (cold-start buckets have no baseline, so no anomaly claim —
+/// consistent with the low-confidence badge shown elsewhere for them),
+/// filtered to `>= threshold` and capped to the `max_cells` strongest.
+/// Threshold/cap are parameters (not baked in) so tests don't depend on the
+/// production constants in [`weights`].
+pub fn spike_halo_cells(
+    buckets: &[RegionBucket],
+    threshold: f64,
+    max_cells: usize,
+) -> Vec<(u64, f32)> {
+    let mut best: BTreeMap<u64, f32> = BTreeMap::new();
+    for b in buckets {
+        if b.spike_cold_start {
+            continue;
+        }
+        let slot = best.entry(b.h3_cell).or_insert(f32::MIN);
+        *slot = slot.max(b.spike_score);
+    }
+    let mut cells: Vec<(u64, f32)> = best
+        .into_iter()
+        .filter(|&(_, score)| f64::from(score) >= threshold)
+        .collect();
+    cells.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    cells.truncate(max_cells);
+    cells
 }
 
 #[cfg(test)]
@@ -626,5 +662,52 @@ mod tests {
     #[test]
     fn compose_window_empty_is_none() {
         assert!(compose_window(&[], (0, BUCKET_SECS)).is_none());
+    }
+
+    // ---- spike_halo_cells ---------------------------------------------
+
+    fn bucket(cell: u64, spike: f32, cold: bool) -> RegionBucket {
+        let mut b = RegionBucket::empty(cell, 0);
+        b.spike_score = spike;
+        b.spike_cold_start = cold;
+        b
+    }
+
+    #[test]
+    fn spike_halo_cells_filters_by_threshold() {
+        let buckets = vec![bucket(1, 0.9, false), bucket(2, 0.6, false)];
+        let halos = spike_halo_cells(&buckets, 0.8, 40);
+        assert_eq!(halos, vec![(1, 0.9)]);
+    }
+
+    #[test]
+    fn spike_halo_cells_excludes_cold_start_even_above_threshold() {
+        let buckets = vec![bucket(1, 0.95, true)];
+        assert!(spike_halo_cells(&buckets, 0.8, 40).is_empty());
+    }
+
+    #[test]
+    fn spike_halo_cells_takes_max_score_per_cell() {
+        // Same cell, two buckets in the window: one cold (ignored), the
+        // warm one's score wins even though it's listed first.
+        let buckets = vec![
+            bucket(1, 0.85, false),
+            bucket(1, 0.99, true),
+            bucket(1, 0.90, false),
+        ];
+        assert_eq!(spike_halo_cells(&buckets, 0.8, 40), vec![(1, 0.90)]);
+    }
+
+    #[test]
+    fn spike_halo_cells_sorts_descending_and_caps_at_max_cells() {
+        let buckets = vec![
+            bucket(1, 0.81, false),
+            bucket(2, 0.95, false),
+            bucket(3, 0.88, false),
+        ];
+        assert_eq!(
+            spike_halo_cells(&buckets, 0.8, 2),
+            vec![(2, 0.95), (3, 0.88)]
+        );
     }
 }

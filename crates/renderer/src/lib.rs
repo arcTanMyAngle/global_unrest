@@ -9,10 +9,12 @@
 //! cheap for epaint).
 
 pub mod basemap;
+pub mod halo;
 pub mod heatmap;
 pub mod markers;
 
 pub use basemap::BasemapLayer;
+pub use halo::HaloLayer;
 pub use heatmap::HeatmapLayer;
 pub use markers::{MarkerInput, MarkerLayer};
 
@@ -44,6 +46,10 @@ pub struct MapStyle {
     pub marker_disruption: Color32,
     pub marker_other: Color32,
     pub marker_attention: Color32,
+    /// Spike-halo ring color — near-white/achromatic so it reads as a
+    /// system overlay ("this is anomalous"), distinct from the hued kind
+    /// palette and the heat ramp.
+    pub halo_color: Color32,
 }
 
 impl Default for MapStyle {
@@ -60,6 +66,7 @@ impl Default for MapStyle {
             marker_disruption: Color32::from_rgb(96, 176, 255),
             marker_other: Color32::from_rgb(158, 158, 170),
             marker_attention: Color32::from_rgb(186, 130, 255),
+            halo_color: Color32::from_rgb(240, 240, 250),
         }
     }
 }

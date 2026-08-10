@@ -11,7 +11,7 @@ use core_types::{
     bucket_start_epoch,
 };
 use geo_utils::CountryIndex;
-use renderer::{BasemapLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
+use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
     EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail, Reply,
@@ -54,11 +54,20 @@ pub struct Filters {
     pub min_confidence: f32,
     pub show_heatmap: bool,
     pub show_markers: bool,
+    /// Pulsing rings on cells whose spike score clears
+    /// `analytics::weights::SPIKE_HALO_THRESHOLD`. `serde(default)` keeps
+    /// settings saved before this toggle existed loadable.
+    #[serde(default = "default_true")]
+    pub show_spike_halos: bool,
     pub heat_metric: HeatMetric,
     /// Selected themes; empty = no theme filtering. `serde(default)` keeps
     /// settings saved before M2 loadable.
     #[serde(default)]
     pub themes: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Filters {
@@ -72,6 +81,7 @@ impl Default for Filters {
             min_confidence: 0.0,
             show_heatmap: true,
             show_markers: true,
+            show_spike_halos: true,
             heat_metric: HeatMetric::Attention,
             themes: Vec::new(),
         }
@@ -492,6 +502,7 @@ impl App {
                     self.bucket_count = 0;
                     self.map.heatmap = HeatmapLayer::empty();
                     self.map.markers = MarkerLayer::new(Vec::new());
+                    self.map.spike_halos = HaloLayer::new(Vec::new());
                     self.map.marker_rows.clear();
                     self.histogram_raw.clear();
                     self.timeline_histogram.clear();
@@ -552,6 +563,7 @@ impl App {
                 Ok(buckets) => {
                     self.window_buckets = buckets;
                     self.rebuild_heatmap();
+                    self.rebuild_halos();
                 }
                 Err(e) => tracing::error!("bucket query: {e}"),
             }
@@ -637,6 +649,18 @@ impl App {
             .map(|(cell, v)| (cell, ((v + 1) as f32).ln() / denom))
             .collect();
         self.map.heatmap = HeatmapLayer::from_cells(&cells, &self.map.style);
+    }
+
+    /// Cells worth a spike halo, derived from the already-cached
+    /// `window_buckets` — no extra storage round-trip (mirrors
+    /// `rebuild_heatmap`, which shares the same dependency).
+    fn rebuild_halos(&mut self) {
+        let cells = analytics::spike_halo_cells(
+            &self.window_buckets,
+            analytics::weights::SPIKE_HALO_THRESHOLD,
+            analytics::weights::SPIKE_HALO_MAX_CELLS,
+        );
+        self.map.spike_halos = HaloLayer::new(cells);
     }
 
     fn rebuild_markers(&mut self, points: Vec<EventPoint>) {

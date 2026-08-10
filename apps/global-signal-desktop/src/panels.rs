@@ -163,6 +163,9 @@ impl App {
                 changed |= ui
                     .checkbox(&mut self.filters.show_markers, "markers")
                     .changed();
+                changed |= ui
+                    .checkbox(&mut self.filters.show_spike_halos, "spike halos")
+                    .changed();
                 ui.separator();
 
                 ui.label(RichText::new("heat:").color(TEXT_DIM));
@@ -818,6 +821,12 @@ impl App {
                 ui.label(RichText::new(kind.label()).small());
             });
         }
+        ui.horizontal(|ui| {
+            ui.colored_label(self.map.style.halo_color, "○");
+            ui.label(
+                RichText::new("Spike halo — cell clearly above its own trailing baseline").small(),
+            );
+        });
         ui.add_space(4.0);
         let metric = match self.filters.heat_metric {
             HeatMetric::Attention => "media attention",
@@ -907,6 +916,7 @@ impl App {
                             self.selected_cell,
                             self.filters.show_heatmap,
                             self.filters.show_markers,
+                            self.filters.show_spike_halos,
                         );
                         let _ = actions; // no selection while loading
                         let rect = ui.max_rect();
@@ -926,6 +936,7 @@ impl App {
                     self.selected_cell,
                     self.filters.show_heatmap,
                     self.filters.show_markers,
+                    self.filters.show_spike_halos,
                 );
                 if let Some(cell) = actions.selected_cell {
                     self.select_cell(cell, actions.clicked_lonlat);

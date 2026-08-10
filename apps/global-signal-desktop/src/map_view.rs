@@ -4,7 +4,7 @@
 use core_types::H3_RESOLUTION;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
 use geo_utils::MapViewport;
-use renderer::{BasemapLayer, HeatmapLayer, MapStyle, MarkerLayer};
+use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerLayer};
 use storage::EventPoint;
 
 pub struct MapView {
@@ -12,6 +12,7 @@ pub struct MapView {
     pub basemap: BasemapLayer,
     pub heatmap: HeatmapLayer,
     pub markers: MarkerLayer,
+    pub spike_halos: HaloLayer,
     /// Rows behind the marker layer, indexed by `MarkerInput::source_index`.
     pub marker_rows: Vec<EventPoint>,
     pub style: MapStyle,
@@ -33,18 +34,21 @@ impl MapView {
             basemap,
             heatmap: HeatmapLayer::empty(),
             markers: MarkerLayer::new(Vec::new()),
+            spike_halos: HaloLayer::new(Vec::new()),
             marker_rows: Vec::new(),
             style,
         }
     }
 
     /// Paint the map into the available space and handle interactions.
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ui: &mut Ui,
         selected_cell: Option<u64>,
         show_heatmap: bool,
         show_markers: bool,
+        show_spike_halos: bool,
     ) -> MapActions {
         let size = ui.available_size().max(Vec2::new(64.0, 64.0));
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
@@ -98,6 +102,15 @@ impl MapView {
         if show_markers {
             self.markers
                 .paint(&painter, &aff, rect.width(), &self.style);
+        }
+        if show_spike_halos && !self.spike_halos.is_empty() {
+            let time_secs = ui.input(|i| i.time);
+            self.spike_halos
+                .paint(&painter, &aff, rect.width(), &self.style, time_secs);
+            // Keep the pulse animating; bounded to a slow tick and only
+            // while halos are actually shown.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
         }
         if let Some(cell) = selected_cell {
             self.draw_cell_outline(&painter, &aff, rect.width(), cell);
