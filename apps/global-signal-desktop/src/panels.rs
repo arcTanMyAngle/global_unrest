@@ -349,16 +349,6 @@ impl App {
                     self.mark_dirty();
                 }
 
-                let slider_width = (ui.available_width() - 340.0).max(120.0);
-                ui.style_mut().spacing.slider_width = slider_width;
-                let mut start = self.timeline.start_bucket;
-                let resp =
-                    ui.add(egui::Slider::new(&mut start, 0..=max_start.max(0)).show_value(false));
-                if resp.changed() {
-                    self.timeline.start_bucket = start;
-                    self.mark_dirty();
-                }
-
                 if let Some((ws, we)) = self.current_window() {
                     ui.label(
                         RichText::new(format!("{}  →  {}", fmt_ts(ws), fmt_ts(we)))
@@ -367,6 +357,21 @@ impl App {
                     );
                 }
             });
+
+            let strip_width = ui.available_width();
+            let changed = crate::timeline_strip::show(
+                ui,
+                strip_width,
+                &self.timeline_histogram,
+                &self.map.style,
+                &mut self.timeline,
+                len,
+                max_start,
+            );
+            if changed {
+                self.mark_dirty();
+            }
+
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(

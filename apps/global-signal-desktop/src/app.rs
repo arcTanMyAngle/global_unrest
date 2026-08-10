@@ -15,7 +15,7 @@ use renderer::{BasemapLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
     EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail, Reply,
-    SettingsDb, StorageHandle,
+    SettingsDb, StorageHandle, TimelineHistogramPoint,
 };
 
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
@@ -148,6 +148,25 @@ pub struct Timeline {
     pub accum: f32,
 }
 
+/// Discrete-event kind order for the timeline histogram stack (mirrors
+/// `EventKind::ALL` minus `NewsAttention`, which is drawn as a line overlay
+/// so it never mixes with the event stack — CLAUDE.md's attention/event
+/// separation).
+pub const HISTOGRAM_STACK_KINDS: [EventKind; 4] = [
+    EventKind::Protest,
+    EventKind::Conflict,
+    EventKind::Disruption,
+    EventKind::Other,
+];
+
+/// One column of the timeline histogram strip: discrete-event counts by
+/// kind (indexed by [`HISTOGRAM_STACK_KINDS`]) plus the attention count.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HistogramBucket {
+    pub event_counts: [u32; 4],
+    pub attention_count: u32,
+}
+
 pub struct App {
     pub store: StorageHandle,
     pub settings: SettingsDb,
@@ -185,6 +204,13 @@ pub struct App {
     pending_vocab: Option<Reply<Vec<(String, u32)>>>,
     /// Distinct themes with usage counts, most-used first (from the data).
     pub theme_vocab: Option<Vec<(String, u32)>>,
+
+    pending_histogram: Option<Reply<Vec<TimelineHistogramPoint>>>,
+    /// Raw full-extent histogram rows, kept so a late-arriving `extent`
+    /// change can re-align the dense array without a fresh query.
+    histogram_raw: Vec<TimelineHistogramPoint>,
+    /// Dense, bucket-index-aligned histogram for the timeline strip.
+    pub timeline_histogram: Vec<HistogramBucket>,
 
     pub timeline: Timeline,
     pub filters: Filters,
@@ -255,6 +281,7 @@ impl App {
         let pending_extent = Some(store.time_extent());
         let pending_log = Some(store.ingest_log(20));
         let pending_vocab = Some(store.theme_vocab());
+        let pending_histogram = Some(store.timeline_histogram());
 
         let ctx = cc.egui_ctx.clone();
         let (ingest_rx, ingest_handle) = ingest::spawn(move || ctx.request_repaint());
@@ -284,6 +311,9 @@ impl App {
             extent: None,
             pending_vocab,
             theme_vocab: None,
+            pending_histogram,
+            histogram_raw: Vec::new(),
+            timeline_histogram: Vec::new(),
             timeline: Timeline {
                 len: WindowLen::D1,
                 start_bucket: 0,
@@ -453,6 +483,7 @@ impl App {
                     self.timeline.start_bucket = (total - len).max(0);
                     self.phase = Phase::Ready;
                     self.dirty = true;
+                    self.rebuild_histogram();
                 }
                 Ok(None) => {
                     self.extent = None;
@@ -462,6 +493,8 @@ impl App {
                     self.map.heatmap = HeatmapLayer::empty();
                     self.map.markers = MarkerLayer::new(Vec::new());
                     self.map.marker_rows.clear();
+                    self.histogram_raw.clear();
+                    self.timeline_histogram.clear();
                     self.phase = Phase::Ready;
                 }
                 Err(e) => self.phase = Phase::Error(format!("extent: {e}")),
@@ -484,6 +517,19 @@ impl App {
             match result {
                 Ok(vocab) => self.theme_vocab = Some(vocab),
                 Err(e) => tracing::error!("theme vocab: {e}"),
+            }
+        }
+
+        if let Some(reply) = &self.pending_histogram
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_histogram = None;
+            match result {
+                Ok(points) => {
+                    self.histogram_raw = points;
+                    self.rebuild_histogram();
+                }
+                Err(e) => tracing::error!("timeline histogram query: {e}"),
             }
         }
 
@@ -643,6 +689,32 @@ impl App {
         self.pending_extent = Some(self.store.time_extent());
         self.pending_log = Some(self.store.ingest_log(20));
         self.pending_vocab = Some(self.store.theme_vocab());
+        self.pending_histogram = Some(self.store.timeline_histogram());
+    }
+
+    /// Re-project `histogram_raw` into the dense, bucket-index-aligned
+    /// `timeline_histogram` array. Full-extent, not window-scoped — refreshed
+    /// only on ingest (`refresh_metadata`), never on scrub/window changes.
+    fn rebuild_histogram(&mut self) {
+        let Some((extent_start, _)) = self.extent else {
+            self.timeline_histogram.clear();
+            return;
+        };
+        let total = self.total_buckets().max(0) as usize;
+        let mut dense = vec![HistogramBucket::default(); total];
+        for p in &self.histogram_raw {
+            let idx = (p.bucket_start - extent_start) / BUCKET_SECS;
+            if idx < 0 || idx as usize >= dense.len() {
+                continue; // stale row outside the current extent
+            }
+            let slot = &mut dense[idx as usize];
+            if p.kind.is_attention() {
+                slot.attention_count += p.count;
+            } else if let Some(i) = HISTOGRAM_STACK_KINDS.iter().position(|&k| k == p.kind) {
+                slot.event_counts[i] += p.count;
+            }
+        }
+        self.timeline_histogram = dense;
     }
 
     pub fn select_cell(&mut self, cell: u64, lonlat: Option<(f64, f64)>) {

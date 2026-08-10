@@ -78,6 +78,16 @@ pub struct EventPoint {
     pub headline: Option<String>,
 }
 
+/// One `(bucket, kind)` count from the full-extent timeline histogram query.
+/// `kind` includes `NewsAttention` — callers separate it from discrete-event
+/// kinds (attention is drawn as a line overlay, never stacked with events).
+#[derive(Debug, Clone, Copy)]
+pub struct TimelineHistogramPoint {
+    pub bucket_start: i64,
+    pub kind: EventKind,
+    pub count: u32,
+}
+
 /// One headline row in the region inspector.
 #[derive(Debug, Clone)]
 pub struct HeadlineRow {
@@ -201,6 +211,9 @@ enum Cmd {
     },
     ThemeVocab {
         reply: mpsc::Sender<Result<Vec<(String, u32)>, StorageError>>,
+    },
+    TimelineHistogram {
+        reply: mpsc::Sender<Result<Vec<TimelineHistogramPoint>, StorageError>>,
     },
     RegionDetail {
         h3_cell: u64,
@@ -372,6 +385,16 @@ impl StorageHandle {
         Reply(rx)
     }
 
+    /// `(bucket_start, kind) -> count` over the **full** event extent (not
+    /// windowed) — the data behind the timeline histogram strip. Cheap at
+    /// current scale (one DuckDB `GROUP BY`); refresh on ingest, not on
+    /// window/scrub changes.
+    pub fn timeline_histogram(&self) -> Reply<Vec<TimelineHistogramPoint>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::TimelineHistogram { reply });
+        Reply(rx)
+    }
+
     pub fn region_detail(&self, h3_cell: u64, window: EpochWindow) -> Reply<RegionDetail> {
         let (reply, rx) = mpsc::channel();
         self.send(Cmd::RegionDetail {
@@ -484,6 +507,9 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
             }
             Cmd::ThemeVocab { reply } => {
                 let _ = reply.send(do_theme_vocab(&conn));
+            }
+            Cmd::TimelineHistogram { reply } => {
+                let _ = reply.send(do_timeline_histogram(&conn));
             }
             Cmd::RegionDetail {
                 h3_cell,
@@ -866,6 +892,36 @@ fn do_theme_vocab(conn: &Connection) -> Result<Vec<(String, u32)>, StorageError>
     let mut vocab: Vec<(String, u32)> = counts.into_iter().collect();
     vocab.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Ok(vocab)
+}
+
+/// Full-extent `(bucket_start, kind) -> count`, aggregated directly against
+/// `events` (no `region_buckets` roll-up exists for this — it's per-cell).
+/// Modulo, not integer division, floors each timestamp to its bucket start,
+/// so this doesn't depend on DuckDB's integer/float division rules.
+fn do_timeline_histogram(conn: &Connection) -> Result<Vec<TimelineHistogramPoint>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT ts_epoch_s - (ts_epoch_s % ?) AS bucket_start, kind, COUNT(*) AS cnt
+         FROM events
+         GROUP BY 1, 2
+         ORDER BY 1",
+    )?;
+    let rows = stmt.query_map(params![core_types::BUCKET_SECS], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (bucket_start, kind, count) = row?;
+        out.push(TimelineHistogramPoint {
+            bucket_start,
+            kind: parse_kind(&kind)?,
+            count: count.max(0) as u32,
+        });
+    }
+    Ok(out)
 }
 
 /// Bucket rows in a window, optionally restricted to one cell.
@@ -1655,6 +1711,42 @@ mod tests {
             .unwrap();
         assert_eq!(points.len(), 2);
         assert!(points.iter().all(|p| p.kind == EventKind::Protest));
+    }
+
+    #[test]
+    fn timeline_histogram_aggregates_by_bucket_and_kind_over_the_full_extent() {
+        let store = open_mem();
+        // Hours 1 and 5 share bucket 00–06; hour 7 falls in bucket 06–12.
+        let events = vec![
+            sample_event(60, EventKind::NewsAttention, 1, 100),
+            sample_event(61, EventKind::Protest, 5, 200), // different cell, same bucket
+            sample_event(62, EventKind::NewsAttention, 7, 100),
+            sample_event(63, EventKind::Conflict, 7, 300),
+        ];
+        store.ingest(events, vec![]).wait().unwrap();
+
+        let mut rows = store.timeline_histogram().wait().unwrap();
+        rows.sort_by_key(|r| (r.bucket_start, r.kind.as_str()));
+
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        // Each bucket holds two distinct kinds, so they group separately even
+        // though the second bucket's two events share a bucket_start.
+        let want = [
+            (day, EventKind::NewsAttention, 1),
+            (day, EventKind::Protest, 1),
+            (day + BUCKET_SECS, EventKind::Conflict, 1),
+            (day + BUCKET_SECS, EventKind::NewsAttention, 1),
+        ];
+        assert_eq!(rows.len(), want.len());
+        for (row, &(bucket_start, kind, count)) in rows.iter().zip(&want) {
+            assert_eq!(
+                (row.bucket_start, row.kind, row.count),
+                (bucket_start, kind, count)
+            );
+        }
     }
 
     #[test]
