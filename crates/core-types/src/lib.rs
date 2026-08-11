@@ -7,6 +7,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+mod media;
+pub use media::is_video_url;
+
 /// Canonical H3 resolution for region keys. Parents are derived, never stored.
 pub const H3_RESOLUTION: u8 = 3;
 
@@ -180,6 +183,16 @@ impl LocationPrecision {
     /// appear as fake hotspots.
     pub fn renders_as_point(self) -> bool {
         matches!(self, LocationPrecision::City | LocationPrecision::Exact)
+    }
+
+    /// Human-readable label for UI (tooltips, badges).
+    pub fn label(self) -> &'static str {
+        match self {
+            LocationPrecision::Country => "Country",
+            LocationPrecision::Admin1 => "Admin-1",
+            LocationPrecision::City => "City",
+            LocationPrecision::Exact => "Exact",
+        }
     }
 }
 

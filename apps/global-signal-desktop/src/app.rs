@@ -64,6 +64,9 @@ pub struct Filters {
     /// settings saved before M2 loadable.
     #[serde(default)]
     pub themes: Vec<String>,
+    /// Only show markers whose record carries a classified video URL.
+    #[serde(default)]
+    pub video_only: bool,
 }
 
 fn default_true() -> bool {
@@ -84,6 +87,7 @@ impl Default for Filters {
             show_spike_halos: true,
             heat_metric: HeatMetric::Attention,
             themes: Vec::new(),
+            video_only: false,
         }
     }
 }
@@ -599,6 +603,7 @@ impl App {
             Some(self.filters.kinds_for_query()),
             themes,
             self.filters.min_confidence,
+            self.filters.video_only,
         ));
         if let Some(cell) = self.selected_cell {
             self.pending_detail = Some(self.store.region_detail(cell, window));
@@ -673,6 +678,7 @@ impl App {
                 lat: p.lat,
                 kind: p.kind,
                 weight: ((p.article_count + 1) as f32).ln() / article_norm,
+                severity: p.severity,
                 source_index: i,
             })
             .collect();

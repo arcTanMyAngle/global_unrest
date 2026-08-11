@@ -141,7 +141,7 @@ fn full_offline_pipeline() {
 
     // --- precision rendering contract: no coarse rows come back as points ---
     let points = store
-        .query_points((min_ts, max_ts), None, None, 0.0)
+        .query_points((min_ts, max_ts), None, None, 0.0, false)
         .wait()
         .unwrap();
     assert!(!points.is_empty());

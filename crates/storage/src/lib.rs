@@ -76,6 +76,11 @@ pub struct EventPoint {
     pub ts_epoch_s: i64,
     pub article_count: u32,
     pub headline: Option<String>,
+    /// 0.0–1.0 when the source provides one (docs/VISUALIZATION.md V1 item 3).
+    pub severity: Option<f32>,
+    pub source: SourceId,
+    /// Any URL on this record classifies as video (`core_types::is_video_url`).
+    pub has_video: bool,
 }
 
 /// One `(bucket, kind)` count from the full-extent timeline histogram query.
@@ -207,6 +212,7 @@ enum Cmd {
         kinds: Option<Vec<EventKind>>,
         themes: Option<Vec<String>>,
         min_confidence: f32,
+        video_only: bool,
         reply: mpsc::Sender<Result<Vec<EventPoint>, StorageError>>,
     },
     ThemeVocab {
@@ -360,12 +366,14 @@ impl StorageHandle {
         Reply(rx)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn query_points(
         &self,
         window: EpochWindow,
         kinds: Option<Vec<EventKind>>,
         themes: Option<Vec<String>>,
         min_confidence: f32,
+        video_only: bool,
     ) -> Reply<Vec<EventPoint>> {
         let (reply, rx) = mpsc::channel();
         self.send(Cmd::QueryPoints {
@@ -373,6 +381,7 @@ impl StorageHandle {
             kinds,
             themes,
             min_confidence,
+            video_only,
             reply,
         });
         Reply(rx)
@@ -495,6 +504,7 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
                 kinds,
                 themes,
                 min_confidence,
+                video_only,
                 reply,
             } => {
                 let _ = reply.send(do_query_points(
@@ -503,6 +513,7 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
                     kinds.as_deref(),
                     themes.as_deref(),
                     min_confidence,
+                    video_only,
                 ));
             }
             Cmd::ThemeVocab { reply } => {
@@ -974,16 +985,18 @@ fn parse_source(s: &str) -> Result<SourceId, StorageError> {
     SourceId::parse(s).ok_or_else(|| StorageError::Corrupt(format!("unknown source `{s}`")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn do_query_points(
     conn: &Connection,
     window: EpochWindow,
     kinds: Option<&[EventKind]>,
     themes: Option<&[String]>,
     min_confidence: f32,
+    video_only: bool,
 ) -> Result<Vec<EventPoint>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, lat, lon, kind, location_precision, location_confidence,
-                ts_epoch_s, article_count, headline, themes
+                ts_epoch_s, article_count, headline, themes, severity, source, urls
          FROM events
          WHERE ts_epoch_s >= ? AND ts_epoch_s < ?
            AND location_precision IN ('city', 'exact')
@@ -1005,12 +1018,29 @@ fn do_query_points(
                 r.get::<_, i64>(7)?,
                 r.get::<_, Option<String>>(8)?,
                 r.get::<_, String>(9)?,
+                r.get::<_, Option<f32>>(10)?,
+                r.get::<_, String>(11)?,
+                r.get::<_, String>(12)?,
             ))
         },
     )?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, lat, lon, kind, precision, confidence, ts, articles, headline, themes_s) = row?;
+        let (
+            id,
+            lat,
+            lon,
+            kind,
+            precision,
+            confidence,
+            ts,
+            articles,
+            headline,
+            themes_s,
+            severity,
+            source_s,
+            urls_s,
+        ) = row?;
         let kind = parse_kind(&kind)?;
         if let Some(filter) = kinds
             && !filter.contains(&kind)
@@ -1023,6 +1053,11 @@ fn do_query_points(
                 continue;
             }
         }
+        let urls: Vec<String> = serde_json::from_str(&urls_s).unwrap_or_default();
+        let has_video = urls.iter().any(|u| core_types::is_video_url(u));
+        if video_only && !has_video {
+            continue;
+        }
         out.push(EventPoint {
             id: u64_from_db(id),
             lat,
@@ -1033,6 +1068,9 @@ fn do_query_points(
             ts_epoch_s: ts,
             article_count: articles as u32,
             headline,
+            severity,
+            source: parse_source(&source_s)?,
+            has_video,
         });
     }
     Ok(out)
@@ -1605,20 +1643,70 @@ mod tests {
         let window = (day, day + 86_400);
 
         // Precision contract: country-precision rows never come back as points.
-        let all = store.query_points(window, None, None, 0.0).wait().unwrap();
+        let all = store
+            .query_points(window, None, None, 0.0, false)
+            .wait()
+            .unwrap();
         assert_eq!(all.len(), 3);
 
         // Confidence floor.
-        let confident = store.query_points(window, None, None, 0.5).wait().unwrap();
+        let confident = store
+            .query_points(window, None, None, 0.5, false)
+            .wait()
+            .unwrap();
         assert_eq!(confident.len(), 2);
 
         // Kind filter.
         let protests = store
-            .query_points(window, Some(vec![EventKind::Protest]), None, 0.0)
+            .query_points(window, Some(vec![EventKind::Protest]), None, 0.0, false)
             .wait()
             .unwrap();
         assert_eq!(protests.len(), 2);
         assert!(protests.iter().all(|p| p.kind == EventKind::Protest));
+    }
+
+    #[test]
+    fn point_query_carries_severity_source_and_filters_by_video() {
+        let store = open_mem();
+        let mut with_video = sample_event(20, EventKind::Conflict, 3, 400);
+        with_video.severity = Some(0.75);
+        with_video.source = SourceId::Acled;
+        with_video.source_event_id = "acled-20".into();
+        with_video.id = event_id(SourceId::Acled, &with_video.source_event_id);
+        with_video.urls = vec![
+            "https://news.example.org/article".into(),
+            "https://www.youtube.com/watch?v=onscene".into(),
+        ];
+        let no_video = sample_event(21, EventKind::Conflict, 3, 400);
+        store
+            .ingest(vec![with_video, no_video], vec![])
+            .wait()
+            .unwrap();
+
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let window = (day, day + 86_400);
+
+        let all = store
+            .query_points(window, None, None, 0.0, false)
+            .wait()
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        let video_row = all.iter().find(|p| p.has_video).unwrap();
+        assert_eq!(video_row.severity, Some(0.75));
+        assert_eq!(video_row.source, SourceId::Acled);
+        let plain_row = all.iter().find(|p| !p.has_video).unwrap();
+        assert_eq!(plain_row.severity, None);
+        assert_eq!(plain_row.source, SourceId::Fixtures);
+
+        let video_only = store
+            .query_points(window, None, None, 0.0, true)
+            .wait()
+            .unwrap();
+        assert_eq!(video_only.len(), 1);
+        assert!(video_only[0].has_video);
     }
 
     #[test]
@@ -1706,7 +1794,7 @@ mod tests {
 
         // Theme-filtered points: both protest events match "labor".
         let points = store
-            .query_points(window, None, Some(vec!["labor".into()]), 0.0)
+            .query_points(window, None, Some(vec!["labor".into()]), 0.0, false)
             .wait()
             .unwrap();
         assert_eq!(points.len(), 2);

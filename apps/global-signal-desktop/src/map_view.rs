@@ -171,6 +171,13 @@ impl MapView {
             .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
             .unwrap_or_default();
         let title = row.headline.as_deref().unwrap_or("(no headline)");
+        let mut detail_parts = vec![row.source.to_string(), row.precision.label().to_string()];
+        if let Some(severity) = row.severity {
+            detail_parts.push(format!("severity {severity:.2}"));
+        }
+        if row.has_video {
+            detail_parts.push("🎥 video".to_string());
+        }
         let lines = [
             format!("{} · {}", row.kind.label(), when),
             truncate(title, 60),
@@ -179,6 +186,7 @@ impl MapView {
                 row.article_count,
                 f64::from(row.confidence) * 100.0
             ),
+            detail_parts.join(" · "),
         ];
 
         let font = FontId::proportional(12.0);

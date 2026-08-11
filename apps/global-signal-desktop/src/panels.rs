@@ -22,13 +22,6 @@ fn fmt_ts(epoch_s: i64) -> String {
         .unwrap_or_else(|| format!("t={epoch_s}"))
 }
 
-fn host_matches(host: &str, domain: &str) -> bool {
-    host == domain
-        || host
-            .strip_suffix(domain)
-            .is_some_and(|prefix| prefix.ends_with('.'))
-}
-
 fn web_url(raw: &str) -> Option<url::Url> {
     let parsed = url::Url::parse(raw).ok()?;
     if matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some() {
@@ -36,38 +29,6 @@ fn web_url(raw: &str) -> Option<url::Url> {
     } else {
         None
     }
-}
-
-/// Conservative media classification: only direct video/playlist extensions
-/// and hosts whose primary product is video are labeled as video. Ordinary
-/// news pages remain source links because an article URL alone does not prove
-/// that it contains footage of this event.
-fn looks_like_video_url(raw: &str) -> bool {
-    let Some(parsed) = web_url(raw) else {
-        return false;
-    };
-    let path = parsed.path().to_ascii_lowercase();
-    if [".mp4", ".webm", ".mov", ".m4v", ".m3u8"]
-        .iter()
-        .any(|extension| path.ends_with(extension))
-    {
-        return true;
-    }
-    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
-        return false;
-    };
-    [
-        "youtube.com",
-        "youtu.be",
-        "vimeo.com",
-        "twitch.tv",
-        "tiktok.com",
-        "dailymotion.com",
-        "streamable.com",
-        "rumble.com",
-    ]
-    .iter()
-    .any(|domain| host_matches(&host, domain))
 }
 
 fn link_host(raw: &str) -> String {
@@ -199,6 +160,10 @@ impl App {
                 changed |= ui.checkbox(&mut self.filters.other, "other").changed();
                 changed |= ui
                     .checkbox(&mut self.filters.attention_markers, "attention")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut self.filters.video_only, "🎥 has video")
+                    .on_hover_text("Only show markers whose record carries a classified video URL.")
                     .changed();
                 ui.separator();
 
@@ -619,7 +584,7 @@ impl App {
             for source_url in &row.urls {
                 if web_url(source_url).is_none() {
                     continue;
-                } else if looks_like_video_url(source_url) {
+                } else if core_types::is_video_url(source_url) {
                     video_links.push((row, source_url));
                 } else {
                     source_links.push((row, source_url));
@@ -989,24 +954,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_video_url, youtube_search_url};
-
-    #[test]
-    fn video_urls_are_classified_conservatively() {
-        assert!(looks_like_video_url(
-            "https://www.youtube.com/watch?v=report"
-        ));
-        assert!(looks_like_video_url(
-            "https://media.example.org/capture.MP4?token=redacted"
-        ));
-        assert!(!looks_like_video_url(
-            "https://news.example.org/article-with-video"
-        ));
-        assert!(!looks_like_video_url(
-            "https://youtube.com.attacker.example/watch?v=false"
-        ));
-        assert!(!looks_like_video_url("file:///private/capture.mp4"));
-    }
+    use super::youtube_search_url;
 
     #[test]
     fn external_video_search_encodes_user_visible_context() {

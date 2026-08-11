@@ -16,8 +16,13 @@ pub struct MarkerInput {
     pub lon: f64,
     pub lat: f64,
     pub kind: EventKind,
-    /// 0..1; scales marker size a little (e.g. from article count).
+    /// 0..1; scales marker size a little (e.g. from article count). Used as
+    /// the sizing driver only when `severity` is `None`.
     pub weight: f32,
+    /// 0..1 when the source provides one; takes priority over `weight` for
+    /// sizing so e.g. a high-fatality ACLED battle reads larger than a
+    /// 0-fatality protest. `None` falls back to `weight`.
+    pub severity: Option<f32>,
     /// Index back into the caller's point list (for hover/click lookups).
     pub source_index: usize,
 }
@@ -96,7 +101,8 @@ fn build_mesh(points: &[MarkerInput], aff: &Affine, lon_offset: f64, style: &Map
     mesh.indices.reserve(points.len() * 6);
     for p in points {
         let (x, y) = aff.apply(p.lon + lon_offset, p.lat);
-        let half = BASE_HALF_PX + MAX_EXTRA_PX * p.weight.clamp(0.0, 1.0);
+        let size_t = p.severity.unwrap_or(p.weight).clamp(0.0, 1.0);
+        let half = BASE_HALF_PX + MAX_EXTRA_PX * size_t;
         let color = style.marker_color(p.kind);
         let base = mesh.vertices.len() as u32;
         mesh.vertices.extend_from_slice(&[
@@ -139,6 +145,7 @@ mod tests {
                 lat: 48.85,
                 kind: EventKind::Protest,
                 weight: 0.5,
+                severity: None,
                 source_index: 0,
             },
             MarkerInput {
@@ -146,6 +153,7 @@ mod tests {
                 lat: -1.29,
                 kind: EventKind::Conflict,
                 weight: 1.0,
+                severity: None,
                 source_index: 1,
             },
         ])
@@ -157,6 +165,38 @@ mod tests {
         let mesh = build_mesh(&layer().points, &vp.affine(), 0.0, &MapStyle::default());
         assert_eq!(mesh.vertices.len(), 8);
         assert_eq!(mesh.indices.len(), 12);
+    }
+
+    #[test]
+    fn severity_overrides_weight_for_sizing_when_present() {
+        let vp = MapViewport::fit_world(1000.0, 500.0);
+        let aff = vp.affine();
+        let style = MapStyle::default();
+        let low_weight_high_severity = vec![MarkerInput {
+            lon: 0.0,
+            lat: 0.0,
+            kind: EventKind::Conflict,
+            weight: 0.0, // would be near-base size without severity
+            severity: Some(1.0),
+            source_index: 0,
+        }];
+        let base_size_no_severity = vec![MarkerInput {
+            lon: 0.0,
+            lat: 0.0,
+            kind: EventKind::Conflict,
+            weight: 0.0,
+            severity: None,
+            source_index: 0,
+        }];
+        let big = build_mesh(&low_weight_high_severity, &aff, 0.0, &style);
+        let small = build_mesh(&base_size_no_severity, &aff, 0.0, &style);
+        // Half-extent is (vertex.x - center.x) on the +x vertex (index 1).
+        let half_big = big.vertices[1].pos.x - big.vertices[3].pos.x;
+        let half_small = small.vertices[1].pos.x - small.vertices[3].pos.x;
+        assert!(
+            half_big > half_small,
+            "severity 1.0 must render larger than weight 0.0 with no severity"
+        );
     }
 
     #[test]
@@ -186,6 +226,7 @@ mod tests {
                 lat: ((i * 7) % 170) as f64 - 85.0,
                 kind: EventKind::Protest,
                 weight: 0.5,
+                severity: None,
                 source_index: i,
             })
             .collect();
