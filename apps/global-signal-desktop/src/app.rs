@@ -670,6 +670,13 @@ impl App {
 
     fn rebuild_markers(&mut self, points: Vec<EventPoint>) {
         let article_norm = 81f32.ln(); // saturates at 80 articles
+        // Recency fade only applies during playback — pausing always shows
+        // full detail (docs/VISUALIZATION.md V1 item 4).
+        let fade_window = self
+            .timeline
+            .playing
+            .then(|| self.current_window())
+            .flatten();
         let inputs: Vec<MarkerInput> = points
             .iter()
             .enumerate()
@@ -679,6 +686,9 @@ impl App {
                 kind: p.kind,
                 weight: ((p.article_count + 1) as f32).ln() / article_norm,
                 severity: p.severity,
+                alpha: fade_window.map_or(1.0, |(ws, we)| {
+                    fade_alpha(we - p.ts_epoch_s, we - ws, FADE_FLOOR_ALPHA)
+                }),
                 source_index: i,
             })
             .collect();
@@ -788,5 +798,50 @@ impl eframe::App for App {
             self.fire_queries();
         }
         self.persist_settings();
+    }
+}
+
+/// Recency-fade floor during playback (docs/VISUALIZATION.md V1 item 4:
+/// "oldest ≈ 35%").
+const FADE_FLOOR_ALPHA: f32 = 0.35;
+
+/// Playback recency-fade opacity: a point at the window end (`age_secs`
+/// `<= 0`) is fully opaque; one at the window start (`age_secs >=
+/// window_span_secs`) is `floor`; linear in between. Clamped so a point
+/// racing a window change (outside `[0, window_span_secs]`) still yields a
+/// sane alpha rather than an out-of-range one.
+fn fade_alpha(age_secs: i64, window_span_secs: i64, floor: f32) -> f32 {
+    if window_span_secs <= 0 {
+        return 1.0;
+    }
+    let t = (age_secs as f32 / window_span_secs as f32).clamp(0.0, 1.0);
+    1.0 - t * (1.0 - floor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fade_alpha_is_full_at_window_end_and_floor_at_window_start() {
+        assert_eq!(fade_alpha(0, 86_400, FADE_FLOOR_ALPHA), 1.0);
+        assert!((fade_alpha(86_400, 86_400, FADE_FLOOR_ALPHA) - FADE_FLOOR_ALPHA).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fade_alpha_is_linear_at_the_midpoint() {
+        let mid = fade_alpha(43_200, 86_400, FADE_FLOOR_ALPHA);
+        assert!((mid - (1.0 + FADE_FLOOR_ALPHA) / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fade_alpha_clamps_outside_the_window() {
+        assert_eq!(fade_alpha(-100, 86_400, FADE_FLOOR_ALPHA), 1.0);
+        assert!((fade_alpha(200_000, 86_400, FADE_FLOOR_ALPHA) - FADE_FLOOR_ALPHA).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fade_alpha_degenerate_window_is_full_opacity() {
+        assert_eq!(fade_alpha(0, 0, FADE_FLOOR_ALPHA), 1.0);
     }
 }

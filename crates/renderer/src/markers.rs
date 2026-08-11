@@ -23,6 +23,10 @@ pub struct MarkerInput {
     /// sizing so e.g. a high-fatality ACLED battle reads larger than a
     /// 0-fatality protest. `None` falls back to `weight`.
     pub severity: Option<f32>,
+    /// Opacity multiplier in [0, 1] — recency fade during playback (1.0 =
+    /// full opacity, the value outside playback so pausing shows full
+    /// detail).
+    pub alpha: f32,
     /// Index back into the caller's point list (for hover/click lookups).
     pub source_index: usize,
 }
@@ -103,7 +107,7 @@ fn build_mesh(points: &[MarkerInput], aff: &Affine, lon_offset: f64, style: &Map
         let (x, y) = aff.apply(p.lon + lon_offset, p.lat);
         let size_t = p.severity.unwrap_or(p.weight).clamp(0.0, 1.0);
         let half = BASE_HALF_PX + MAX_EXTRA_PX * size_t;
-        let color = style.marker_color(p.kind);
+        let color = style.marker_color(p.kind).gamma_multiply(p.alpha);
         let base = mesh.vertices.len() as u32;
         mesh.vertices.extend_from_slice(&[
             Vertex {
@@ -146,6 +150,7 @@ mod tests {
                 kind: EventKind::Protest,
                 weight: 0.5,
                 severity: None,
+                alpha: 1.0,
                 source_index: 0,
             },
             MarkerInput {
@@ -154,6 +159,7 @@ mod tests {
                 kind: EventKind::Conflict,
                 weight: 1.0,
                 severity: None,
+                alpha: 1.0,
                 source_index: 1,
             },
         ])
@@ -178,6 +184,7 @@ mod tests {
             kind: EventKind::Conflict,
             weight: 0.0, // would be near-base size without severity
             severity: Some(1.0),
+            alpha: 1.0,
             source_index: 0,
         }];
         let base_size_no_severity = vec![MarkerInput {
@@ -186,6 +193,7 @@ mod tests {
             kind: EventKind::Conflict,
             weight: 0.0,
             severity: None,
+            alpha: 1.0,
             source_index: 0,
         }];
         let big = build_mesh(&low_weight_high_severity, &aff, 0.0, &style);
@@ -196,6 +204,32 @@ mod tests {
         assert!(
             half_big > half_small,
             "severity 1.0 must render larger than weight 0.0 with no severity"
+        );
+    }
+
+    #[test]
+    fn alpha_fades_marker_opacity() {
+        let vp = MapViewport::fit_world(1000.0, 500.0);
+        let aff = vp.affine();
+        let style = MapStyle::default();
+        let faded = vec![MarkerInput {
+            lon: 0.0,
+            lat: 0.0,
+            kind: EventKind::Conflict,
+            weight: 0.5,
+            severity: None,
+            alpha: 0.35,
+            source_index: 0,
+        }];
+        let full = vec![MarkerInput {
+            alpha: 1.0,
+            ..faded[0].clone()
+        }];
+        let faded_mesh = build_mesh(&faded, &aff, 0.0, &style);
+        let full_mesh = build_mesh(&full, &aff, 0.0, &style);
+        assert!(
+            faded_mesh.vertices[0].color.a() < full_mesh.vertices[0].color.a(),
+            "a faded marker must be more transparent than a full-opacity one"
         );
     }
 
@@ -227,6 +261,7 @@ mod tests {
                 kind: EventKind::Protest,
                 weight: 0.5,
                 severity: None,
+                alpha: 1.0,
                 source_index: i,
             })
             .collect();
