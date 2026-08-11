@@ -34,7 +34,7 @@ diamond markers; 6-h-bucket time slider with playback; region inspector
 themes, headline metadata); theme/kind/confidence filters; per-source live
 status lines with attribution.
 
-## V1 — Timeline & anomaly reading (next session)
+## V1 — Timeline & anomaly reading ✅ shipped 2026-08-10 (see HANDOFF.md)
 
 The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
 

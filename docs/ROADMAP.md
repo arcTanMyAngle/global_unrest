@@ -2,9 +2,9 @@
 
 M0–M5 of [PLAN.md](PLAN.md) are complete (statuses there). This document is
 the forward plan, user-approved 2026-07-16. The visualization work has its
-own detailed design doc: **[VISUALIZATION.md](VISUALIZATION.md)** — that is
-the next session's focus (batch V1), with the M6 hygiene items free to
-interleave.
+own detailed design doc: **[VISUALIZATION.md](VISUALIZATION.md)** — batch V1
+shipped 2026-08-10 (see HANDOFF.md); **V2 is the next session's focus**, with
+M7 hygiene/hardening items free to interleave.
 
 ## Standing loose ends
 
@@ -51,11 +51,13 @@ Repo is live and public: `github.com/arcTanMyAngle/global_unrest` (pushed
 ## V1–V3 — Visualization batches
 
 See [VISUALIZATION.md](VISUALIZATION.md). Summary: V1 timeline histogram +
-spike halos + severity markers + recency fade; V2 attention↔unrest
-divergence layer, top-movers panel, region sparkline + event ledger; V3
-per-source layer identity + legend, basemap orientation polish, "how to
-read this map" overlay. Honest-visualization principles and perf guardrails
-are defined there and are binding.
+spike halos + severity markers + recency fade **✅ shipped 2026-08-10** (4
+PR-sized commits; also added a user-requested "has video" marker filter,
+folded into the severity/tooltip commit — see HANDOFF.md); V2 (next)
+attention↔unrest divergence layer, top-movers panel, region sparkline +
+event ledger; V3 per-source layer identity + legend, basemap orientation
+polish, "how to read this map" overlay. Honest-visualization principles and
+perf guardrails are defined there and are binding.
 
 ## M7 — Service hardening (api/worker)
 
