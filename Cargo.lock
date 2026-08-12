@@ -2143,6 +2143,7 @@ dependencies = [
  "source-acled",
  "source-fixtures",
  "source-gdelt",
+ "source-ioda",
  "source-noaa",
  "storage",
  "tempfile",
@@ -4975,6 +4976,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "source-ioda"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "core-types",
+ "geo-utils",
+ "reqwest",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "source-noaa"
 version = "0.6.0"
 dependencies = [
@@ -6468,6 +6481,7 @@ dependencies = [
  "source-acled",
  "source-fixtures",
  "source-gdelt",
+ "source-ioda",
  "source-noaa",
  "storage",
  "tokio",

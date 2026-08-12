@@ -3,7 +3,7 @@
 //!
 //! This crate is egui-free and I/O-free; it operates on data handed to it.
 
-use geo::{BoundingRect, Contains};
+use geo::{BoundingRect, Centroid, Contains};
 use h3o::{CellIndex, LatLng, Resolution};
 
 #[derive(Debug, thiserror::Error)]
@@ -201,6 +201,9 @@ pub struct CountryInfo {
     /// ISO 3166-1 alpha-3 (falls back to Natural Earth ADM0_A3 where NE
     /// publishes "-99", e.g. France and Norway in some editions).
     pub iso_a3: String,
+    /// ISO 3166-1 alpha-2, when Natural Earth publishes one (empty string
+    /// for the rare "-99" gaps — never guessed).
+    pub iso_a2: String,
     pub name: String,
 }
 
@@ -208,6 +211,9 @@ struct CountryShape {
     info: CountryInfo,
     bbox: geo::Rect<f64>,
     geom: geo::MultiPolygon<f64>,
+    /// Geometric centroid (lon, lat) of the country's polygon(s), precomputed
+    /// once at load via `geo::Centroid` (area-weighted, not a vertex mean).
+    centroid: Option<(f64, f64)>,
 }
 
 /// Point-in-polygon country index over Natural Earth countries.
@@ -248,13 +254,23 @@ impl CountryIndex {
                 Some(v) if v != "-99" => v,
                 _ => prop("ADM0_A3").unwrap_or_else(|| "UNK".into()),
             };
+            let iso_a2 = match prop("ISO_A2") {
+                Some(v) if v != "-99" => v,
+                _ => String::new(),
+            };
             let name = prop("NAME")
                 .or_else(|| prop("ADMIN"))
                 .unwrap_or_else(|| iso_a3.clone());
+            let centroid = multi.centroid().map(|p| (p.x(), p.y()));
             shapes.push(CountryShape {
-                info: CountryInfo { iso_a3, name },
+                info: CountryInfo {
+                    iso_a3,
+                    iso_a2,
+                    name,
+                },
                 bbox,
                 geom: multi,
+                centroid,
             });
         }
         Ok(Self { shapes })
@@ -277,6 +293,18 @@ impl CountryIndex {
             .iter()
             .find(|s| s.bbox.contains(&pt) && s.geom.contains(&pt))
             .map(|s| &s.info)
+    }
+
+    /// Country info + geometric centroid (lon, lat) for an ISO 3166-1
+    /// alpha-2 code (case-insensitive, trimmed). `None` for an unknown or
+    /// un-centroidable code — never guessed, matching the precision
+    /// contract every source adapter follows.
+    pub fn centroid_by_iso_a2(&self, code: &str) -> Option<(&CountryInfo, (f64, f64))> {
+        let code = code.trim();
+        self.shapes
+            .iter()
+            .find(|s| !s.info.iso_a2.is_empty() && s.info.iso_a2.eq_ignore_ascii_case(code))
+            .and_then(|s| s.centroid.map(|c| (&s.info, c)))
     }
 }
 
@@ -370,17 +398,43 @@ mod tests {
         let sample = r#"{
           "type": "FeatureCollection",
           "features": [
-            {"type":"Feature","properties":{"ISO_A3":"-99","ADM0_A3":"FRA","NAME":"France"},
+            {"type":"Feature","properties":{"ISO_A3":"-99","ISO_A2":"FR","ADM0_A3":"FRA","NAME":"France"},
              "geometry":{"type":"Polygon","coordinates":[[[-5,42],[9,42],[9,51],[-5,51],[-5,42]]]}},
-            {"type":"Feature","properties":{"ISO_A3":"KEN","NAME":"Kenya"},
-             "geometry":{"type":"Polygon","coordinates":[[[33,-5],[42,-5],[42,5],[33,5],[33,-5]]]}}
+            {"type":"Feature","properties":{"ISO_A3":"KEN","ISO_A2":"KE","NAME":"Kenya"},
+             "geometry":{"type":"Polygon","coordinates":[[[33,-5],[42,-5],[42,5],[33,5],[33,-5]]]}},
+            {"type":"Feature","properties":{"ISO_A3":"UNK","ISO_A2":"-99","NAME":"No A2"},
+             "geometry":{"type":"Polygon","coordinates":[[[100,-5],[102,-5],[102,-3],[100,-3],[100,-5]]]}}
           ]
         }"#;
         let index = CountryIndex::from_geojson_str(sample).unwrap();
-        assert_eq!(index.len(), 2);
+        assert_eq!(index.len(), 3);
         // The -99 quirk falls back to ADM0_A3.
         assert_eq!(index.country_at(2.35, 48.85).unwrap().iso_a3, "FRA");
         assert_eq!(index.country_at(36.82, -1.29).unwrap().iso_a3, "KEN");
         assert!(index.country_at(-140.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn centroid_by_iso_a2_resolves_case_insensitively_and_rejects_unknown() {
+        let sample = r#"{
+          "type": "FeatureCollection",
+          "features": [
+            {"type":"Feature","properties":{"ISO_A3":"FRA","ISO_A2":"FR","NAME":"France"},
+             "geometry":{"type":"Polygon","coordinates":[[[-5,42],[9,42],[9,51],[-5,51],[-5,42]]]}},
+            {"type":"Feature","properties":{"ISO_A3":"UNK","ISO_A2":"-99","NAME":"No A2"},
+             "geometry":{"type":"Polygon","coordinates":[[[100,-5],[102,-5],[102,-3],[100,-3],[100,-5]]]}}
+          ]
+        }"#;
+        let index = CountryIndex::from_geojson_str(sample).unwrap();
+
+        let (info, (lon, lat)) = index.centroid_by_iso_a2("fr").unwrap();
+        assert_eq!(info.iso_a3, "FRA");
+        // Centroid of a [-5,42]..[9,51] box is its midpoint (2, 46.5).
+        assert!((lon - 2.0).abs() < 1e-9, "lon {lon}");
+        assert!((lat - 46.5).abs() < 1e-9, "lat {lat}");
+
+        // Never guessed: unknown code and the "-99" gap both miss.
+        assert!(index.centroid_by_iso_a2("ZZ").is_none());
+        assert!(index.centroid_by_iso_a2("-99").is_none());
     }
 }

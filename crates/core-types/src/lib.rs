@@ -51,6 +51,7 @@ pub enum SourceId {
     Gdelt,
     Acled,
     Noaa,
+    Ioda,
 }
 
 impl SourceId {
@@ -60,6 +61,7 @@ impl SourceId {
             SourceId::Gdelt => "gdelt",
             SourceId::Acled => "acled",
             SourceId::Noaa => "noaa",
+            SourceId::Ioda => "ioda",
         }
     }
 
@@ -69,6 +71,7 @@ impl SourceId {
             "gdelt" => Some(SourceId::Gdelt),
             "acled" => Some(SourceId::Acled),
             "noaa" => Some(SourceId::Noaa),
+            "ioda" => Some(SourceId::Ioda),
             _ => None,
         }
     }
@@ -329,6 +332,8 @@ pub enum RawRecord {
     AcledJson(serde_json::Value),
     /// One GeoJSON alert feature from the NOAA/NWS active-alerts API (M5).
     NoaaAlertJson(serde_json::Value),
+    /// One outage event from the IODA `/outages/events` API (keyless).
+    IodaEventJson(serde_json::Value),
 }
 
 impl RawRecord {
@@ -338,7 +343,8 @@ impl RawRecord {
             RawRecord::FixtureJson(v)
             | RawRecord::GdeltDocJson(v)
             | RawRecord::AcledJson(v)
-            | RawRecord::NoaaAlertJson(v) => v.to_string(),
+            | RawRecord::NoaaAlertJson(v)
+            | RawRecord::IodaEventJson(v) => v.to_string(),
             RawRecord::GdeltEventCsv(s) => s.clone(),
         };
         let mut cut = full;

@@ -1,7 +1,8 @@
 //! Ingest worker: a long-lived thread with a current-thread tokio runtime
-//! that polls live sources on their own cadences (GDELT
-//! every feed interval; ACLED, when built with `acled-live` and credentialed,
-//! twice a day), normalizes, and streams incremental batches back to the UI.
+//! that polls live sources on their own cadences (GDELT every feed interval;
+//! ACLED, when built with `acled-live` and credentialed, twice a day; NOAA
+//! and IODA, both keyless, every several minutes), normalizes, and streams
+//! incremental batches back to the UI.
 //!
 //! The desktop runtime never loads synthetic fixtures. The UI thread owns
 //! storage, so the worker never touches the database: it hands `(events,
@@ -34,6 +35,15 @@ const ACLED_LOOKBACK_DAYS: i64 = 14;
 /// NOAA active alerts are a *now* snapshot of a feed that changes on the
 /// minutes scale; poll politely every 10 minutes.
 const NOAA_POLL_SECS: u64 = 10 * 60;
+
+/// IODA detects outages in near-real-time; poll on the same cadence as
+/// GDELT's feed. Each poll looks back further than the poll interval so a
+/// short gap (startup, a missed cycle) doesn't lose an outage that started
+/// and ended between polls — IODA's own server-side `extendWindow` (14 days
+/// by default) additionally surfaces alerts that started earlier and are
+/// still ongoing. Dedup-by-id absorbs the overlap, as everywhere else.
+const IODA_POLL_SECS: u64 = 15 * 60;
+const IODA_LOOKBACK_HOURS: i64 = 6;
 
 /// Feature-gated ACLED handle. The stub keeps the ingest loop cfg-free: with
 /// the feature off `make()` is always `None`, so the ACLED select arm is dead
@@ -109,6 +119,43 @@ mod noaa {
         }
         fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
             unreachable!("built without the noaa-live feature")
+        }
+    }
+}
+
+/// Feature-gated IODA handle — same stub pattern as [`noaa`]; keyless, so
+/// with the feature on `make()` is effectively always `Some`.
+#[cfg(feature = "ioda-live")]
+mod ioda {
+    pub use source_ioda::IodaSource;
+    pub fn make() -> Result<Option<IodaSource>, core_types::SourceError> {
+        IodaSource::from_env().map(Some)
+    }
+}
+#[cfg(not(feature = "ioda-live"))]
+mod ioda {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct IodaSource;
+    pub fn make() -> Result<Option<IodaSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for IodaSource {
+        fn id(&self) -> SourceId {
+            SourceId::Ioda
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the ioda-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the ioda-live feature")
         }
     }
 }
@@ -270,6 +317,19 @@ async fn worker(
     let mut noaa_next = Instant::now();
     let mut noaa_status = SourceStatus::offline("NOAA");
 
+    // IODA (feature-gated, keyless): near-real-time internet-outage events.
+    let ioda_src = match ioda::make() {
+        Ok(src) => src,
+        Err(e) => {
+            tracing::warn!(error = %e, "ioda source init failed; continuing without it");
+            None
+        }
+    };
+    let ioda_limiter = sched::request_limiter();
+    let mut ioda_backoff = sched::Backoff::default();
+    let mut ioda_next = Instant::now();
+    let mut ioda_status = SourceStatus::offline("IODA");
+
     loop {
         tokio::select! {
             ctl = rx_ctl.recv() => match ctl {
@@ -279,6 +339,7 @@ async fn worker(
                     status.online = on;
                     acled_status.online = on && acled_src.is_some();
                     noaa_status.online = on && noaa_src.is_some();
+                    ioda_status.online = on && ioda_src.is_some();
                     if on {
                         status.detail = "online — fetching…".into();
                         status.partial = false;
@@ -293,6 +354,11 @@ async fn worker(
                             noaa_status.partial = false;
                             noaa_next = Instant::now();
                         }
+                        if ioda_src.is_some() {
+                            ioda_status.detail = "online — fetching…".into();
+                            ioda_status.partial = false;
+                            ioda_next = Instant::now();
+                        }
                     } else {
                         backoff.reset();
                         status.degraded = false;
@@ -302,6 +368,7 @@ async fn worker(
                         for (b, s) in [
                             (&mut acled_backoff, &mut acled_status),
                             (&mut noaa_backoff, &mut noaa_status),
+                            (&mut ioda_backoff, &mut ioda_status),
                         ] {
                             b.reset();
                             s.degraded = false;
@@ -317,6 +384,9 @@ async fn worker(
                     if noaa_src.is_some() {
                         let _ = tx.send(IngestMsg::Status(noaa_status.clone()));
                     }
+                    if ioda_src.is_some() {
+                        let _ = tx.send(IngestMsg::Status(ioda_status.clone()));
+                    }
                     wake();
                 }
                 Some(Ctl::FetchNow) => {
@@ -327,6 +397,9 @@ async fn worker(
                         }
                         if noaa_src.is_some() {
                             noaa_next = Instant::now();
+                        }
+                        if ioda_src.is_some() {
+                            ioda_next = Instant::now();
                         }
                     }
                 }
@@ -354,6 +427,14 @@ async fn worker(
                 let delay = live_cycle(noaa_src, "noaa", window, NOAA_POLL_SECS,
                     &noaa_limiter, &mut noaa_backoff, &mut noaa_status, &tx, &wake).await;
                 noaa_next = Instant::now() + delay;
+            }
+            _ = sleep_until(ioda_next), if online && ioda_src.is_some() => {
+                let ioda_src = ioda_src.as_ref().unwrap();
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::hours(IODA_LOOKBACK_HOURS), now);
+                let delay = live_cycle(ioda_src, "ioda", window, IODA_POLL_SECS,
+                    &ioda_limiter, &mut ioda_backoff, &mut ioda_status, &tx, &wake).await;
+                ioda_next = Instant::now() + delay;
             }
         }
     }

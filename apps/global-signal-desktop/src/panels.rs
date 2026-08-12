@@ -99,7 +99,7 @@ impl App {
                 if ui
                     .checkbox(&mut online, "live updates")
                     .on_hover_text(
-                        "Fetch GDELT, ACLED, and NOAA. Turning this off pauses \
+                        "Fetch GDELT, ACLED, NOAA, and IODA. Turning this off pauses \
                          network requests but keeps cached real data visible.",
                     )
                     .changed()
@@ -508,6 +508,10 @@ impl App {
                     "Data: NOAA/NWS active alerts — US public domain (US coverage \
                      only)."
                 }
+                "IODA" => {
+                    "Data: IODA (Georgia Tech Internet Intelligence Research Lab) — \
+                     keyless public API; country-precision internet-outage signal."
+                }
                 _ => "",
             };
             if !attribution.is_empty() {
@@ -854,7 +858,7 @@ impl App {
         ui.label(
             RichText::new(
                 "Basemap: Natural Earth (public domain). Data sources: GDELT, \
-                 authorized ACLED, and NOAA/NWS.",
+                 authorized ACLED, NOAA/NWS, and IODA.",
             )
             .color(TEXT_DIM)
             .small(),

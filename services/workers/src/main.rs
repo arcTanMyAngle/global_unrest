@@ -30,6 +30,11 @@ const ACLED_POLL_SECS: u64 = 12 * 60 * 60;
 const ACLED_LOOKBACK_DAYS: i64 = 14;
 /// NOAA active alerts are a *now* snapshot; poll politely every 10 minutes.
 const NOAA_POLL_SECS: u64 = 10 * 60;
+/// IODA detects outages in near-real-time; same cadence/lookback reasoning
+/// as the desktop's `ingest.rs` (extendWindow server-side plus dedup-by-id
+/// absorb any gap between polls).
+const IODA_POLL_SECS: u64 = 15 * 60;
+const IODA_LOOKBACK_HOURS: i64 = 6;
 
 /// Feature-gated ACLED handle; the stub keeps the loop cfg-free (with the
 /// feature off `make()` is always `None` and `source-acled` isn't compiled).
@@ -102,6 +107,43 @@ mod noaa {
         }
         fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
             unreachable!("built without the noaa-live feature")
+        }
+    }
+}
+
+/// Feature-gated IODA handle — same stub pattern as [`noaa`]; keyless, so
+/// with the feature on `make()` is effectively always `Some`.
+#[cfg(feature = "ioda-live")]
+mod ioda {
+    pub use source_ioda::IodaSource;
+    pub fn make() -> Result<Option<IodaSource>, core_types::SourceError> {
+        IodaSource::from_env().map(Some)
+    }
+}
+#[cfg(not(feature = "ioda-live"))]
+mod ioda {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct IodaSource;
+    pub fn make() -> Result<Option<IodaSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for IodaSource {
+        fn id(&self) -> SourceId {
+            SourceId::Ioda
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the ioda-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the ioda-live feature")
         }
     }
 }
@@ -218,8 +260,24 @@ async fn run(
         tracing::info!("noaa source enabled (poll every {}s)", NOAA_POLL_SECS);
     }
 
+    // IODA (feature-gated, keyless): near-real-time internet-outage events.
+    let ioda_src = if online {
+        match ioda::make() {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!(error = %e, "ioda source init failed; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if ioda_src.is_some() {
+        tracing::info!("ioda source enabled (poll every {}s)", IODA_POLL_SECS);
+    }
+
     let Some(gdelt) = gdelt else {
-        // Fixtures-only mode never runs live loops, ACLED/NOAA included.
+        // Fixtures-only mode never runs live loops, ACLED/NOAA/IODA included.
         return Ok(());
     };
 
@@ -241,6 +299,9 @@ async fn run(
     let noaa_limiter = sched::request_limiter();
     let mut noaa_backoff = sched::Backoff::default();
     let mut noaa_next = Instant::now();
+    let ioda_limiter = sched::request_limiter();
+    let mut ioda_backoff = sched::Backoff::default();
+    let mut ioda_next = Instant::now();
 
     loop {
         tokio::select! {
@@ -270,6 +331,14 @@ async fn run(
                 let delay = live_cycle(noaa_src, "noaa", window, NOAA_POLL_SECS,
                     &noaa_limiter, &mut noaa_backoff, &store, &publish_root, keep_last).await;
                 noaa_next = Instant::now() + delay;
+            }
+            _ = sleep_until(ioda_next), if ioda_src.is_some() => {
+                let ioda_src = ioda_src.as_ref().unwrap();
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::hours(IODA_LOOKBACK_HOURS), now);
+                let delay = live_cycle(ioda_src, "ioda", window, IODA_POLL_SECS,
+                    &ioda_limiter, &mut ioda_backoff, &store, &publish_root, keep_last).await;
+                ioda_next = Instant::now() + delay;
             }
         }
     }

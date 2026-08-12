@@ -34,14 +34,23 @@ jobs:
         run: cargo test --workspace
 
   # M5 added acled-live/noaa-live as cargo features on the desktop app and
-  # the worker binary; default CI above never compiles them. One OS is
-  # enough here — the feature code itself isn't OS-specific, only the
-  # bundled-DuckDB build in `check` needs the Windows/Ubuntu split.
+  # the worker binary (ioda-live joined later, same shape); default CI above
+  # never compiles them. One OS is enough here — the feature code itself
+  # isn't OS-specific, only the bundled-DuckDB build in `check` needs the
+  # Windows/Ubuntu split. Each feature solo plus the full union, not every
+  # subset — enough to catch solo-feature and cross-feature breakage without
+  # the combinatorial blowup of all seven non-empty subsets.
   feature-matrix:
     strategy:
       fail-fast: false
       matrix:
-        features: ["acled-live", "noaa-live", "acled-live,noaa-live"]
+        features:
+          [
+            "acled-live",
+            "noaa-live",
+            "ioda-live",
+            "acled-live,noaa-live,ioda-live",
+          ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
