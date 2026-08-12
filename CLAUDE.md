@@ -2,13 +2,19 @@
 
 Desktop-first Rust geospatial dashboard visualizing global news-attention
 and unrest/event signals. Civic-data research/visualization only.
-**M0–M6 complete 2026-07-18** — M5 (ACLED + NOAA) fully live-verified; M6
-shipped repo hygiene (CI feature matrix, `docker compose` smoke test,
-cargo-deny, Dependabot, tag-driven releases, CHANGELOG, portfolio README,
-CONTRIBUTING.md). Branch protection on `main` is the one M6 item left, and
-it's a manual GitHub-settings step (no authenticated `gh`/API access from
-this machine) — see HANDOFF.md. Next: visualization batch V1
-(docs/VISUALIZATION.md), interleaved with M7 service hardening. See
+**M0–M6 complete 2026-07-18; V1 visualization batch complete 2026-08-10;
+IODA (internet-outage) live source added 2026-08-11** — M5 (ACLED + NOAA)
+fully live-verified; M6 shipped repo hygiene (CI feature matrix, `docker
+compose` smoke test, cargo-deny, Dependabot, tag-driven releases,
+CHANGELOG, portfolio README, CONTRIBUTING.md); V1 shipped the timeline
+histogram, spike halos, severity markers, and recency fade
+(docs/VISUALIZATION.md); IODA added a fourth optional live source
+(`ioda-live`, keyless, country-precision internet-outage severity signal).
+Branch protection on `main` is the one M6 item left, and it's a manual
+GitHub-settings step (no authenticated `gh`/API access from this machine)
+— see HANDOFF.md. Next: Bluesky Jetstream + public Telegram channels
+(queued, aggregate-chatter-only design — see HANDOFF.md), then V2
+visualization batch, interleaved with M7 service hardening. See
 [HANDOFF.md](HANDOFF.md) for status and the next task list, and
 [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
@@ -25,15 +31,16 @@ cargo run -p workers                                   # M4 ingest worker (publi
 cargo run -p api                                       # M4 read API (needs LES_PUBLISH_DIR)
 docker compose up                                      # M4 worker + api stack (WSL2 on Windows)
 cargo test -p source-acled --features live             # M5 ACLED mock-server tests
-cargo run -p global-signal-desktop                     # ACLED + NOAA are desktop defaults
-cargo run -p workers --features acled-live,noaa-live   # worker with M5 live sources
+cargo run -p global-signal-desktop                     # ACLED + NOAA + IODA are desktop defaults
+cargo run -p workers --features acled-live,noaa-live,ioda-live  # worker with all live sources
 cargo deny check                                       # M6 gate: advisories + license allowlist
 ```
 
-M5 live sources are cargo features on both binaries: `acled-live` (needs
-`ACLED_EMAIL`/`ACLED_PASSWORD` — myACLED OAuth; ACLED retired API keys) and
-`noaa-live` (keyless). Both are desktop default features; the worker keeps
-them opt-in. Clippy the feature matrix when touching ingest loops.
+Live sources are cargo features on both binaries: `acled-live` (needs
+`ACLED_EMAIL`/`ACLED_PASSWORD` — myACLED OAuth; ACLED retired API keys),
+`noaa-live` (keyless), and `ioda-live` (keyless). All three are desktop
+default features; the worker keeps them opt-in. Clippy the feature matrix
+when touching ingest loops.
 
 M4 services env: worker reads `LES_WORKER_DATA_DIR` (its own DuckDB),
 `LES_PUBLISH_DIR` (snapshot root), `LES_FIXTURES_DIR`, `LES_RETENTION_DAYS`,
@@ -49,9 +56,10 @@ DuckDB C++ (several minutes) — never `cargo clean` casually.
 
 - Public/authorized data sources only; no scraping restricted sources, no
   bypassing paywalls/auth/rate limits. Live APIs land only in their
-  milestone (GDELT M3; ACLED + NOAA M5, feature-gated, credentials via env
-  vars only). ACLED data is never redistributed — `notes` never stored,
-  ACLED-bearing snapshots never served publicly.
+  milestone (GDELT M3; ACLED + NOAA M5; IODA added 2026-08-11 — all
+  feature-gated, credentials via env vars only where credentials exist).
+  ACLED data is never redistributed — `notes` never stored, ACLED-bearing
+  snapshots never served publicly.
 - No person-level identification/tracking/targeting features. Aggregate
   signals only (H3 cells, countries).
 - Store headline/URL/outlet-domain **metadata only**, never article bodies.
@@ -112,6 +120,12 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   `live`): polygon alerts → `Disruption` at polygon centroid, Admin1
   precision; zone-only alerts yield zero events by design (never guess
   coordinates). US coverage only.
+- `crates/source-ioda` — IODA internet-outage events (keyless, feature
+  `live`, added 2026-08-11): country-precision `Disruption` events from
+  `/outages/events`; `severity_from_score` log-scales IODA's unbounded
+  `score` onto [0,1] (`weights::IODA_SCORE_FLOOR`/`IODA_SCORE_CEIL`);
+  country centroid via `geo_utils::CountryIndex::centroid_by_iso_a2`
+  (bundled Natural Earth data, never a hand-typed coordinate table).
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).

@@ -13,7 +13,7 @@
 ## Common commands
 
 ```sh
-# Run the live-only desktop (GDELT + NOAA, and ACLED when credentialed)
+# Run the live-only desktop (GDELT + NOAA + IODA, and ACLED when credentialed)
 cargo run -p global-signal-desktop
 
 # Regenerate synthetic fixtures (deterministic; commit the result)
@@ -39,6 +39,7 @@ cargo test --workspace
 | `LES_ACLED_TOKEN_URL` / `LES_ACLED_ENDPOINT` | Point the ACLED adapter at a local/mock server (testing). |
 | `LES_ACLED_WINDOW` | Fixed `YYYY-MM-DD\|YYYY-MM-DD` fetch window (inclusive) replacing the rolling 14-day lookback — for date-restricted ACLED tiers (e.g. accounts limited to events older than 12 months). |
 | `LES_NOAA_ENDPOINT` | Point the NOAA alerts adapter at a local/mock server (testing). |
+| `LES_IODA_ENDPOINT` | Point the IODA outage-events adapter at a local/mock server (testing). IODA itself is keyless — no credential env vars needed. |
 
 ## Where data lives
 

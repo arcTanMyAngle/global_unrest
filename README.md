@@ -19,10 +19,12 @@ is **traceable evidence**—identity and consent signals, timestamps, source
 history, corroboration, corrections, and a clear confidence state.
 
 **Milestones 1–6 complete** (M6 = repo hygiene/CI/releases; see
-[CHANGELOG.md](CHANGELOG.md)). The desktop runtime is **live-data-only**:
-**GDELT** (keyless), **ACLED** (authorized myACLED account), and **NOAA/NWS
-active alerts** (keyless). Synthetic fixtures remain test assets but are
-never loaded into or displayed by the desktop app.
+[CHANGELOG.md](CHANGELOG.md)), plus the V1 visualization batch and an IODA
+internet-outage layer. The desktop runtime is **live-data-only**: **GDELT**
+(keyless), **ACLED** (authorized myACLED account), **NOAA/NWS active
+alerts** (keyless), and **IODA internet-outage events** (keyless). Synthetic
+fixtures remain test assets but are never loaded into or displayed by the
+desktop app.
 
 ## Who this is for
 
@@ -49,6 +51,7 @@ provide person-level tracking or live video channels.
 | GDELT media attention and events | Live | Global news metadata and CAMEO event records; coverage is not confirmation. |
 | ACLED event data | Live with authorized credentials | Curated conflict and civic-event records; access and available dates depend on the account. |
 | NOAA/NWS alerts | Live | Active US and territory alerts with polygon geometry; zone-only alerts are not placed at guessed coordinates. |
+| IODA internet-outage events | Live | Country-precision internet-outage severity signal (keyless, near-real-time); shades regions only, never a point marker. |
 | Map, filters, replay, and inspector | Available | Explore heat, markers, sources, themes, confidence, and six-hour analysis buckets. |
 | Related video and source links | Available | Click a region to open video URLs carried by its real source records, inspect source pages that may contain media, or launch a clearly labeled external YouTube search. |
 | Local Parquet export and ingest log | Available | Export normalized session data and inspect rejected records. |
@@ -79,6 +82,7 @@ flowchart LR
         GDELT["source-gdelt\n(M3, keyless)"]
         ACLED["source-acled\n(M5, acled-live)"]
         NOAA["source-noaa\n(M5, noaa-live)"]
+        IODA["source-ioda\n(ioda-live, keyless)"]
     end
 
     FIX["source-fixtures\ntests only; never displayed"]
@@ -96,6 +100,7 @@ flowchart LR
     GDELT --> CT
     ACLED --> CT
     NOAA --> CT
+    IODA --> CT
     FIX -. tests only .-> CT
     CT --> Storage
     Storage --> AN
@@ -165,6 +170,7 @@ switching to synthetic data. `LES_ONLINE=0` starts paused.
 |---|---:|---|
 | GDELT | 15 minutes | Upstream DOC or Events feeds can be partial, delayed, or temporarily unavailable. |
 | NOAA/NWS | 10 minutes | US and territories only; only alerts with usable geometry appear on the map. |
+| IODA | 15 minutes | Country-precision only — shades regions, never a point marker. |
 | ACLED | 12 hours | Credentials, license tier, curation delay, and account date restrictions apply. |
 
 Three times are deliberately kept distinct: the **event/publish time** from
@@ -172,10 +178,10 @@ the source, the **ingest time** when this app received it, and the **six-hour
 analysis bucket** used by the timeline and scores. A frequent fetch does not
 mean that every underlying event is current or independently confirmed.
 
-### ACLED and NOAA
+### ACLED, NOAA, and IODA
 
 ```sh
-# Both adapters are desktop defaults; `.env` is loaded automatically.
+# All three adapters are desktop defaults; `.env` is loaded automatically.
 cargo run -p global-signal-desktop
 ```
 
@@ -186,11 +192,12 @@ Open-tier accounts authenticate but receive `403 Access denied` on data
 reads. Without credentials the ACLED status line simply reports itself off.
 Some tiers are also **date-restricted** (e.g. only events older than
 12 months) — set `LES_ACLED_WINDOW=YYYY-MM-DD|YYYY-MM-DD` to fetch a fixed
-historical window instead of the rolling recent one.
+historical window instead of the rolling recent one. NOAA and IODA are both
+keyless — no credentials or setup needed.
 
 The M4 services take the same features: `cargo run -p workers --features
-acled-live,noaa-live` ingests live and publishes Parquet snapshots that
-`cargo run -p api` serves (see [docs/API.md](docs/API.md)).
+acled-live,noaa-live,ioda-live` ingests live and publishes Parquet snapshots
+that `cargo run -p api` serves (see [docs/API.md](docs/API.md)).
 
 ## Commands
 
@@ -202,9 +209,9 @@ cargo deny check                                 # advisories + license allowlis
 docker compose up                                # M4 worker+api stack (see docker-compose.yml)
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus the M5 feature
-matrix (`acled-live`/`noaa-live`/both), the `source-acled` live-mock suite,
-and a `docker compose` smoke test. Tag-driven releases
+CI (`.github/workflows/ci.yml`) runs all of the above plus the feature
+matrix (`acled-live`/`noaa-live`/`ioda-live`/all three), the `source-acled`
+live-mock suite, and a `docker compose` smoke test. Tag-driven releases
 (`.github/workflows/release.yml`) build desktop binaries for Windows/Linux/
 macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -239,9 +246,13 @@ macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.
 - **M6 ✅** repo hygiene: CI feature matrix + compose smoke test, cargo-deny,
   Dependabot, tag-driven releases (desktop binaries + GHCR images),
   CHANGELOG, this README, CONTRIBUTING.md.
-- **Next**: visualization batches V1–V3 ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)),
-  M7 service hardening, M8 stretch layers — see
-  [docs/ROADMAP.md](docs/ROADMAP.md).
+- **V1 ✅** visualization batch: timeline histogram, spike halos, severity
+  markers, recency fade ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)).
+- **IODA ✅** internet-outage events layer (feature `ioda-live`, keyless,
+  country-precision).
+- **Next**: Bluesky Jetstream + public Telegram channels (queued,
+  aggregate-chatter-only design — see HANDOFF.md), visualization batch V2,
+  M7 service hardening — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ### Product direction: on-scene channels
 
@@ -314,6 +325,11 @@ profiling, or following a person without consent is not. In short:
 - NOAA (included in desktop defaults): **NOAA/NWS active weather alerts**
   ([api.weather.gov](https://www.weather.gov/documentation/services-web-api)),
   US-government public domain; US coverage only.
+- IODA (included in desktop defaults): **Internet Outage Detection and
+  Analysis** ([ioda.inetintel.cc.gatech.edu](https://ioda.inetintel.cc.gatech.edu)),
+  Georgia Tech Internet Intelligence Research Lab — keyless public API,
+  © Georgia Tech Research Corporation. Country-precision internet-outage
+  severity signal; aggregate network telemetry only, no person-level data.
 
 ## License
 

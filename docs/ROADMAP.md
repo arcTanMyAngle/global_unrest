@@ -75,6 +75,11 @@ perf guardrails are defined there and are binding.
 
 ## M8 — Stretch layers & desktop platform polish
 
+- **IODA internet-outage events ✅ 2026-08-11** — pulled forward from this
+  bucket per user request (real-time signal ahead of mainstream media): a
+  new `source-ioda` crate, feature `ioda-live` (keyless, desktop default),
+  country-precision `Disruption` events with a log-scaled severity from
+  IODA's unbounded anomaly score. See HANDOFF.md and CHANGELOG.md.
 - walkers 0.56 slippy-tile basemap: its own design pass first —
   Web-Mercator vs equirectangular projection decision, OSM tile-policy row
   in SAFETY, online-only and clearly toggled.

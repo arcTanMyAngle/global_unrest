@@ -7,7 +7,7 @@ The single normalized record every source adapter produces.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `u64` | Deterministic FNV-1a hash of `(source, source_event_id)` — re-ingesting the same record is idempotent. |
-| `source` | `SourceId` | `Fixtures` \| `Gdelt` \| `Acled`. |
+| `source` | `SourceId` | `Fixtures` \| `Gdelt` \| `Acled` \| `Noaa` \| `Ioda`. |
 | `source_event_id` | `String` | Source-native identifier. |
 | `kind` | `EventKind` | `NewsAttention` \| `Protest` \| `Conflict` \| `Disruption` \| `Other`. |
 | `themes` | `Vec<String>` | Coarse topic tags from the source. |
@@ -67,6 +67,43 @@ fallible per record → `ingest_log`):
   is `GLOBALEVENTID`; FIPS `ActionGeo_CountryCode` → ISO-A3 via
   `source-gdelt::country`. Events dumps carry no GKG themes, so `themes` is
   empty.
+
+## IODA normalization
+
+`source-ioda` polls the keyless `GET /outages/events?entityType=country`
+endpoint (Internet Outage Detection and Analysis, Georgia Tech) and produces
+one `Disruption` event per outage record. Two honesty rules distinguish this
+source from the others:
+
+- **Country-only geocoding, so never a point marker.** IODA identifies a
+  location only as `country/<ISO alpha-2>` — no finer geometry exists to
+  report. Events therefore normalize at `Country` precision and, per the
+  precision rendering contract above, only ever shade a region on the map —
+  they are excluded from marker rendering by design, not by bug. The
+  centroid used for that shading is a real geometric centroid of the
+  country's Natural Earth polygon (`geo::Centroid`, computed once from the
+  bundled `ne_110m_admin_0_countries.geojson`, the same asset the basemap
+  and click-to-inspect country lookup already use) — never a hand-typed
+  coordinate. An ISO alpha-2 code IODA reports that isn't in that dataset
+  fails normalization rather than guessing a location.
+- **Unbounded severity, log-scaled.** IODA's `score` field is an
+  unnormalized anomaly magnitude with no fixed range (observed live from
+  ~700 for a brief blip to ~233,000 for a total national blackout).
+  `source_ioda::severity_from_score` squashes it onto `[0, 1]` with a log
+  scale anchored to two named constants,
+  `source_ioda::weights::IODA_SCORE_FLOOR` (100.0) and `IODA_SCORE_CEIL`
+  (100,000.0): at/below the floor reads as the severity floor (0.0), at/above
+  the ceiling saturates at 1.0. This is the first continuous-range severity
+  normalization in the codebase (NOAA's is a 4-bucket categorical match on a
+  bounded NWS enum; GDELT Events derives severity from the bounded Goldstein
+  scale) — golden-tested at the floor, the ceiling, and a real sampled
+  midpoint.
+
+`source_event_id` is a composite key (`{country}-{start}-{datasource}-
+{method}`) since IODA's `codf` response format carries no explicit event id.
+`themes` carries `["ioda", "internet_outage", <datasource>, <method>]` so
+the existing theme filter doubles as provenance filtering (which detection
+method/data source flagged the outage) without any new schema.
 
 ## RegionBucket
 

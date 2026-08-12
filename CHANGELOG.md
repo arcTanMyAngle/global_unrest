@@ -14,6 +14,20 @@ project with no published crate API to stabilize against.
   identifies direct/known-host video candidates, and offers an opt-in external
   YouTube search using the area and event context. Nothing is fetched or
   opened until the user clicks, and search results are labeled unverified.
+- V1 visualization batch (docs/VISUALIZATION.md): a timeline histogram strip
+  (stacked per-kind bars, an attention-count line on its own scale, a
+  draggable playhead) replaces the bare time-window slider; pulsing spike
+  halos on cells whose spike score clears a named threshold; marker size now
+  interpolates with severity when a source provides one; marker opacity
+  fades with age during playback (full detail while paused). Also added a
+  "has video" marker filter, sharing a new `core_types::is_video_url`
+  classifier with the region inspector's existing source-link list.
+- `source-ioda`: a new optional live source (feature `ioda-live`, keyless,
+  desktop default) for IODA (Internet Outage Detection and Analysis,
+  Georgia Tech) — near-real-time internet-outage events, country precision,
+  severity log-scaled from IODA's unbounded anomaly score. Country
+  centroids resolve via a new `geo_utils::CountryIndex::centroid_by_iso_a2`
+  (real Natural Earth geometry, never a hand-typed coordinate table).
 
 ### Changed
 
