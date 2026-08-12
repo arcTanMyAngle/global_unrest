@@ -1,32 +1,35 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-10. **M0–M6 complete; V1 visualization batch shipped.**
-M6 (repo hygiene, CI depth, releases) shipped everything in
-[docs/ROADMAP.md](docs/ROADMAP.md) except branch protection on `main`, which
-needs a human with an authenticated `gh`/GitHub session (this machine's `gh`
-is installed but not logged in) — see "Loose ends" below. This session
-implemented all four **V1** items from
-[docs/VISUALIZATION.md](docs/VISUALIZATION.md) (timeline histogram, spike
-halos, severity markers + tooltip, recency fade) plus a user-requested
-"has video" marker filter — see "V1 — what shipped" below.
+Last session: 2026-08-10/11 (one continuous session spanning both dates).
+**M0–M6 complete; V1 visualization batch shipped; IODA live source shipped.**
+M6 shipped everything in [docs/ROADMAP.md](docs/ROADMAP.md) except branch
+protection on `main` (manual GitHub-settings step, no authenticated `gh` on
+this machine — see "Loose ends"). This session: all four **V1** items
+(timeline histogram, spike halos, severity markers + tooltip, recency fade)
+plus a user-requested "has video" marker filter; then a new **IODA**
+internet-outage live source (`ioda-live`, keyless, country-precision) — see
+the two "what shipped" sections below.
 
-**Next session: V2** (attention↔unrest divergence layer, top-movers panel,
-region history sparkline + event ledger) per
-**[docs/VISUALIZATION.md](docs/VISUALIZATION.md)** — the user's explicit
-direction remains *original, detailed* views, never copies of provider
-dashboards. M7 service-hardening items can interleave. Read this file, then
-[CLAUDE.md](CLAUDE.md), then those two docs.
+**Next session: Bluesky Jetstream, then public Telegram channels, in that
+exact order** (user's explicit sequencing) — real-time chatter-volume
+signals, **aggregate-only** (no individual posts/messages/authors ever
+stored — this is not a style choice, see "Why aggregate-only" below). Full
+design write-up: **"Next session: Bluesky Jetstream + Telegram" below** —
+read that section first, it has the concrete plan. V2 visualization
+(docs/VISUALIZATION.md) and M7 service hardening remain queued after that.
+Read this file, then [CLAUDE.md](CLAUDE.md).
 
 ## Where things stand
 
 | | |
 |---|---|
-| Repo | `live-earth-signals/` — pushed to the user's **public repo** `github.com/arcTanMyAngle/global_unrest` (HTTPS origin, GCM-cached auth; the sibling `../global_unrest/` folder is an empty clone shell). CI is live on push: `check` (fmt/clippy/test × Windows+Ubuntu), `feature-matrix` (M5 features × Ubuntu), `acled-live-mock`, `compose-smoke`, `cargo-deny`. **Not yet pushed to origin** — 4 local V1 commits on `main` this session, see "Loose ends." |
-| Commits | Clean PR-sized commits through M6, plus 4 more this session for V1 (`git log --oneline`) |
-| Tests | `cargo test --workspace` green (including new histogram/halo/severity/video-filter/fade tests); E2E pipeline test green; clippy `-D warnings` clean; `cargo deny check` clean (new `core-types → url` dependency edge checked) |
-| Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); all crates `publish = false` (internal-only, never meant for crates.io). Not bumped for V1 — versioning is milestone-tied, not batch-tied. |
-| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD`; `.env.example` is the committed template |
-| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; M7/V2/M8 next) |
+| Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. `origin/main` already has the V1 commits as of this session (verified via `git fetch`) — apparently pushed outside this session's tool calls, since this session never ran `git push`. The IODA commits (2, code + docs) are **local only, not pushed** — see "Loose ends." CI: `check` (fmt/clippy/test × Windows+Ubuntu), `feature-matrix` (now `acled-live`/`noaa-live`/`ioda-live`/all-three × Ubuntu), `acled-live-mock`, `compose-smoke`, `cargo-deny`. |
+| Commits | Clean PR-sized commits through M6, then 4 for V1, then 2 for IODA (code, docs) — `git log --oneline` |
+| Tests | `cargo test --workspace` green throughout (V1's new tests + IODA's new `source-ioda`/`geo-utils` tests); E2E pipeline test green; clippy `-D warnings` clean on default **and** the full 3-way feature matrix (`acled-live,noaa-live,ioda-live`, verified locally); `cargo deny check` clean |
+| Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1 or IODA — versioning is milestone-tied, not batch-tied |
+| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD`; `.env.example` is the committed template. IODA is keyless — nothing to configure. |
+| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; IODA ✅ pulled forward from M8; M7/V2/M8-remainder next) |
+| **GUI live-visual verification** | **Done for V1** (real live data, screenshots — see below). **Skipped for IODA** this session — user asked to move straight to the handoff before the app was ever launched with `ioda-live` on. What *is* verified for IODA: the real endpoint via a live `curl` (logged in this session's transcript, real JSON back), and `cargo check`/`clippy`/`test` green including the full 3-way feature matrix. What's **not yet verified**: actually launching the desktop app and watching a real IODA fetch cycle complete in its logs, or seeing an IODA-sourced event render on the map. Do this first next session — it's the natural first check (`cargo run -p global-signal-desktop`, watch for `ioda source enabled`/`live cycle ok origin="ioda"` in the logs). |
 
 ## V1 — what shipped (2026-08-10, 4 PR-sized commits, see `git log`)
 
@@ -101,6 +104,149 @@ wasn't — the capture was just clipped/scaled by DPI virtualization); a
 second capture with `SetProcessDPIAware()` called in that same process
 (`PrimaryScreen.Bounds` correctly reporting the full 2560×1600) showed
 everything, including the timeline strip.
+
+## IODA — what shipped (2026-08-11, 2 commits: code, docs)
+
+New optional live source, `crates/source-ioda`, feature `ioda-live`
+(keyless, desktop default) — Internet Outage Detection and Analysis
+(Georgia Tech Internet Intelligence Research Lab): near-real-time
+internet-outage events, country precision. User-requested mid-session as
+the first of three "real-time signal ahead of mainstream media" sources
+(IODA → Bluesky Jetstream → Telegram, in that order); pulled forward from
+`docs/ROADMAP.md`'s M8 stretch-layers bucket rather than invented as a new
+milestone number.
+
+**API was verified live, not guessed.** `curl` against the real endpoint
+succeeded in this session's transcript; the exact query params and response
+shape came from reading `InetIntel/ioda-api`'s actual PHP controller source
+(`src/Controller/OutagesController.php`) on GitHub, not docs-scraping (IODA's
+own docs pages are a JS SPA that returns an empty shell to a plain fetch).
+Base: `https://api.ioda.inetintel.cc.gatech.edu/v2/`. Endpoint:
+`GET /outages/events?entityType=country&from=<unix>&until=<unix>&format=codf`
+— keyless, no stated rate limit. Response `data[]` items:
+`{"location":"country/US","start":<unix>,"duration":<secs>,"method":"median","datasource":"ping-slash24","score":753.19,"location_name":"United States","overlaps_window":false}`.
+
+Design decisions worth knowing about:
+- **Country geocoding reuses real geometry, not a hand-typed table.**
+  `geo_utils::CountryIndex` (already bundling Natural Earth's
+  `ne_110m_admin_0_countries.geojson` for the basemap/click-lookup) gained
+  `iso_a2: String` on `CountryInfo` and a new
+  `centroid_by_iso_a2(code) -> Option<(&CountryInfo, (f64, f64))>`, backed
+  by a real `geo::Centroid`-computed centroid per country, precomputed once
+  at load. Rejected hand-typing ~100+ country centroids from memory as too
+  error-prone for this project's "never guess a coordinate" rule. An IODA
+  code not in Natural Earth's ~177 countries fails normalization into
+  `ingest_log` rather than guessing.
+- **Severity is log-scaled from an unbounded score.** IODA's `score` has no
+  fixed range (observed live: ~700 for a brief blip to ~233,000 for a total
+  national blackout). `source_ioda::severity_from_score` squashes it onto
+  `[0,1]` via named constants `weights::IODA_SCORE_FLOOR` (100.0) /
+  `IODA_SCORE_CEIL` (100,000.0) — the first *continuous* severity
+  normalization in this codebase (NOAA's is a 4-value categorical match on
+  a bounded NWS enum). These anchors are a judgment call from one session's
+  worth of live samples, not a calibrated statistical fit — revisit if
+  real usage shows most events pinned at the floor or ceiling.
+- **Country precision, so never a point marker.** Same precision-rendering
+  contract as everything else coarser than City — IODA events shade H3
+  cells in the heatmap and count in the region inspector, but the map will
+  never show an IODA diamond marker. This is correct, not a bug — worth
+  remembering before "fixing" it.
+- **`source_event_id`** is a composite key (`{country}-{start}-{datasource}-
+  {method}`) since IODA's `codf` format has no explicit event id.
+
+Wiring is a straight copy of `source-noaa`'s pattern (keyless cfg-stub in
+both `ingest.rs` and `services/workers/src/main.rs`, `live_cycle` polling
+every 15 min with a 6 h lookback — IODA's own server-side `extendWindow`,
+14 days by default, plus dedup-by-id cover the rest). Full docs pass done
+per `CONTRIBUTING.md`'s new-source checklist (see `git log` for the docs
+commit) — `docs/DATA_MODEL.md` has the fullest technical writeup if you need
+more detail than this.
+
+## Next session: Bluesky Jetstream + Telegram (in that order, aggregate-only)
+
+The user wants these two next, in this exact order, as the second and third
+"real-time, ahead of mainstream media" sources. **Neither is implemented —
+this section is the design to start from**, written so this can be pasted
+into a fresh session with minimal re-derivation.
+
+### Why aggregate-only (read this before writing any code here)
+
+Early in this session the user asked to add these two sources **and** to
+drop the project's "no person-level identification/tracking/targeting"
+rule (CLAUDE.md's hard rules), reasoning that only they would be using it
+for now. That was declined, not just noted as a preference to revisit:
+Bluesky posts and Telegram channel messages tied to real-time unrest events
+are frequently posted *by* the protesters, journalists, and dissidents in
+those events, often somewhere being identified as such is genuinely
+dangerous. A tool that geolocates and tracks individuals against
+unrest/conflict data is the shape of thing that has historically been used
+to identify and target exactly those people — and that risk doesn't scale
+down just because only one person is looking at it today; the capability
+and any data collected outlive the current single-user framing. The user
+accepted the alternative: both sources are **aggregate chatter-volume
+signals**, the same shape as GDELT's article-count attention, not
+individual-post tracking. This is a hold-the-line constraint for whoever
+picks this up next, not a suggestion to re-litigate:
+
+- **Never store an individual post/message**, its author handle/DID/user
+  id, or its literal text, even transiently in the database. Match against
+  a keyword+place-token list as text passes through, increment an in-memory
+  counter, discard the source text/author immediately.
+- Flush periodically into `NewsAttention`-kind `GeoTemporalEvent`s (chatter
+  volume is an attention signal, same class as GDELT DOC article counts) —
+  `article_count` = the matched-post count for that window, `headline` a
+  generic string like `"Social chatter spike: <keyword>"`, never real
+  post/message content, no per-post URLs.
+- Place attribution is crude keyword string-matching against a small
+  curated country/major-city token list (reuse `geo_utils::CountryIndex`
+  from the IODA work above for country centroids) — **never** NLP-based
+  location inference from post content. If nothing matches, the post
+  contributes to no aggregate at all (never guessed).
+
+### Architectural gap both sources share: this codebase has no aggregate-before-storage pattern yet
+
+Every existing source (GDELT, ACLED, NOAA, IODA) stores one
+`GeoTemporalEvent` per raw record and lets `storage::score_buckets`
+aggregate later. Bluesky/Telegram need the opposite: aggregate first
+(in-memory, ephemeral), store only the periodic rollup. Worth designing
+this once as a small shared piece (e.g. a `ChatterAccumulator` type with
+`record_match(place_token, keyword, ts) `/`flush() -> Vec<GeoTemporalEvent>`)
+that both sources use, rather than duplicating the accumulation logic.
+Where it should live is an open question — a new small crate, or a module
+in each source crate — worth 10 minutes of thought before writing code, not
+a given.
+
+### Bluesky Jetstream
+
+Public WebSocket firehose (keyless), **not** a poll-based REST endpoint —
+the first *streaming* source in this codebase. Public Jetstream instances
+exist at `wss://jetstream2.us-east.bsky.network/subscribe` and similar
+(multiple regions; verify current endpoints live, don't trust this from
+memory next session — same "read the real thing" discipline used for IODA
+this session), filterable server-side to the `app.bsky.feed.post` collection
+via a query param. Needs a long-lived WebSocket task — `tokio-tungstenite`
+or similar is a **new** dependency, not something already in the workspace;
+`sched::request_limiter`/`Backoff` (built for poll-based sources) don't
+apply here, this needs its own reconnect/backoff logic for a dropped
+socket. Verify the real message schema live before coding against it, the
+same way this session verified IODA's actual JSON shape via `curl` rather
+than trusting documentation.
+
+### Telegram public channels
+
+Needs two decisions from the user before implementation, not defaults to
+assume:
+1. **Which specific channels** — a small explicit curated allowlist (e.g.
+   known conflict/OSINT-monitoring channels), not open crawling. Reading
+   public channels via Telegram's own API with an explicit allowlist is a
+   materially different posture from scraping, but it's still a real list
+   someone has to choose.
+2. **Credential path** — a bot token (can only read channels it's been
+   added to as admin) vs. a personal account's MTProto API id/hash (can
+   read any public channel's history, but ties ingestion to a real
+   Telegram account). The user should explicitly pick one; don't default to
+   the personal-account path without asking, since it's the more invasive
+   of the two.
 
 ## Milestone 6 — what shipped (PR-sized commits, see `git log`)
 
@@ -190,16 +336,19 @@ README; no second attempt was made this session.
 - **`compose-smoke` untested locally** — validated the YAML and the logic
   by hand (no local docker CLI, unchanged from prior sessions); first real
   run will be on CI's next push.
-- **V1 commits not pushed to origin** — 4 new commits on `main` this
-  session (histogram, halos, severity+tooltip+video-filter, fade) sit
-  ahead of `origin/main`; not pushed yet (wasn't asked to). `git push`
-  when ready — CI will run the same gates verified locally this session.
-- **README screenshot not refreshed for V1** — `assets/screenshots/
-  map-overview.png` still shows the pre-V1 map (bare slider, no halos).
-  VISUALIZATION.md's own guardrail says shipped views should get a
-  screenshot; deferred this session (verification screenshots were taken
-  ad hoc into the scratchpad, not committed) — worth doing next session or
-  on request.
+- **IODA commits not pushed to origin** — the V1 commits reached
+  `origin/main` somehow during this session (confirmed via `git fetch`;
+  this session never ran `git push` itself), but the 2 IODA commits (code,
+  docs) are local-only as of session end. `git push` when ready — CI will
+  run the same gates verified locally this session, now including the
+  3-way feature matrix.
+- **IODA never actually launched in the running app this session** — see
+  the "GUI live-visual verification" row above. Do this first next session.
+- **README screenshot not refreshed for V1 or IODA** — `assets/screenshots/
+  map-overview.png` still shows the pre-V1 map (bare slider, no halos, no
+  IODA-shaded regions). VISUALIZATION.md's own guardrail says shipped views
+  should get a screenshot; deferred this session — worth doing next session
+  or on request.
 
 ## Next up — professional-level roadmap (user-approved)
 
@@ -207,15 +356,19 @@ Canonical version: **[docs/ROADMAP.md](docs/ROADMAP.md)** (+
 [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for the V1–V3 view batches,
 which take priority per the user). Summary:
 
+- **Real-time signal sources (immediate next, user-prioritized)**: IODA ✅
+  shipped this session; **Bluesky Jetstream, then Telegram, in that order**
+  — see "Next session: Bluesky Jetstream + Telegram" above for the full
+  design (aggregate-only, both queued not implemented).
 - **V1–V3 visualization batches**: timeline histogram + spike halos +
   severity markers + recency fade (V1) ✅ shipped this session (see "V1 —
-  what shipped" above). **Next session's focus: V2** — attention↔unrest
-  divergence layer + top-movers + region sparkline + event ledger; then V3
-  — per-source layer identity/legend + basemap orientation polish + "how
-  to read this map" overlay. Honest-visualization principles and perf
-  guardrails in VISUALIZATION.md are binding; never copy a provider's
-  dashboard (ACLED etc.) — build original detail on this app's own visual
-  language.
+  what shipped" above). **V2 next** (after the two social sources above) —
+  attention↔unrest divergence layer + top-movers + region sparkline + event
+  ledger; then V3 — per-source layer identity/legend + basemap orientation
+  polish + "how to read this map" overlay. Honest-visualization principles
+  and perf guardrails in VISUALIZATION.md are binding; never copy a
+  provider's dashboard (ACLED etc.) — build original detail on this app's
+  own visual language.
 - **M7 — service hardening**: axum middleware (timeouts, concurrency cap,
   per-IP rate limit, CORS, compression, trace layer, graceful shutdown),
   snapshot-version ETag, `/events` pagination, OpenAPI via utoipa,
@@ -229,6 +382,15 @@ which take priority per the user). Summary:
 
 ## Landmines and quirks (learned the hard way)
 
+- **Researching a new live API (IODA)**: the provider's own docs pages were
+  a JS SPA — `WebFetch` got an empty shell every time, no matter the URL.
+  What worked: find the actual server-side implementation repo (`gh
+  api`/`curl` against the GitHub API for repo contents when `gh` isn't
+  authenticated — unauthenticated GitHub API calls work fine for public
+  repos, just rate-limited) and read the real controller/route source for
+  exact param names and response shape, then confirm with one live `curl`
+  before writing any Rust against it. Don't trust a WebSearch summary's
+  paraphrase of an API shape — verify against the source or a live call.
 - **cargo-deny (M6)**: internal workspace path deps need `publish = false`
   (workspace-level, inherited via `publish.workspace = true` per crate) +
   `[bans] allow-wildcard-paths = true` together, or every path dependency
