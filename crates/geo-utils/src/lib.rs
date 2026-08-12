@@ -383,7 +383,12 @@ impl CityIndex {
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
             };
-            let Some(name) = prop("name") else {
+            // Natural Earth ships a few names with doubled internal spaces
+            // ("Washington,  D.C."); collapse runs of whitespace so the name
+            // is presentable, without otherwise altering the source spelling.
+            let Some(name) =
+                prop("name").map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+            else {
                 continue;
             };
 

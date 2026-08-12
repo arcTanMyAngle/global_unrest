@@ -8,6 +8,7 @@ members = [
     "crates/geo-utils",
     "crates/renderer",
     "crates/source-acled",
+    "crates/source-bluesky",
     "crates/source-fixtures",
     "crates/source-gdelt",
     "crates/source-ioda",
@@ -37,6 +38,7 @@ core-types = { path = "crates/core-types" }
 geo-utils = { path = "crates/geo-utils" }
 renderer = { path = "crates/renderer" }
 source-acled = { path = "crates/source-acled" }
+source-bluesky = { path = "crates/source-bluesky" }
 source-fixtures = { path = "crates/source-fixtures" }
 source-gdelt = { path = "crates/source-gdelt" }
 source-ioda = { path = "crates/source-ioda" }
@@ -59,6 +61,9 @@ egui = "0.35"
 # Selects `zip`'s DEFLATE backend: flate2's default rust_backend (miniz_oxide,
 # pure Rust). `zip`'s deflate-flate2 feature pulls flate2 but not a backend.
 flate2 = "1"
+# Bluesky Jetstream's WebSocket stream. futures-util supplies the StreamExt
+# the socket is polled through.
+futures-util = { version = "0.3", default-features = false }
 geo = "0.33"
 geojson = "1.0"
 governor = "0.10"
@@ -67,6 +72,16 @@ h3o = "0.10"
 # on both Windows and Linux; no default TLS/http2 pulled in.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# tokio-tungstenite's rustls feature pulls rustls but selects no crypto
+# provider, so source-bluesky installs one explicitly. `ring` is the provider
+# reqwest already puts in this tree; default features off keeps aws-lc-rs
+# (and its cmake/NASM build requirement) out of CI.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -77,6 +92,13 @@ zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 # "net" gives the current-thread runtime its IO driver (reqwest needs it for
 # the live GDELT ingest loop); "rt" only, no multi-thread.
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net"] }
+# Bluesky Jetstream (streaming source). rustls + webpki-roots so it rides the
+# same TLS stack as reqwest and CI stays OpenSSL-free; `connect` already
+# implies handshake/stream.
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

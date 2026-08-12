@@ -1,0 +1,37 @@
+[package]
+name = "source-bluesky"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Bluesky Jetstream — keyless public firehose, the first *streaming* source
+# in this workspace. The live path is feature-gated like the other live
+# sources; message parsing stays pure and offline-testable.
+#
+# This source is aggregate-only by construction: see `chatter` for why, and
+# note that nothing here may ever return post text or author identity to a
+# caller (docs/SAFETY_AND_PRIVACY.md).
+
+[features]
+default = []
+live = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls"]
+
+[dependencies]
+chatter.workspace = true
+chrono.workspace = true
+core-types.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+futures-util = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `live_probe` only — a manual check against the real firehose.
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
