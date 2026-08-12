@@ -306,6 +306,138 @@ impl CountryIndex {
             .find(|s| !s.info.iso_a2.is_empty() && s.info.iso_a2.eq_ignore_ascii_case(code))
             .and_then(|s| s.centroid.map(|c| (&s.info, c)))
     }
+
+    /// Every country that has a usable centroid, as (info, (lon, lat)).
+    ///
+    /// Countries whose geometry yielded no centroid are skipped — callers
+    /// building name→coordinate tables must not invent one.
+    pub fn iter_with_centroid(&self) -> impl Iterator<Item = (&CountryInfo, (f64, f64))> {
+        self.shapes
+            .iter()
+            .filter_map(|s| s.centroid.map(|c| (&s.info, c)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// City gazetteer (Natural Earth populated places)
+// ---------------------------------------------------------------------------
+
+/// One populated place from Natural Earth's 1:110m `populated_places` set.
+#[derive(Debug, Clone)]
+pub struct CityInfo {
+    /// Canonical name, as Natural Earth spells it ("Malé", "São Paulo").
+    pub name: String,
+    /// Other spellings Natural Earth publishes for the same place: the ASCII
+    /// transliteration (`nameascii`) plus the pipe-separated `namealt` list,
+    /// deduped and with `name` itself removed. Text matchers need these —
+    /// people type "Sao Paulo" far more often than "São Paulo".
+    pub alt_names: Vec<String>,
+    /// Containing country's name (`adm0name`).
+    pub country_name: String,
+    /// Containing country's ISO 3166-1 alpha-3 (`adm0_a3`).
+    pub iso_a3: String,
+    pub lon: f64,
+    pub lat: f64,
+    /// Natural Earth's maximum population estimate; 0 when unpublished.
+    pub pop_max: u64,
+}
+
+/// Gazetteer of Natural Earth's ~240 major populated places.
+///
+/// Point data, so this is a name→coordinate lookup, not a point-in-polygon
+/// index like [`CountryIndex`] — there are no city polygons at this scale.
+pub struct CityIndex {
+    cities: Vec<CityInfo>,
+}
+
+impl CityIndex {
+    /// Parse the `ne_110m_populated_places_simple` FeatureCollection.
+    ///
+    /// Features without a Point geometry, or missing a name, are skipped
+    /// rather than defaulted — a gazetteer entry with a guessed coordinate
+    /// would be worse than no entry at all.
+    pub fn from_geojson_str(raw: &str) -> Result<Self, GeoError> {
+        let gj: geojson::GeoJson = raw.parse().map_err(|e| GeoError::Geojson(format!("{e}")))?;
+        let geojson::GeoJson::FeatureCollection(fc) = gj else {
+            return Err(GeoError::Geojson("expected a FeatureCollection".into()));
+        };
+        let mut cities = Vec::with_capacity(fc.features.len());
+        for feature in fc.features {
+            let Some(geometry) = feature.geometry.as_ref() else {
+                continue;
+            };
+            // Reuse the same geo conversion CountryIndex uses rather than
+            // destructuring geojson's Position newtype by hand.
+            let geom: geo::Geometry<f64> =
+                geo::Geometry::try_from(geometry).map_err(|e| GeoError::Geojson(format!("{e}")))?;
+            let geo::Geometry::Point(point) = geom else {
+                continue;
+            };
+            let prop = |key: &str| -> Option<String> {
+                feature
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.get(key))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            };
+            let Some(name) = prop("name") else {
+                continue;
+            };
+
+            // `namealt` packs several spellings into one pipe-separated field.
+            let mut alt_names: Vec<String> = Vec::new();
+            let mut push_alt = |candidate: &str| {
+                let candidate = candidate.trim();
+                if !candidate.is_empty()
+                    && candidate != name
+                    && !alt_names.iter().any(|a: &String| a == candidate)
+                {
+                    alt_names.push(candidate.to_owned());
+                }
+            };
+            if let Some(ascii) = prop("nameascii") {
+                push_alt(&ascii);
+            }
+            if let Some(alt) = prop("namealt") {
+                for part in alt.split('|') {
+                    push_alt(part);
+                }
+            }
+
+            let pop_max = feature
+                .properties
+                .as_ref()
+                .and_then(|p| p.get("pop_max"))
+                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+                .unwrap_or(0);
+
+            cities.push(CityInfo {
+                name,
+                alt_names,
+                country_name: prop("adm0name").unwrap_or_default(),
+                iso_a3: prop("adm0_a3").unwrap_or_else(|| "UNK".into()),
+                lon: point.x(),
+                lat: point.y(),
+                pop_max,
+            });
+        }
+        Ok(Self { cities })
+    }
+
+    pub fn len(&self) -> usize {
+        self.cities.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cities.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &CityInfo> {
+        self.cities.iter()
+    }
 }
 
 #[cfg(test)]
@@ -436,5 +568,50 @@ mod tests {
         // Never guessed: unknown code and the "-99" gap both miss.
         assert!(index.centroid_by_iso_a2("ZZ").is_none());
         assert!(index.centroid_by_iso_a2("-99").is_none());
+
+        // Every yielded country carries a real centroid; the "-99" one still
+        // has geometry, so it is present here — the filter is on centroid,
+        // not on ISO codes.
+        assert_eq!(index.iter_with_centroid().count(), 2);
+    }
+
+    #[test]
+    fn city_index_keeps_alt_spellings_and_skips_unusable_features() {
+        // Shaped exactly like ne_110m_populated_places_simple: `namealt` is
+        // pipe-separated, `nameascii` is the transliteration.
+        let sample = r#"{
+          "type": "FeatureCollection",
+          "features": [
+            {"type":"Feature","properties":{"name":"Malé","nameascii":"Male","namealt":"Male",
+              "adm0name":"Maldives","adm0_a3":"MDV","pop_max":133019},
+             "geometry":{"type":"Point","coordinates":[73.5,4.17]}},
+            {"type":"Feature","properties":{"name":"Panama City","nameascii":"Panama City",
+              "namealt":"Ciudad de Panam|Panama","adm0name":"Panama","adm0_a3":"PAN","pop_max":1281647},
+             "geometry":{"type":"Point","coordinates":[-79.53,8.97]}},
+            {"type":"Feature","properties":{"name":"No Geometry","adm0_a3":"XXX"},
+             "geometry":null},
+            {"type":"Feature","properties":{"adm0name":"Nameless","adm0_a3":"YYY"},
+             "geometry":{"type":"Point","coordinates":[1.0,2.0]}},
+            {"type":"Feature","properties":{"name":"Not A Point","adm0_a3":"ZZZ"},
+             "geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,1],[0,0]]]}}
+          ]
+        }"#;
+        let index = CityIndex::from_geojson_str(sample).unwrap();
+        // Null geometry, missing name, and non-Point geometry are all skipped.
+        assert_eq!(index.len(), 2);
+
+        let male = index.iter().find(|c| c.name == "Malé").unwrap();
+        assert_eq!(male.iso_a3, "MDV");
+        assert!((male.lon - 73.5).abs() < 1e-9);
+        assert!((male.lat - 4.17).abs() < 1e-9);
+        // `nameascii` and `namealt` agree here, so the alt list dedupes to one.
+        assert_eq!(male.alt_names, vec!["Male".to_owned()]);
+
+        // Pipe-separated alternates are split; `name` itself is not repeated.
+        let panama = index.iter().find(|c| c.name == "Panama City").unwrap();
+        assert_eq!(
+            panama.alt_names,
+            vec!["Ciudad de Panam".to_owned(), "Panama".to_owned()]
+        );
     }
 }
