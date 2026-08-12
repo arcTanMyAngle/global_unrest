@@ -40,12 +40,18 @@ vertices), fixtures fetched (3 files, ~11k records), fixtures normalized
 
 ## Headless launch with captured logs
 
+**`tracing_subscriber::fmt()` writes to stdout, not stderr** — redirecting
+only stderr captures an *empty* file and looks exactly like an app that
+started but never ingested. Redirect both:
+
 ```powershell
 $env:RUST_LOG = "info"
 $proc = Start-Process -FilePath ".\target\debug\global-signal-desktop.exe" `
-  -WorkingDirectory (Get-Location) -PassThru -RedirectStandardError "$env:TEMP\les_app_err.log"
+  -WorkingDirectory (Get-Location) -PassThru `
+  -RedirectStandardOutput "$env:TEMP\les_app_out.log" `
+  -RedirectStandardError  "$env:TEMP\les_app_err.log"
 Start-Sleep -Seconds 14   # startup + ingest
-# check: $proc.HasExited, Get-Content $env:TEMP\les_app_err.log -Tail 30
+# check: $proc.HasExited, Get-Content $env:TEMP\les_app_out.log -Tail 30
 ```
 
 ## Screenshot / click verification (this machine: 2560×1600, DPI-scaled)

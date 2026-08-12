@@ -22,6 +22,8 @@ live = [
     "dep:grammers-client",
     "dep:grammers-session",
     "dep:grammers-mtsender",
+    "dep:serde",
+    "dep:serde_json",
 ]
 
 [dependencies]
@@ -31,7 +33,12 @@ core-types.workspace = true
 tracing.workspace = true
 grammers-client = { workspace = true, optional = true }
 grammers-mtsender = { workspace = true, optional = true }
+# Pulled with `default-features = false` at the workspace root, which drops
+# `sqlite-storage` (and its duplicate vendored SQLite) — `src/file_session.rs`
+# replaces it, and serde supplies that file's derives.
 grammers-session = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]

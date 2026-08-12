@@ -168,7 +168,7 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   excluded candidates documented by name and reason alongside it) and
   advances a per-channel in-memory high-water mark. Login is a one-time
   interactive step (`examples/login_setup.rs`, phone number + SMS code)
-  that saves a local SQLite session file; the real source only ever opens
+  that saves a local JSON session file; the real source only ever opens
   that file, never logs in itself — a missing/unauthorized session surfaces
   as a `fetch` error naming the setup command. Reuses `chatter` unchanged.
 
@@ -201,9 +201,16 @@ markers; Country/Admin1 shade regions (enforced in the storage query).
   relying on cross-crate feature unification (which silently works in the
   desktop binary and fails in a standalone example/test).
 - Telegram deps: `grammers-client`/`grammers-session`/`grammers-mtsender`
-  0.10 (pure Rust MTProto, no TDLib/C++). `grammers-session`'s
-  `SqliteSession` pulls in `libsql-ffi` (a real C build step, like DuckDB's
-  bundled C++ — expect a slower first cold build). `Message::date()` returns
+  0.10 (pure Rust MTProto, no TDLib/C++). **`grammers-session` is pinned
+  `default-features = false` in the root manifest** — its default
+  `sqlite-storage` pulls `libsql-ffi`, a *second* vendored static SQLite
+  next to `rusqlite`/`libsqlite3-sys`, and linking both into one binary
+  fails with duplicate `sqlite3_*` symbols (LNK2005). `cargo check`/`clippy`
+  never link, so only a real `cargo build` catches that class of bug. The
+  dropped storage is replaced by `source-telegram`'s own
+  `file_session::FileSession` (JSON file; `SessionData` has public fields
+  but no serde derives, hence the mirror struct). Its `serde` feature is on,
+  which is what adds `serde_with`. `Message::date()` returns
   plain `chrono::DateTime<Utc>` in the published 0.10.0, **not**
   `jiff::Timestamp`: the crate's `master` branch had already migrated to
   `jiff` when this was researched, one release ahead of what crates.io

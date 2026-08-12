@@ -17,7 +17,11 @@
 //! docs/SAFETY_AND_PRIVACY.md hard rule 6 before changing anything here.
 
 #[cfg(feature = "live")]
+pub mod file_session;
+#[cfg(feature = "live")]
 mod live;
+#[cfg(feature = "live")]
+pub use file_session::FileSession;
 #[cfg(feature = "live")]
 pub use live::TelegramSource;
 

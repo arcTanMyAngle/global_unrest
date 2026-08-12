@@ -179,12 +179,20 @@ never touches anything outside `ALLOWED_CHANNELS`.
 - **Login is a one-time, out-of-band step.** Telegram account login needs a
   phone number and an SMS/app code — not something a long-lived worker or
   GUI app can do for itself. `examples/login_setup.rs` is a small
-  interactive tool: run it once, it saves a local SQLite session file at
+  interactive tool: run it once, it saves a local JSON session file at
   `LES_TELEGRAM_SESSION_FILE`. `TelegramSource` only ever *opens* that file;
   if it's missing or not yet authorized, `fetch` returns a clear error
   naming the setup command rather than trying to prompt for input from
   inside a GUI app. `TELEGRAM_API_HASH` is read only by that setup tool,
   never by the routine polling path.
+- **The session store is this crate's own, not `grammers-session`'s.**
+  `grammers-session`'s `SqliteSession` vendors a second static SQLite
+  (`libsql-ffi`) alongside the one `rusqlite` already brings in for
+  `storage`'s settings DB, and linking both into `global-signal-desktop`
+  fails with duplicate `sqlite3_*` symbols. The crate is therefore pulled
+  with `default-features = false`, and `source-telegram::file_session`
+  implements the `Session` trait over a JSON file instead. The file holds a
+  live login — treat it as a credential; it is gitignored.
 - **Same privacy boundary as Bluesky.** Message text goes straight into
   `ChatterAccumulator::observe` and is dropped in the same call; nothing in
   this crate returns message text, sender identity, or a message URL.

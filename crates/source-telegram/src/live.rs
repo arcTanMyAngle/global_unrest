@@ -5,7 +5,8 @@
 //! **Login is a one-time, out-of-band step.** Telegram's account login needs
 //! a phone number and an SMS/app code, which cannot be automated from a
 //! long-lived worker/desktop process. `examples/login_setup.rs` is a small
-//! interactive tool: run it once, and it saves a local SQLite session file.
+//! interactive tool: run it once, and it saves a local session file (see
+//! [`crate::file_session`] for why that file is JSON and not SQLite).
 //! Every subsequent run of the real source just opens that file — no further
 //! interaction. If the file is missing or not yet authorized, [`fetch`]
 //! returns a clear error naming the setup command rather than trying to
@@ -21,9 +22,9 @@ use core_types::{
 };
 use grammers_client::Client;
 use grammers_mtsender::SenderPool;
-use grammers_session::storages::SqliteSession;
 use tokio::sync::OnceCell;
 
+use crate::file_session::FileSession;
 use crate::{ALLOWED_CHANNELS, ChannelSweep};
 
 /// Don't ingest a channel's entire history the first time it's swept — just
@@ -105,7 +106,7 @@ impl TelegramSource {
         let conn =
             self.conn
                 .get_or_try_init(|| async {
-                    let session = SqliteSession::open(&self.session_path).await.map_err(|e| {
+                    let session = FileSession::load(&self.session_path).map_err(|e| {
                         SourceError::Other(format!(
                             "opening telegram session file `{}`: {e}",
                             self.session_path

@@ -1,92 +1,147 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (**third** session that day). **M0–M6 complete; V1
-shipped; IODA, Bluesky, and Telegram live sources all implemented.** The
-Telegram login is now **done**, the gate battery **finally ran clean**, and
-`cargo deny` is **green** — but that same battery uncovered a **blocking
-link failure that makes the desktop binary unbuildable with
-`telegram-live` enabled**. Read "🚨 BLOCKER" immediately below before
-anything else; it is the whole next session.
-
-## 🚨 BLOCKER — `libsql-ffi` and `libsqlite3-sys` both bundle SQLite (LNK2005)
-
-**`cargo build -p global-signal-desktop` does not link.** Two static copies
-of SQLite end up in the same binary:
-
-- `rusqlite` → `libsqlite3-sys` (storage's settings store), and
-- `grammers-session`'s `SqliteSession` → `libsql-ffi` (Telegram sessions).
-
-```
-liblibsqlite3_sys-*.rlib(sqlite3.o) : error LNK2005:
-  sqlite3_step already defined in liblibsql_ffi-*.rlib(sqlite3.o)
-  ... (dozens of sqlite3_* symbols)
-error: linking with `link.exe` failed: exit code: 1169
-```
-
-**Why nobody caught this until now:** `cargo clippy` and `cargo check`
-**do not link a binary**, so all four clippy legs pass happily. The
-previous session's "compile-verified in isolation" claim was `cargo check
--p source-telegram --features live --examples`, and `login_setup` links
-fine *because it never pulls in `rusqlite`*. Only a real `cargo build`/
-`cargo test` of the desktop or worker binary trips it. **Lesson: for a new
-dependency carrying native C code, `cargo check` is not evidence — build
-the actual binary.**
-
-### Verified fix direction (checked against the pinned registry source)
-
-`grammers-session 0.10.0` has `default = ["sqlite-storage"]` and
-`sqlite-storage = ["dep:libsql"]`. Crucially, **`grammers-client` and
-`grammers-mtsender` both already declare `grammers-session` with
-`default-features = false`** — so *our own* `crates/source-telegram/Cargo.toml`
-is the only thing enabling it. Setting `default-features = false` there
-drops `libsql-ffi` entirely, which also removes the slow C build and the
-CI `libclang`/bindgen risk this file flagged earlier.
-
-That leaves `MemorySession` (`storages/memory.rs`), which does implement
-`Session`. The work is re-implementing session persistence:
-
-- `MemorySession(Mutex<SessionData>)`, with `impl From<SessionData>`.
-- `SessionData` (`src/session_data.rs`) has **all-public fields**
-  (`home_dc: i32`, `dc_options: HashMap<i32, DcOption>`, peer cache,
-  update state) and its docs name a `SessionData::import_to` conversion
-  usable with any `Session`, so getting data in/out is supported.
-- **`SessionData` itself has NO serde derives in 0.10.0** — only
-  `DcOption` and the `peer.rs`/`types.rs` types do (behind the crate's
-  `serde` feature). So persistence needs a small hand-written mirror
-  struct in `source-telegram` that serde-derives and converts both ways,
-  not a one-line `serde_json::to_string(&session_data)`. **Verify this
-  before designing around it** — confirm whether `import_to`/`From` give a
-  clean round-trip, and re-read the exact pinned source, not HEAD.
-- Changing the on-disk format **invalidates `./telegram.session`**, so the
-  one-time `login_setup` must be re-run after the switch (user at the
-  keyboard again — the SQLite file cannot be migrated field-for-field
-  without the libsql dep that's being removed).
-
-**Alternatives if that proves ugly:** (a) drop `rusqlite` from `storage`'s
-settings store, far more invasive and touches unrelated code; (b) keep
-Telegram out of the desktop/worker binaries and run it as its own process
-— but that abandons the single-binary shape every other source has. (a)
-and (b) are both worse; start with `default-features = false`.
-
-**Until this is fixed, `telegram-live` cannot be a desktop default
-feature** — the default `cargo build`/`cargo run`/`cargo test --workspace`
-are all broken by it, which is why GUI verification never happened.
-
-**Confirmed, not predicted:** `cargo test --workspace` was run to
-completion and fails identically — 24 `LNK2005` errors, `could not compile
-global-signal-desktop (bin "global-signal-desktop")`, and **zero test
-binaries ever ran** (no `test result:` line anywhere in the log). So the
-workspace suite currently provides *no* coverage signal at all, for every
-crate, not just Telegram. That makes this blocker the only thing worth
-doing first.
-
-**Before touching `chatter`, `source-bluesky`, or `source-telegram`, read
-[docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.** The
-aggregate-only shape of these sources, and the curated-allowlist-only shape
-of Telegram specifically, are deliberate hold-the-line decisions, not
-defaults to relax.
+Last session: 2026-08-12 (**fourth** session that day). **M0–M6 complete; V1
+shipped; IODA, Bluesky, and Telegram live sources all implemented, and as of
+this session all three are verified running live in the desktop GUI.** The
+LNK2005 blocker that dominated the previous handoff is **fixed**; the full
+gate battery is green including `cargo test --workspace` (which had been
+running zero test binaries). Next: **V2 visualization batch**.
 
 Read this file, then [CLAUDE.md](CLAUDE.md).
+
+## ✅ RESOLVED — the LNK2005 duplicate-SQLite blocker
+
+`grammers-session`'s default `sqlite-storage` feature pulled `libsql-ffi`,
+a second statically-vendored SQLite next to the one `rusqlite`/
+`libsqlite3-sys` already provides for `storage`'s settings DB. Linking both
+into `global-signal-desktop` failed with 24 duplicate `sqlite3_*` symbols.
+
+**Fix**: `grammers-session` is now pinned `default-features = false,
+features = ["serde"]` in the **root** `Cargo.toml`. It has to be the root —
+Cargo *ignores* a member's `default-features = false` (with a warning) when
+the workspace entry leaves defaults on. `grammers-client` and
+`grammers-mtsender` already declared it `default-features = false`, so ours
+was the only thing turning it on. `libsql`/`libsql-ffi` are now **absent
+from the lockfile entirely** — the slow C build and the CI bindgen/`libclang`
+risk went with them.
+
+Dropping that feature also drops `SqliteSession`, the only built-in
+persistent storage. Replacement: **`crates/source-telegram/src/file_session.rs`**,
+a `FileSession` implementing `grammers_session::Session` over a JSON file.
+
+**Design note — this deliberately did *not* follow the previous handoff's
+`MemorySession` + mirror-struct sketch.** That can't work cleanly:
+`MemorySession`'s inner `SessionData` field is private, so state can only be
+read back out through the `Session` trait, which cannot enumerate
+`dc_options` or `peer_infos` at all (you'd have to guess DC ids 1–5 and
+abandon the peer cache). Implementing `Session` over our own `SessionData` is
+about the same amount of code and gives a real round-trip plus save-on-
+mutation. The previous handoff's finding that **`SessionData` has no serde
+derives in 0.10.0** was correct and re-confirmed against the pinned registry
+source; its component types (`DcOption`, `PeerInfo`, `UpdatesState`,
+`ChannelState`) do have them behind the crate's `serde` feature, which is why
+`PersistedSession` is a thin hand-written mirror rather than a derive on
+`SessionData` itself.
+
+Details worth keeping:
+- Writes are **write-temp-then-rename** (`foo.session-tmp`, which matches the
+  existing `*.session-*` gitignore rule), so an interrupted save can't
+  truncate a live login.
+- Saves happen on mutation but **only when a value actually changed**.
+  `PeerInfo::extend_info` returns whether the peers *matched*, not whether
+  anything moved, so `cache_peer` compares before/after — otherwise
+  re-resolving the same 8 channels every sweep would rewrite the file.
+- A **missing** file starts a fresh session; a **present-but-unparseable**
+  one is a hard error naming the file. A stale/foreign file must never
+  silently degrade into "not logged in".
+- The on-disk format is tied to upstream's serde representation, so a
+  `grammers-*` bump can invalidate session files. Recovery is one
+  `login_setup` run.
+- `./telegram.session` was re-created this session (the old SQLite one was
+  moved to `telegram.session-sqlite-backup`, still gitignored, and is now
+  unreadable by the app — it can be deleted).
+
+**The lesson that made this hard is still the lesson**: `cargo check`/`cargo
+clippy` do not link, so they cannot catch duplicate native symbols. For any
+dependency with a native/`-sys` component, **build the real binary**, and
+check whether it vendors something the workspace already vendors
+(`cargo tree -i libsqlite3-sys`) *before* writing the integration.
+
+## Verified this session (all re-run to completion, not predicted)
+
+| gate | result |
+|---|---|
+| `cargo build -p global-signal-desktop` | ✅ links, 5m34s, **0 LNK2005** (was 24) |
+| `cargo test --workspace` | ✅ **35 test binaries, 197 passed, 0 failed** (was: 0 binaries ran, zero coverage signal) |
+| `cargo fmt --all --check` | ✅ |
+| `cargo clippy` workspace / 5-way live matrix / `telegram-live` solo | ✅ ✅ ✅ |
+| `cargo test` 5-way feature matrix | ✅ |
+| `cargo test -p source-acled --features live` | ✅ |
+| `cargo test -p source-telegram --features live` | ✅ 12 passed (7 existing + 5 new `file_session` tests) |
+| `cargo deny check` | ✅ advisories, bans, licenses, sources ok |
+
+`cargo deny` mattered here: dropping `libsql-ffi` traded in `serde_with` +
+`darling` (proc-macro, build-time). Both cleared. The other new lockfile
+entries (`schemars`, `jiff`, `time`, `bs58`, `defmt`, `indexmap 1.9`) are
+serde_with's **optional** deps — present in `Cargo.lock`, absent from the
+desktop's actual dependency tree, never compiled.
+
+## Telegram + Bluesky GUI verification — DONE, with the honest split
+
+The app ran live from the workspace root for ~8 minutes. **All five live
+sources ingested in one run**: acled 35229, noaa 83, telegram 18, ioda 12,
+bluesky 5.
+
+**Screenshot-verified** (two full-screen captures): the right-hand status
+panel shows `Live source — Telegram · online · 18 records this cycle` and
+`Live source — Bluesky · online · 5 records this cycle`, each with a real
+`last fetch` timestamp; the map renders a populated heatmap plus spike halos
+over the eastern US, Ireland, Poland/Belarus and Ukraine (548 region-buckets
+in a 3-day window). GDELT showed `partial — one feed unavailable` (DOC http
+error), which is the designed degraded state, not a regression.
+
+**Query-verified** (the part a screenshot cannot show — the map still has no
+per-source visual identity; that's V3). Baseline before the run was **zero
+`telegram` and zero `bluesky` rows**, so this is a clean before/after:
+
+```
+all events:  telegram 18, bluesky 5      (baseline: 0, 0)
+rendered 3-day window: telegram 10, bluesky 5
+kind/precision breakdown in that window:
+  telegram news_attention country RUS 3, UKR 1, IRN 1, LBN 1, YEM 1, USA 1, DEU 1
+  telegram news_attention city    IRN 1
+  bluesky  news_attention country USA 2, COL 1, ISR 1
+  bluesky  news_attention city    USA 1
+```
+
+**Precise claim, given the precision-rendering contract** (only City/Exact
+render as point markers; Country/Admin1 shade regions): of the 15 chatter
+rows in the rendered window, **2 drew point markers** (telegram city/IRN ×1,
+bluesky city/USA ×1) and the other 13 shaded H3 regions. Every chatter row is
+`news_attention`, which is correct by design — chatter is attention, never an
+event.
+
+Timing facts confirmed rather than assumed: Telegram's first sweep fires
+**immediately** on startup (all 8 allowlisted channels resolved and swept, no
+per-channel failures; `borderlandbeat` yielded only 3 messages, the rest 30
+each) and drained **18 rollups on the first cycle**, because its
+`FIRST_SWEEP_LIMIT=30` history read lands in already-closed chatter windows.
+Bluesky drained at **exactly 5:00 after socket connect**, as designed.
+
+Note the default map window opened at `2026-08-13 → 08-14`, *ahead* of the
+chatter's ~18:22 timestamps (NOAA alert expiry times push the data extent
+into the future), so the chatter was initially outside the visible window —
+widening to a 3-day window was needed to render it. Worth remembering before
+concluding a fresh source "isn't showing up".
+
+### Gotcha found and fixed in `.claude/skills/run/SKILL.md`
+
+The skill's headless-launch recipe redirected **stderr only**.
+`tracing_subscriber::fmt()` writes to **stdout**, so the log came back
+completely empty — which looks exactly like an app that started but never
+ingested. The skill now redirects both streams. Also note `Out-File -Encoding
+utf8` on PS 5.1 writes a **BOM**, so a PID round-tripped through a file won't
+parse as an int; kill by process name instead.
 
 ## Instructions for next session (explicit, from the user)
 
@@ -140,13 +195,13 @@ Read this file, then [CLAUDE.md](CLAUDE.md).
 | | |
 |---|---|
 | Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. **`origin/main` is behind by a lot**: the 2 IODA commits, the previous handoff commit, and *all* Bluesky + Telegram work (code and docs) are local-only and **uncommitted** (see "Commits" row — nothing from this session or the prior one has been committed yet). Ask before pushing *or* committing — the user said explicitly this session "I will commit once everything is complete for this session," so wait for that signal rather than committing unprompted. |
-| Commits | **The Telegram work IS committed** — the tree was clean at the start of the third 2026-08-12 session, ending at `25549d5 overhaul again`. (The row that used to live here claimed everything was uncommitted; that went stale the moment the user committed.) **Newly uncommitted again** as of this session: codex's `ChannelSweep` refactor + 7 tests, the `Cargo.lock` `webbrowser` bump, the `cargo fmt` fixes to the three `source-telegram` files, and this handoff. |
-| Tests | `cargo fmt --all --check` ✅ (was failing — real, now fixed). `cargo clippy` ✅ on all three legs: workspace default, 5-way live matrix, `telegram-live` solo. **`cargo test --workspace` ❌ FAILS** on the LNK2005 blocker at the top of this file (confirmed by a full run: 24 `LNK2005`, **no test binary ran at all**, so there is currently zero workspace coverage signal). `cargo test -p source-telegram` ✅ 7 passed, with and without `--features live`. |
+| Commits | **Nothing from this session is committed.** Last commit is `e07018f mo`. Uncommitted now: the LNK2005 fix (root `Cargo.toml`, `crates/source-telegram/Cargo.toml`, new `src/file_session.rs`, `src/lib.rs`, `src/live.rs`, `examples/login_setup.rs`), the `Cargo.lock` churn from dropping `libsql`, doc updates (CLAUDE.md, docs/DATA_MODEL.md, docs/DEVELOPMENT.md, .env.example), the `.claude/skills/run/SKILL.md` stdout fix, and this handoff. The user commits at the end of a session — wait for that signal, and ask before pushing. |
+| Tests | **All green, all re-run to completion this session** — see the gate table near the top of this file. Headline: `cargo test --workspace` now runs **35 test binaries / 197 tests** (it ran *zero* before the fix), and `cargo build -p global-signal-desktop` links. `cargo deny check` green. |
 | Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1, IODA, Bluesky, or Telegram — versioning is milestone-tied, not batch-tied |
-| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` and now `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`/`LES_TELEGRAM_SESSION_FILE` (session file path: `./telegram.session`, not yet created — see below). IODA and Bluesky are keyless. `.env.example` and `.gitignore` (`*.session`/`*.session-*`) were both updated to match. |
+| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` and `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`/`LES_TELEGRAM_SESSION_FILE`. **`./telegram.session` exists and is authorized** (JSON format as of this session; re-created after the storage swap, user did the SMS step). `telegram.session-sqlite-backup` is the dead pre-swap SQLite file — gitignored, unreadable by the app, safe to delete. IODA and Bluesky are keyless. |
 | Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; IODA/Bluesky/Telegram ✅, pulled forward from M8; M7/V2/M8-remainder next) |
-| **GUI live-visual verification** | **Done for V1** (screenshots). **IODA: log-verified** (real fetch cycle completed in a prior session). **Bluesky: still only data-level-verified**, not seen on the map — a desktop process was briefly open during this session but was ~1 minute old when checked (almost certainly the user's own doing, unrelated to a `bluesky-live` test run) and was left alone rather than touched. **Telegram: not verified at any level yet** — login hasn't been run, so `fetch()` will error every cycle until it is. |
-| **New dependency tree (unverified by `cargo deny`)** | `source-telegram`'s `live` feature pulls in `grammers-client`/`grammers-session`/`grammers-mtsender` 0.10 (all `MIT OR Apache-2.0`, spot-checked via the crates.io API — not run through the actual tool yet) and, transitively via `grammers-session`, `libsql-ffi` (a real C build step via `cmake`/`bindgen`, similar to DuckDB's bundled C++ — compiled fine on this machine but never exercised on CI's Ubuntu runner). **Run `cargo deny check` next session before assuming this is clean**, and watch the first CI run for a `libclang`/bindgen failure on Ubuntu specifically. |
+| **GUI live-visual verification** | **Done for V1** (screenshots). **IODA: log-verified.** **Bluesky and Telegram: DONE this session** — screenshot-verified in the status panel + map, and query-verified per source against a zero-row baseline. See the dedicated section near the top for the exact screenshot-vs-query split and the counts. |
+| Dependency tree | `cargo deny check` **green** against the current tree (advisories, bans, licenses, sources). `libsql-ffi` is **gone** — so the `libclang`/bindgen-on-Ubuntu risk this row used to warn about no longer exists. New build-time additions are `serde_with` + `darling`, both cleared. |
 
 ## V1 — what shipped (2026-08-10, 4 PR-sized commits, see `git log`)
 
@@ -426,29 +481,29 @@ the rule, not just a hypothetical.
 
 ## Next session (in priority order)
 
-1. **Fix the LNK2005 blocker** (top of this file). Nothing else about
-   Telegram can be verified until the desktop binary links.
-2. **Then finish the gate battery**: `cargo test --workspace` end to end,
-   plus `cargo test -p global-signal-desktop -p workers --features
-   acled-live,noaa-live,ioda-live,bluesky-live,telegram-live`.
-3. **GUI-verify both Bluesky and Telegram chatter on the map** — still
-   open, now blocked on (1). Useful timing facts established this session:
-   `telegram_next = Instant::now()` (ingest.rs:451), so Telegram's first
-   sweep fires **immediately** on startup and its `FIRST_SWEEP_LIMIT=30`
-   history read lands in already-closed chatter windows — expect rollups
-   on the **first** cycle, not after 15 minutes. Bluesky still needs its
-   5-minute first drain (ingest.rs:437). So the run is ~6–8 minutes, not
-   15+. **Caveat worth stating out loud when reporting**: the map has no
-   per-source visual identity yet (that's V3), so a screenshot alone
-   cannot prove *Telegram specifically* rendered — pair it with a direct
-   query for `source='telegram'`/`'bluesky'` rows in the rendered window.
-   Also: the app must be launched **from the workspace root**, since
-   `LES_TELEGRAM_SESSION_FILE` is the relative `./telegram.session`.
-4. **Commit** — still uncommitted and now larger: codex's `ChannelSweep`
-   refactor + tests, the `Cargo.lock` `webbrowser` bump, the fmt fixes,
-   and this handoff. Ask before pushing, same as always.
-5. After all of the above: **V2 visualization batch**
-   (docs/VISUALIZATION.md), interleaved with M7 service hardening.
+1. **Commit.** Nothing this session is committed yet (see the Commits row).
+   The user commits at the end of a session — ask before pushing, as always.
+2. **V2 visualization batch** ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)):
+   attention<->unrest divergence layer + top-movers + region sparkline +
+   event ledger. Then V3 (per-source layer identity/legend — which is what
+   would let a screenshot alone attribute a marker to Telegram vs Bluesky,
+   the gap called out in the GUI-verification section above). Interleave
+   with **M7 service hardening**. Honest-visualization principles and perf
+   guardrails in VISUALIZATION.md are binding; never copy a provider's
+   dashboard.
+3. Still-open loose ends are unchanged — see "Loose ends carried forward"
+   below. Branch protection on `main` remains the one unfinished M6 item and
+   is a manual GitHub-settings step (no authenticated `gh` on this machine).
+
+Useful timing facts for any future live run (established by a real run, not
+predicted): Telegram's first sweep fires **immediately** on startup
+(`telegram_next = Instant::now()`, ingest.rs:451) and drains rollups on the
+**first** cycle; Bluesky needs its 5-minute first drain (ingest.rs:437), and
+hit it to the second. Launch **from the workspace root** —
+`LES_TELEGRAM_SESSION_FILE` is the relative `./telegram.session`. And widen
+the map's time window: the default opens at the newest extent bucket, which
+NOAA alert expiry times push *ahead* of "now", leaving fresh chatter outside
+the visible window.
 
 ### Correction to the M8 backlog: Burmese topic tokens will not work as planned
 

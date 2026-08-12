@@ -74,7 +74,17 @@ governor = "0.10"
 # DuckDB" posture. All grammers-* crates are one workspace and version
 # together upstream.
 grammers-client = "0.10"
-grammers-session = "0.10"
+# `default-features = false` drops `sqlite-storage`, whose `libsql-ffi`
+# vendors a second static SQLite alongside the one `rusqlite`/`libsqlite3-sys`
+# already vendors — linking both into one binary fails with duplicate
+# `sqlite3_*` symbols (LNK2005). `cargo check`/`clippy` never link, so only a
+# real `cargo build` catches it. `source-telegram::file_session` replaces the
+# dropped storage; `serde` supplies the derives its mirror struct needs.
+# Must be set here, not in the member: Cargo ignores a member's
+# `default-features = false` when the workspace entry leaves defaults on.
+grammers-session = { version = "0.10", default-features = false, features = [
+    "serde",
+] }
 grammers-mtsender = "0.10"
 h3o = "0.10"
 # GDELT live ingestion (M3). rustls (not native-tls) so CI stays OpenSSL-free

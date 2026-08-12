@@ -6,8 +6,8 @@
 //!
 //! Reads `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `LES_TELEGRAM_SESSION_FILE`
 //! from `.env` (same as the rest of this workspace), prompts for a phone
-//! number and the code Telegram sends to it, and saves a local SQLite
-//! session file at `LES_TELEGRAM_SESSION_FILE`. `TelegramSource` (the real,
+//! number and the code Telegram sends to it, and saves a local JSON session
+//! file at `LES_TELEGRAM_SESSION_FILE`. `TelegramSource` (the real,
 //! long-running adapter) only ever *opens* that file — it never performs
 //! this interactive flow itself, since a GUI app or headless worker has
 //! nowhere to put a phone-number/code prompt.
@@ -27,7 +27,7 @@ async fn main() {
 
     use grammers_client::{Client, SignInError};
     use grammers_mtsender::SenderPool;
-    use grammers_session::storages::SqliteSession;
+    use source_telegram::FileSession;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -47,8 +47,7 @@ async fn main() {
         .expect("LES_TELEGRAM_SESSION_FILE not set (see .env.example)");
 
     let session = Arc::new(
-        SqliteSession::open(&session_path)
-            .await
+        FileSession::load(&session_path)
             .unwrap_or_else(|e| panic!("opening session file `{session_path}`: {e}")),
     );
     let SenderPool { runner, handle, .. } = SenderPool::new(Arc::clone(&session), api_id);
