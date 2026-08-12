@@ -12,7 +12,7 @@ Read this file, then [CLAUDE.md](CLAUDE.md).
 
 ## V2 — what shipped this session (2026-08-12, fifth session)
 
-All three items, uncommitted (the user commits at end of session). Full
+All three items, committed by the user as `77bf32c bluey and teley`. Full
 design rationale is in [docs/VISUALIZATION.md](docs/VISUALIZATION.md) §
 "V2 as built"; this is the orientation summary.
 
@@ -207,7 +207,7 @@ entries (`schemars`, `jiff`, `time`, `bs58`, `defmt`, `indexmap 1.9`) are
 serde_with's **optional** deps — present in `Cargo.lock`, absent from the
 desktop's actual dependency tree, never compiled.
 
-## Telegram + Bluesky GUI verification — DONE, with the honest split
+## Telegram + Bluesky GUI verification — DONE in the previous session
 
 The app ran live from the workspace root for ~8 minutes. **All five live
 sources ingested in one run**: acled 35229, noaa 83, telegram 18, ioda 12,
@@ -315,13 +315,13 @@ parse as an int; kill by process name instead.
 
 | | |
 |---|---|
-| Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. **`origin/main` is behind by a lot**: the 2 IODA commits, the previous handoff commit, and *all* Bluesky + Telegram work (code and docs) are local-only and **uncommitted** (see "Commits" row — nothing from this session or the prior one has been committed yet). Ask before pushing *or* committing — the user said explicitly this session "I will commit once everything is complete for this session," so wait for that signal rather than committing unprompted. |
-| Commits | **Nothing from this session is committed.** Last commit is `e07018f mo`. Uncommitted now: the LNK2005 fix (root `Cargo.toml`, `crates/source-telegram/Cargo.toml`, new `src/file_session.rs`, `src/lib.rs`, `src/live.rs`, `examples/login_setup.rs`), the `Cargo.lock` churn from dropping `libsql`, doc updates (CLAUDE.md, docs/DATA_MODEL.md, docs/DEVELOPMENT.md, .env.example), the `.claude/skills/run/SKILL.md` stdout fix, and this handoff. The user commits at the end of a session — wait for that signal, and ask before pushing. |
-| Tests | **All green, all re-run to completion this session** — see the gate table near the top of this file. Headline: `cargo test --workspace` now runs **35 test binaries / 197 tests** (it ran *zero* before the fix), and `cargo build -p global-signal-desktop` links. `cargo deny check` green. |
+| Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. **`origin/main` is still behind**: everything through `0a638c8 v1` is committed **locally** but not pushed. Ask before pushing *or* committing — the user does their own commits at the end of a session. |
+| Commits | **The V2 batch is committed** as **`77bf32c bluey and teley`** (the user's own commit, made from a separate terminal near the end of the session) — 13 files, +1965/−46, including the new `apps/global-signal-desktop/src/sparkline.rs`, which is now **tracked**. `0a638c8 v1` before it carried the LNK2005 fix. Only the tail of this file and `docs/ROADMAP.md` were edited after that commit and remain uncommitted. Nothing is pushed. |
+| Tests | **All green, all re-run to completion this session** — see the V2 gate table above. Headline: `cargo test --workspace` runs **35 test binaries / 221 tests** (197 before V2), `cargo build -p global-signal-desktop` links, `cargo deny check` green. |
 | Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1, IODA, Bluesky, or Telegram — versioning is milestone-tied, not batch-tied |
 | Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` and `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`/`LES_TELEGRAM_SESSION_FILE`. **`./telegram.session` exists and is authorized** (JSON format as of this session; re-created after the storage swap, user did the SMS step). `telegram.session-sqlite-backup` is the dead pre-swap SQLite file — gitignored, unreadable by the app, safe to delete. IODA and Bluesky are keyless. |
-| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; IODA/Bluesky/Telegram ✅, pulled forward from M8; M7/V2/M8-remainder next) |
-| **GUI live-visual verification** | **Done for V1** (screenshots). **IODA: log-verified.** **Bluesky and Telegram: DONE this session** — screenshot-verified in the status panel + map, and query-verified per source against a zero-row baseline. See the dedicated section near the top for the exact screenshot-vs-query split and the counts. |
+| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; V2 ✅; IODA/Bluesky/Telegram ✅, pulled forward from M8; M7/V3/M8-remainder next) |
+| **GUI live-visual verification** | **Done for V1 and V2** (screenshots). **IODA: log-verified.** **Bluesky and Telegram: done** (previous session) — screenshot-verified in the status panel + map, query-verified per source against a zero-row baseline. V2's verification and its screenshot-vs-reasoning split is in the V2 section at the top of this file. |
 | Dependency tree | `cargo deny check` **green** against the current tree (advisories, bans, licenses, sources). `libsql-ffi` is **gone** — so the `libclang`/bindgen-on-Ubuntu risk this row used to warn about no longer exists. New build-time additions are `serde_with` + `darling`, both cleared. |
 
 ## V1 — what shipped (2026-08-10, 4 PR-sized commits, see `git log`)
@@ -602,19 +602,28 @@ the rule, not just a hypothetical.
 
 ## Next session (in priority order)
 
-1. **Commit.** Nothing this session is committed yet (see the Commits row).
-   The user commits at the end of a session — ask before pushing, as always.
-2. **V2 visualization batch** ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)):
-   attention<->unrest divergence layer + top-movers + region sparkline +
-   event ledger. Then V3 (per-source layer identity/legend — which is what
-   would let a screenshot alone attribute a marker to Telegram vs Bluesky,
-   the gap called out in the GUI-verification section above). Interleave
-   with **M7 service hardening**. Honest-visualization principles and perf
+1. **Commit the doc tail.** The V2 code and most docs are already in
+   `77bf32c bluey and teley`; only the last edits to this file and
+   `docs/ROADMAP.md` are outstanding. Nothing is pushed — ask before
+   pushing, as always. Note V2 landed as **one** commit rather than the
+   three PR-sized ones VISUALIZATION.md's guardrails call for; worth
+   splitting future batches earlier if that granularity matters.
+2. **V3 visualization batch**
+   ([docs/VISUALIZATION.md](docs/VISUALIZATION.md) items 8–10): per-source
+   layer identity + a real legend panel (this is what would let a screenshot
+   alone attribute a marker to Telegram vs Bluesky — still the gap in every
+   GUI verification so far), basemap/orientation polish, and a "how to read
+   this map" overlay. **Fold the font-glyph fix into item 8** — the legend is
+   the right place to stop relying on glyphs egui's bundled fonts don't have
+   (see "Two small things found while verifying" above). Interleave with
+   **M7 service hardening**. Honest-visualization principles and perf
    guardrails in VISUALIZATION.md are binding; never copy a provider's
    dashboard.
 3. Still-open loose ends are unchanged — see "Loose ends carried forward"
    below. Branch protection on `main` remains the one unfinished M6 item and
    is a manual GitHub-settings step (no authenticated `gh` on this machine).
+   The **Bluesky mock-server test** is still the best-scoped `codex` task in
+   the backlog and was *not* picked up this session (V2 filled it).
 
 Useful timing facts for any future live run (established by a real run, not
 predicted): Telegram's first sweep fires **immediately** on startup
@@ -677,13 +686,11 @@ which take priority per the user). Summary:
   Telegram ✅ (implemented, gates/login/GUI-check still pending — see
   "Next session" above). All three shipped; nothing left in this bucket
   once next session's verification steps close out.
-- **V1–V3 visualization batches**: V1 ✅ (see above). **V2 next** —
-  attention↔unrest divergence layer + top-movers + region sparkline + event
-  ledger; then V3 — per-source layer identity/legend + basemap orientation
-  polish + "how to read this map" overlay. Honest-visualization principles
-  and perf guardrails in VISUALIZATION.md are binding; never copy a
-  provider's dashboard — build original detail on this app's own visual
-  language.
+- **V1–V3 visualization batches**: V1 ✅, V2 ✅ (both above). **V3 next** —
+  per-source layer identity/legend + basemap orientation polish + "how to
+  read this map" overlay. Honest-visualization principles and perf
+  guardrails in VISUALIZATION.md are binding; never copy a provider's
+  dashboard — build original detail on this app's own visual language.
 - **M7 — service hardening**: axum middleware (timeouts, concurrency cap,
   per-IP rate limit, CORS, compression, trace layer, graceful shutdown),
   snapshot-version ETag, `/events` pagination, OpenAPI via utoipa,
@@ -915,7 +922,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p source-acled --features live   # M5 mock-server suite
-cargo deny check                             # M6: advisories + licenses (needs `cargo install cargo-deny`) — NOT yet re-run against the new grammers/libsql-ffi tree
+cargo deny check                             # M6: advisories + licenses (needs `cargo install cargo-deny`)
 ```
 
 If you touched the desktop app, `services/workers`, or any `source-*`

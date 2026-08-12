@@ -3,10 +3,10 @@
 M0–M5 of [PLAN.md](PLAN.md) are complete (statuses there). This document is
 the forward plan, user-approved 2026-07-16. The visualization work has its
 own detailed design doc: **[VISUALIZATION.md](VISUALIZATION.md)** — batch V1
-shipped 2026-08-10 (see HANDOFF.md). The user-prioritized real-time source
-run (IODA ✅, Bluesky ✅, Telegram ✅ — all shipped 2026-08-11/12) is
-complete; **V2 is the focus now**, with M7 hygiene/hardening items free to
-interleave.
+shipped 2026-08-10 and batch V2 on 2026-08-12 (see HANDOFF.md). The
+user-prioritized real-time source run (IODA ✅, Bluesky ✅, Telegram ✅ — all
+shipped 2026-08-11/12) is complete; **V3 is the focus now**, with M7
+hygiene/hardening items free to interleave.
 
 ## Standing loose ends
 
@@ -55,11 +55,13 @@ Repo is live and public: `github.com/arcTanMyAngle/global_unrest` (pushed
 See [VISUALIZATION.md](VISUALIZATION.md). Summary: V1 timeline histogram +
 spike halos + severity markers + recency fade **✅ shipped 2026-08-10** (4
 PR-sized commits; also added a user-requested "has video" marker filter,
-folded into the severity/tooltip commit — see HANDOFF.md); V2 (next)
-attention↔unrest divergence layer, top-movers panel, region sparkline +
-event ledger; V3 per-source layer identity + legend, basemap orientation
-polish, "how to read this map" overlay. Honest-visualization principles and
-perf guardrails are defined there and are binding.
+folded into the severity/tooltip commit — see HANDOFF.md); V2
+attention↔unrest divergence layer + top-movers panel + region sparkline and
+event ledger **✅ shipped 2026-08-12**; V3 (next) per-source layer identity +
+legend, basemap orientation polish, "how to read this map" overlay — and
+fold in a font that actually carries the geometric-shape glyphs the legend
+uses. Honest-visualization principles and perf guardrails are defined there
+and are binding.
 
 ## M7 — Service hardening (api/worker)
 
