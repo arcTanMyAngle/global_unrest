@@ -1,10 +1,13 @@
 //! Heatmap layer: H3 cells with normalized intensities → translucent
 //! fan-triangulated cell polygons (cached GeoMesh).
 
-use egui::{Painter, Shape};
+use egui::{Color32, Painter, Shape};
 use geo_utils::Affine;
 
-use crate::{GeoMesh, MapStyle, MeshCache, affine_key, heat_color, visible_world_offsets};
+use crate::{
+    DIVERGENCE_NO_DATA_DIM, GeoMesh, MapStyle, MeshCache, affine_key, divergence_color, heat_color,
+    visible_world_offsets,
+};
 
 pub struct HeatmapLayer {
     mesh: GeoMesh,
@@ -21,14 +24,39 @@ impl HeatmapLayer {
         }
     }
 
-    /// Build from (cell, intensity 0..1) pairs. Cells whose boundary was
-    /// antimeridian-normalized beyond ±180° are handled by the world-copy
-    /// offsets at paint time, so each cell is tessellated exactly once.
-    /// Invalid cell ids are skipped (they were validated at ingest).
+    /// Build from (cell, intensity 0..1) pairs on the sequential heat ramp.
     pub fn from_cells(cells: &[(u64, f32)], style: &MapStyle) -> Self {
+        let alpha = f32::from(style.heat_alpha) / 255.0;
+        Self::build(
+            cells
+                .iter()
+                .map(|&(cell, t)| (cell, heat_color(t).gamma_multiply(alpha))),
+        )
+    }
+
+    /// Build from (cell, divergence) pairs on the diverging ramp
+    /// (docs/VISUALIZATION.md V2 item 5). `None` = one channel has no records
+    /// in that cell, so there is no comparison to make: it renders at the
+    /// dimmed neutral midpoint, never as an extreme.
+    pub fn from_divergence(cells: &[(u64, Option<f32>)], style: &MapStyle) -> Self {
+        let alpha = f32::from(style.heat_alpha) / 255.0;
+        Self::build(cells.iter().map(|&(cell, d)| {
+            let color = match d {
+                Some(d) => divergence_color(d).gamma_multiply(alpha),
+                None => divergence_color(0.0).gamma_multiply(alpha * DIVERGENCE_NO_DATA_DIM),
+            };
+            (cell, color)
+        }))
+    }
+
+    /// Cells whose boundary was antimeridian-normalized beyond ±180° are
+    /// handled by the world-copy offsets at paint time, so each cell is
+    /// tessellated exactly once. Invalid cell ids are skipped (they were
+    /// validated at ingest).
+    fn build(cells: impl Iterator<Item = (u64, Color32)>) -> Self {
         let mut mesh = GeoMesh::default();
         let mut built = 0usize;
-        for &(cell, intensity) in cells {
+        for (cell, color) in cells {
             let Ok(ring) = geo_utils::cell_boundary_lonlat(cell) else {
                 continue;
             };
@@ -46,8 +74,6 @@ impl HeatmapLayer {
                     clon += 360.0;
                 }
             }
-
-            let color = heat_color(intensity).gamma_multiply(f32::from(style.heat_alpha) / 255.0);
 
             // Fan triangulation around the centroid: cells are star-shaped
             // from their center, so this is valid for hexagons/pentagons.
@@ -121,5 +147,38 @@ mod tests {
         let layer = HeatmapLayer::empty();
         assert_eq!(layer.cell_count(), 0);
         assert!(layer.mesh.is_empty());
+    }
+
+    #[test]
+    fn divergence_tessellates_no_data_cells_but_dims_them() {
+        let paris = geo_utils::cell_for_latlon(48.85, 2.35, 3).unwrap();
+        let lagos = geo_utils::cell_for_latlon(6.45, 3.4, 3).unwrap();
+        let layer = HeatmapLayer::from_divergence(
+            &[(paris, Some(0.9)), (lagos, None), (0xdead_beef, Some(0.0))],
+            &MapStyle::default(),
+        );
+        // A no-comparison cell still draws — the map must not silently omit
+        // the places where one channel is blank.
+        assert_eq!(layer.cell_count(), 2);
+        let alphas: Vec<u8> = layer.mesh.colors.iter().map(|c| c.a()).collect();
+        let dim = *alphas.iter().min().unwrap();
+        let full = *alphas.iter().max().unwrap();
+        assert!(dim < full, "no-data cells must render dimmer: {alphas:?}");
+    }
+
+    #[test]
+    fn divergence_ends_are_distinguishable_from_the_neutral_midpoint() {
+        let neutral = crate::divergence_color(0.0);
+        for d in [-1.0, 1.0] {
+            let end = crate::divergence_color(d);
+            let dist = (i32::from(end.r()) - i32::from(neutral.r())).abs()
+                + (i32::from(end.g()) - i32::from(neutral.g())).abs()
+                + (i32::from(end.b()) - i32::from(neutral.b())).abs();
+            assert!(dist > 100, "d={d} too close to neutral ({dist})");
+        }
+        // The two ends must not be confusable with each other either.
+        let lo = crate::divergence_color(-1.0);
+        let hi = crate::divergence_color(1.0);
+        assert!(lo.b() < hi.b() && lo.g() > hi.g());
     }
 }

@@ -75,7 +75,7 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
    - *Accept:* pausing shows the same data at full detail; screenshots
      without playback are unaffected.
 
-## V2 — Signature analytical views (original to this project)
+## V2 — Signature analytical views ✅ shipped 2026-08-12 (see HANDOFF.md)
 
 5. **Attention ↔ unrest divergence layer.** A diverging heat metric:
    cells where *media attention outruns event data* (covered but quiet) vs
@@ -108,6 +108,45 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
    - *Accept:* ledger paginates (no unbounded scroll); ACLED rows show the
      structural label only (never `notes`); attention rows never appear in
      the *event* ledger (separation).
+
+### V2 as built — decisions worth carrying forward
+
+- **Divergence uses average ranks over the *comparable* cells only.**
+  `analytics::divergence_ranks` returns `Option<f32>`: `None` means one
+  channel has no records in that cell, so there is no comparison to make.
+  Those cells render at a **dimmed neutral**, never at an extreme — an
+  absence of attention records may be this project's own coverage gap
+  rather than under-reporting, and claiming a direction from it would
+  over-read the data. Incomparable cells are also excluded from the ranking
+  itself, so they cannot shift the distribution they were left out of. Ties
+  share their average rank, so the result never depends on input order.
+- **Ranks are computed at the display resolution**, after the H3 parent
+  rollup — ranking res-3 cells and then painting res-1 parents would show a
+  distribution the viewer cannot see.
+- **Palette**: teal (events lead) ↔ neutral slate ↔ violet (attention
+  leads), where violet is `MapStyle::marker_attention` so the "media" end
+  matches the color attention already carries. Neither end reuses the
+  sequential ramp's indigo→amber, so the two heat modes never look alike.
+- **Top movers ranks the already-loaded `window_buckets`** and its row
+  sparklines come from the same buckets via `analytics::cell_series` — the
+  panel issues **no** storage query. Row bars are scaled to each row's own
+  peak, so heights compare *within* a row, never across rows. Cold-start
+  cells never rank: no baseline, no anomaly claim.
+- **Fly-to is bounded**: `MapView::advance_flight` eases to the target over
+  `FLY_SECS`, snaps exactly, then drops the flight — it is the only thing in
+  `MapView::show` that requests a repaint, so an idle map stays idle. It
+  crosses the antimeridian the short way, interpolates zoom in log space,
+  never zooms *out* past a closer view the user chose, and yields
+  immediately to any pan/zoom gesture.
+- **The inspector sparkline plots total records per 6 h**, because that is
+  exactly the quantity `baseline` is a median of and `spike_score` is
+  computed from — but the bar is split into attention and event shares so it
+  is never read as one undifferentiated "activity" number. Cold-start
+  buckets get a tick instead of a band.
+- **The ledger's attention exclusion lives in SQL** (`storage::region_events`),
+  not in the UI, so no caller can opt out of the attention/event separation.
+  Paging orders by `(ts_epoch_s DESC, id DESC)` — without the id tiebreak,
+  events sharing a timestamp would repeat or vanish across pages.
 
 ## V3 — Layer identity & orientation
 

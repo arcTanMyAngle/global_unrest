@@ -14,8 +14,8 @@ use geo_utils::CountryIndex;
 use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
-    EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail, Reply,
-    SettingsDb, StorageHandle, TimelineHistogramPoint,
+    EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail,
+    RegionEventsPage, RegionHistoryPoint, Reply, SettingsDb, StorageHandle, TimelineHistogramPoint,
 };
 
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
@@ -40,6 +40,10 @@ pub enum HeatMetric {
     Events,
     /// Peak distinct outlet domains in any 6 h bucket of the window.
     Diversity,
+    /// Attention ↔ unrest divergence (docs/VISUALIZATION.md V2 item 5): a
+    /// diverging metric, not an intensity, so it takes its own palette and
+    /// its own build path in `rebuild_heatmap`.
+    Divergence,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,11 +244,29 @@ pub struct App {
     window_buckets: Vec<RegionBucket>,
     /// H3 resolution the heatmap layer was last built at.
     heat_res: u8,
+    /// Ranked spike regions in the current window (docs/VISUALIZATION.md V2
+    /// item 6), each with its dense per-bucket series for the row sparkline.
+    /// Both come from the cached `window_buckets` on every rebuild — this
+    /// panel never issues a storage query.
+    pub top_movers: Vec<(analytics::Mover, Vec<u32>)>,
 
     pub selected_cell: Option<u64>,
     pub selected_label: Option<String>,
     pending_detail: Option<Reply<RegionDetail>>,
     pub detail: Option<RegionDetail>,
+
+    // --- region inspector, V2 item 7 (docs/VISUALIZATION.md) ---
+    pending_history: Option<Reply<Vec<RegionHistoryPoint>>>,
+    /// The selected cell's trailing bucket history, with the span it covers
+    /// so absent buckets can be drawn as gaps rather than closed up.
+    pub region_history: Vec<RegionHistoryPoint>,
+    pub history_span: Option<EpochWindow>,
+    pending_ledger: Option<Reply<RegionEventsPage>>,
+    pub ledger: Option<RegionEventsPage>,
+    /// Row offset of the ledger page being viewed. Reset whenever the
+    /// selection or the window changes — a page number means nothing against
+    /// a different result set.
+    pub ledger_offset: usize,
 }
 
 impl App {
@@ -342,8 +364,15 @@ impl App {
             bucket_count: 0,
             window_buckets: Vec::new(),
             heat_res: core_types::H3_RESOLUTION,
+            top_movers: Vec::new(),
             selected_cell: None,
             selected_label: None,
+            pending_history: None,
+            region_history: Vec::new(),
+            history_span: None,
+            pending_ledger: None,
+            ledger: None,
+            ledger_offset: 0,
             pending_detail: None,
             detail: None,
         };
@@ -504,6 +533,7 @@ impl App {
                     self.timeline.start_bucket = 0;
                     self.window_buckets.clear();
                     self.bucket_count = 0;
+                    self.top_movers.clear();
                     self.map.heatmap = HeatmapLayer::empty();
                     self.map.markers = MarkerLayer::new(Vec::new());
                     self.map.spike_halos = HaloLayer::new(Vec::new());
@@ -568,6 +598,7 @@ impl App {
                     self.window_buckets = buckets;
                     self.rebuild_heatmap();
                     self.rebuild_halos();
+                    self.rebuild_top_movers();
                 }
                 Err(e) => tracing::error!("bucket query: {e}"),
             }
@@ -590,6 +621,54 @@ impl App {
                 Err(e) => tracing::error!("detail query: {e}"),
             }
         }
+        if let Some(reply) = &self.pending_history
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_history = None;
+            match result {
+                Ok(points) => self.region_history = points,
+                Err(e) => tracing::error!("region history query: {e}"),
+            }
+        }
+        if let Some(reply) = &self.pending_ledger
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_ledger = None;
+            match result {
+                Ok(page) => self.ledger = Some(page),
+                Err(e) => tracing::error!("region events query: {e}"),
+            }
+        }
+    }
+
+    /// Fire the two cell-scoped inspector queries (docs/VISUALIZATION.md V2
+    /// item 7). Both go through `Reply<T>` like every other query — the UI
+    /// thread polls them per frame and never blocks on storage.
+    fn fire_region_queries(&mut self, cell: u64, window: EpochWindow) {
+        self.pending_detail = Some(self.store.region_detail(cell, window));
+        // History ends at the window end, so scrubbing back in time shows the
+        // baseline as it stood then rather than as it stands now.
+        let span_start =
+            window.1 - i64::from(analytics::weights::BASELINE_WINDOW_DAYS) * SECS_PER_DAY;
+        self.history_span = Some((span_start, window.1));
+        self.pending_history = Some(self.store.region_history(cell, window.1));
+        self.pending_ledger =
+            Some(
+                self.store
+                    .region_events(cell, window, self.ledger_offset, LEDGER_PAGE_SIZE),
+            );
+    }
+
+    /// Jump the ledger to a new page offset and re-query just that page.
+    pub fn set_ledger_offset(&mut self, offset: usize) {
+        self.ledger_offset = offset;
+        if let (Some(cell), Some(window)) = (self.selected_cell, self.current_window()) {
+            self.pending_ledger =
+                Some(
+                    self.store
+                        .region_events(cell, window, self.ledger_offset, LEDGER_PAGE_SIZE),
+                );
+        }
     }
 
     fn fire_queries(&mut self) {
@@ -606,7 +685,10 @@ impl App {
             self.filters.video_only,
         ));
         if let Some(cell) = self.selected_cell {
-            self.pending_detail = Some(self.store.region_detail(cell, window));
+            // The window moved under the existing page, so the old offset no
+            // longer points at the same rows.
+            self.ledger_offset = 0;
+            self.fire_region_queries(cell, window);
         }
     }
 
@@ -628,6 +710,10 @@ impl App {
         self.bucket_count = buckets.len();
         let deg_per_px = self.map.viewport.as_ref().map_or(0.225, |v| v.deg_per_px);
         self.heat_res = Self::heat_resolution(deg_per_px);
+        if self.filters.heat_metric == HeatMetric::Divergence {
+            self.rebuild_divergence();
+            return;
+        }
         let mut per_cell: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
         for b in buckets {
             let Ok(cell) = geo_utils::cell_parent(b.h3_cell, self.heat_res) else {
@@ -640,6 +726,7 @@ impl App {
                 // Distinct counts sum across neither buckets nor child
                 // cells; show the peak 6 h diversity instead.
                 HeatMetric::Diversity => *entry = (*entry).max(u64::from(b.distinct_outlets)),
+                HeatMetric::Divergence => unreachable!("handled above"),
             }
         }
         per_cell.retain(|_, v| *v > 0);
@@ -654,6 +741,52 @@ impl App {
             .map(|(cell, v)| (cell, ((v + 1) as f32).ln() / denom))
             .collect();
         self.map.heatmap = HeatmapLayer::from_cells(&cells, &self.map.style);
+    }
+
+    /// Attention ↔ unrest divergence heat (docs/VISUALIZATION.md V2 item 5).
+    ///
+    /// The rollup to the display resolution happens *before* ranking, so the
+    /// ranks describe the cells actually on screen — ranking res-3 cells and
+    /// then painting res-1 parents would show a distribution the viewer
+    /// cannot see. Same cached `window_buckets`, no extra storage query.
+    fn rebuild_divergence(&mut self) {
+        let mut per_cell: std::collections::HashMap<u64, analytics::CellComponents> =
+            std::collections::HashMap::new();
+        for b in &self.window_buckets {
+            let Ok(cell) = geo_utils::cell_parent(b.h3_cell, self.heat_res) else {
+                continue; // cells were validated at ingest
+            };
+            per_cell
+                .entry(cell)
+                .or_insert_with(|| analytics::CellComponents::new(cell))
+                .absorb(b);
+        }
+        if per_cell.is_empty() {
+            self.map.heatmap = HeatmapLayer::empty();
+            return;
+        }
+        let components: Vec<analytics::CellComponents> = per_cell.into_values().collect();
+        let cells = analytics::divergence_ranks(&components);
+        self.map.heatmap = HeatmapLayer::from_divergence(&cells, &self.map.style);
+    }
+
+    /// Rank the window's cells for the top-movers panel and build each row's
+    /// sparkline series — both from the cached `window_buckets`, so the panel
+    /// costs one sort plus one scan per ranked row and no storage round-trip.
+    fn rebuild_top_movers(&mut self) {
+        let movers =
+            analytics::top_movers(&self.window_buckets, analytics::weights::TOP_MOVERS_LIMIT);
+        let Some(window) = self.current_window() else {
+            self.top_movers = movers.into_iter().map(|m| (m, Vec::new())).collect();
+            return;
+        };
+        self.top_movers = movers
+            .into_iter()
+            .map(|m| {
+                let series = analytics::cell_series(&self.window_buckets, m.h3_cell, window);
+                (m, series)
+            })
+            .collect();
     }
 
     /// Cells worth a spike halo, derived from the already-cached
@@ -757,16 +890,31 @@ impl App {
         self.timeline_histogram = dense;
     }
 
+    /// Select a cell the user picked from a list rather than the map, and fly
+    /// the viewport to it (docs/VISUALIZATION.md V2 item 6). Selection still
+    /// happens if the cell has no derivable center, so the inspector works
+    /// even when the map cannot move.
+    pub fn select_and_fly(&mut self, cell: u64) {
+        let center = geo_utils::cell_center_lonlat(cell).ok();
+        self.select_cell(cell, center);
+        if let Some((lon, lat)) = center {
+            self.map.fly_to(lon, lat);
+        }
+    }
+
     pub fn select_cell(&mut self, cell: u64, lonlat: Option<(f64, f64)>) {
         self.selected_cell = Some(cell);
         self.detail = None;
+        self.region_history.clear();
+        self.ledger = None;
+        self.ledger_offset = 0;
         self.selected_label = lonlat.and_then(|(lon, lat)| {
             self.countries
                 .country_at(lon, lat)
                 .map(|c| format!("{} ({})", c.name, c.iso_a3))
         });
         if let Some(window) = self.current_window() {
-            self.pending_detail = Some(self.store.region_detail(cell, window));
+            self.fire_region_queries(cell, window);
         }
     }
 }
@@ -804,6 +952,12 @@ impl eframe::App for App {
 /// Recency-fade floor during playback (docs/VISUALIZATION.md V1 item 4:
 /// "oldest ≈ 35%").
 const FADE_FLOOR_ALPHA: f32 = 0.35;
+
+/// Rows per page in the inspector's event ledger (docs/VISUALIZATION.md V2
+/// item 7 — the ledger paginates; it never scrolls unbounded).
+pub const LEDGER_PAGE_SIZE: usize = 25;
+
+const SECS_PER_DAY: i64 = 86_400;
 
 /// Playback recency-fade opacity: a point at the window end (`age_secs`
 /// `<= 0`) is fully opaque; one at the window start (`age_secs >=

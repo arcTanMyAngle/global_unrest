@@ -80,7 +80,13 @@ covert surveillance, involuntary tracking, or targeting tool.
 
 - **Coverage bias**: media density varies enormously by language and region;
   attention scores skew toward well-covered places. This is why
-  `attention_score` and `unrest_score` are separate components.
+  `attention_score` and `unrest_score` are separate components. The desktop's
+  **attention ↔ unrest divergence layer** (docs/VISUALIZATION.md V2 item 5)
+  makes this bias itself visible, and its legend says plainly that the map is
+  a picture of our coverage rather than of the world. It deliberately claims
+  *nothing* for a cell where one channel has no records at all — an absence
+  can be under-reporting or can be a gap in what these sources index, and the
+  data cannot tell those apart.
 - **Geocoding bias**: sources frequently geocode to country/admin centroids.
   The precision rendering contract (see DATA_MODEL.md) prevents centroid
   records from appearing as false point hotspots. In particular, GDELT **DOC**

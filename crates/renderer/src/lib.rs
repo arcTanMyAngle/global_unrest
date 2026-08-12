@@ -105,6 +105,43 @@ pub fn heat_color(t: f32) -> Color32 {
     Color32::from_rgb(252, 232, 164)
 }
 
+/// Diverging ramp for attention ↔ unrest divergence d ∈ [-1, 1]
+/// (docs/VISUALIZATION.md V2 item 5), with a desaturated midpoint so a cell
+/// with nothing to say never draws the eye.
+///
+/// **Negative** (events outrun attention, under-covered) runs to teal, a hue
+/// used nowhere else in the app; **positive** (attention outruns events) runs
+/// to the violet of `MapStyle::marker_attention`, tying the "media" end of
+/// this ramp to the color attention already carries elsewhere. Neither end
+/// reuses the sequential heat ramp's indigo→amber, so the two heat modes are
+/// never confusable at a glance.
+pub fn divergence_color(d: f32) -> Color32 {
+    const STOPS: [(f32, [u8; 3]); 5] = [
+        (-1.0, [34, 190, 178]), // teal — events outrun attention
+        (-0.5, [40, 122, 130]),
+        (0.0, [92, 96, 110]), // neutral slate
+        (0.5, [136, 96, 190]),
+        (1.0, [186, 130, 255]), // violet — attention outruns events
+    ];
+    let d = d.clamp(-1.0, 1.0);
+    for pair in STOPS.windows(2) {
+        let (t0, c0) = pair[0];
+        let (t1, c1) = pair[1];
+        if d <= t1 {
+            let f = if t1 > t0 { (d - t0) / (t1 - t0) } else { 0.0 };
+            let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * f) as u8;
+            return Color32::from_rgb(lerp(c0[0], c1[0]), lerp(c0[1], c1[1]), lerp(c0[2], c1[2]));
+        }
+    }
+    Color32::from_rgb(186, 130, 255)
+}
+
+/// Fill for a cell the divergence layer has no comparison to make about (one
+/// channel has no records there). The neutral midpoint hue, dimmed — it
+/// states "nothing claimed here" without claiming balance, and without
+/// inventing a third hue the eye would read as a direction.
+pub const DIVERGENCE_NO_DATA_DIM: f32 = 0.35;
+
 /// Stable key for an affine transform, used to invalidate cached meshes.
 pub fn affine_key(aff: &Affine) -> u64 {
     let mut h = core_types::fnv1a64(&aff.a.to_bits().to_le_bytes());

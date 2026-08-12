@@ -1,13 +1,134 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (**fourth** session that day). **M0–M6 complete; V1
-shipped; IODA, Bluesky, and Telegram live sources all implemented, and as of
-this session all three are verified running live in the desktop GUI.** The
-LNK2005 blocker that dominated the previous handoff is **fixed**; the full
-gate battery is green including `cargo test --workspace` (which had been
-running zero test binaries). Next: **V2 visualization batch**.
+Last session: 2026-08-12 (**fifth** session that day). **M0–M6 complete; V1
+and now V2 visualization batches shipped; IODA, Bluesky, and Telegram live
+sources all implemented and verified live in the desktop GUI.** The LNK2005
+blocker is fixed and was committed by the user as `0a638c8 v1`. This session
+shipped the whole **V2 batch** (docs/VISUALIZATION.md items 5–7) and verified
+it in a live GUI run. Next: **V3 visualization batch**, interleaved with
+**M7 service hardening**.
 
 Read this file, then [CLAUDE.md](CLAUDE.md).
+
+## V2 — what shipped this session (2026-08-12, fifth session)
+
+All three items, uncommitted (the user commits at end of session). Full
+design rationale is in [docs/VISUALIZATION.md](docs/VISUALIZATION.md) §
+"V2 as built"; this is the orientation summary.
+
+**5. Attention ↔ unrest divergence layer.** Fourth `HeatMetric` variant.
+New pure `analytics::divergence_ranks` + `CellComponents` (golden-tested),
+`renderer::divergence_color` + `HeatmapLayer::from_divergence`, a new
+legend branch in `panels.rs`, and a `SAFETY_AND_PRIVACY.md` cross-link that
+now points back at the layer.
+
+The judgment calls worth not re-deciding:
+- **`Option<f32>`, not a number, is the return type.** `None` = one channel
+  has no records in that cell, so there is *no comparison to make*. Those
+  cells render **dimmed neutral**, never at an extreme, and are excluded
+  from the ranking so they cannot shift a distribution they were left out
+  of. A cell with events and zero attention is *not* "maximally
+  under-covered" — the absence may be our own coverage gap. This is the
+  single most important honesty property of the layer.
+- **Average ranks for ties**, so the output never depends on input order
+  (the caller hands it a `HashMap`'s iteration order).
+- **Ranking happens after the H3 parent rollup**, at the display
+  resolution — otherwise the ranks describe cells the viewer cannot see.
+- Peak (max), not mean, per cell, matching `spike_halo_cells`' precedent.
+
+**6. Top-movers panel.** `analytics::top_movers` + `cell_series` (both pure,
+tested) ranked from the already-loaded `window_buckets` — **no storage
+query**, per the doc's explicit constraint. Rows show score, region label,
+a mini sparkline, and Δ-vs-baseline with the peak bucket's timestamp.
+Clicking a row calls `App::select_and_fly`.
+
+Fly-to lives in `map_view.rs` as a `Flight` struct: eased lerp over
+`FLY_SECS`, **log-space** zoom interpolation, crosses the antimeridian the
+short way (`shortest_lon_delta`), never zooms *out* past a closer view the
+user chose, cancels on any pan/zoom gesture, and is **bounded** — it snaps
+to the target, drops the flight, and stops requesting repaints. That
+termination is unit-tested (`flight_lands_exactly_and_then_stops_requesting_frames`).
+
+**7. Region sparkline + event ledger.** Two new storage queries
+(`region_history`, `region_events`) behind the existing `Reply<T>` pattern,
+plus a new `apps/global-signal-desktop/src/sparkline.rs` widget (epaint
+rects/lines only, ≤112 slots, no tessellation).
+
+- **The ledger's attention exclusion is in SQL**, not the UI
+  (`kind <> 'news_attention'`), so no caller can opt out of the
+  attention/event separation.
+- **Paging orders by `(ts_epoch_s DESC, id DESC)`.** Without the id
+  tiebreak, events sharing a timestamp repeat or vanish across pages —
+  there is a test for exactly that (five events, one timestamp).
+- **ACLED rows can only ever show the structural label**: `notes` is never
+  fetched by `normalize_event` and the schema has no column for it.
+- The sparkline plots **total records/6 h**, because that is exactly what
+  `baseline` is a median of and `spike_score` is computed from — but the bar
+  is split into attention and event shares so it is never read as one
+  undifferentiated "activity" number. Cold-start buckets get a tick, not a
+  band.
+
+### Gates — all re-run to completion this session
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ **35 binaries, 221 passed** (was 197; +24 new) |
+| `cargo build -p global-signal-desktop` | ✅ links |
+| 5-way live feature matrix (clippy + test) | ✅ ✅ |
+| `telegram-live` solo leg | ✅ |
+| `cargo test -p source-acled --features live` | ✅ |
+| `cargo deny check` | ✅ |
+
+### GUI verification — done, with the honest split
+
+A live run from the workspace root with all five sources online (ACLED
+35229, NOAA 127, Telegram 17, IODA 8, Bluesky counting; GDELT `partial` on
+the DOC feed, the designed degraded state). Screenshots in the scratchpad.
+
+**Screenshot-verified**: the divergence metric renders and its legend shows
+the teal→neutral→violet ramp, the "dimmed — one channel has no records
+here" swatch, and the bias caveat ending in the SAFETY doc cross-link; the
+top-movers panel lists 12 ranked rows with distinct mini sparklines;
+clicking a row flies the viewport in and marks the row selected; the
+inspector shows "Region history (28 days)" with its swatch legend and
+caption, and an "Event ledger — 1–10 of 10 · newest first" whose total
+matches the "10 × Conflict" count above it; the paging buttons render
+disabled on a single page; all three new sections show correct empty states
+on a cell with no records.
+- **The ocean-cell label fallback works**: one top-movers row read
+  `cell 0x831950ffffffffff` rather than inventing a country.
+
+**Reasoned, not directly screenshot-proven**: on a **teal** cell (which by
+construction has *both* channels) the ledger showed `1–8 of 8`, all
+`Conflict` — consistent with attention being excluded, but that claim rests
+on `divergence_ranks` being correct. The **deterministic** proof of the
+exclusion is the storage test
+`region_events_ledger_never_returns_attention_rows`. Likewise no ACLED row
+appeared in any ledger screenshot (the cells sampled were GDELT-sourced), so
+the ACLED-structural-label claim rests on the schema and the storage test,
+not on a screenshot.
+
+**Inconclusive, don't repeat it**: a two-screenshot pixel-diff of the map
+with no input showed ~2.8% of sampled pixels changing. That does **not**
+indicate a runaway fly-to — **spike halos pulse every frame by design**
+(V1 item 2), so the map is never static with halos on. Use the unit test
+for flight termination; this measurement can't distinguish the two.
+
+### Two small things found while verifying
+
+- **egui's bundled fonts have no geometric-shape glyphs.** A `▲` prefix
+  rendered as a missing-glyph box, so it was dropped from the top-movers
+  rows. This is pre-existing and app-wide — the existing `●` source-status
+  dots and `◆` marker-legend glyphs render as boxes too. They survive it
+  only because a *colored* box still reads as a color chip. `○` happens to
+  render. **Don't add a decorative (uncolored) glyph without checking it.**
+  Fixing this properly means bundling a font with those ranges — a
+  reasonable V3 item alongside the real legend (item 8).
+- The map's default window still opens ahead of "now" (NOAA expiry times
+  push the extent forward), so widen to 3 days before concluding something
+  isn't rendering. Unchanged from last session, and it bit again.
 
 ## ✅ RESOLVED — the LNK2005 duplicate-SQLite blocker
 
@@ -67,7 +188,7 @@ dependency with a native/`-sys` component, **build the real binary**, and
 check whether it vendors something the workspace already vendors
 (`cargo tree -i libsqlite3-sys`) *before* writing the integration.
 
-## Verified this session (all re-run to completion, not predicted)
+## Verified in the *previous* session (LNK2005 fix; kept for the record)
 
 | gate | result |
 |---|---|

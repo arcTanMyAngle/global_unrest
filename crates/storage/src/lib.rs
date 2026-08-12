@@ -140,6 +140,59 @@ pub struct RegionDetail {
     pub baseline_hint: Option<f32>,
 }
 
+/// One 6-h bucket of a region's own history (docs/VISUALIZATION.md V2 item 7).
+/// Counts and baseline together are what make the spike component *visible*
+/// rather than just a number.
+#[derive(Debug, Clone, Copy)]
+pub struct RegionHistoryPoint {
+    pub bucket_start: i64,
+    pub event_count: u32,
+    pub attention_count: u32,
+    /// Trailing 28-day median records/6 h behind this bucket.
+    pub baseline: f32,
+    /// Too little history behind this bucket for the baseline to mean
+    /// anything — drawn as a gap in the band, never as a confident zero.
+    pub spike_cold_start: bool,
+}
+
+impl RegionHistoryPoint {
+    /// Total records, the same quantity `baseline` is a median of.
+    pub fn records(&self) -> u32 {
+        self.event_count + self.attention_count
+    }
+}
+
+/// One row of the region event ledger (docs/VISUALIZATION.md V2 item 7).
+///
+/// `headline` is source metadata only — for ACLED it is the structural event
+/// label ("Armed clash"), because the `notes` narrative is never fetched into
+/// `normalize_event` and the schema has no column for it. Nothing here can
+/// carry an article body.
+#[derive(Debug, Clone)]
+pub struct LedgerRow {
+    pub id: u64,
+    pub ts_epoch_s: i64,
+    pub kind: EventKind,
+    pub source: SourceId,
+    pub precision: LocationPrecision,
+    pub confidence: f32,
+    pub severity: Option<f32>,
+    pub headline: Option<String>,
+    pub outlet_domains: Vec<String>,
+    pub urls: Vec<String>,
+}
+
+/// One page of a region's event ledger, plus the total so the UI can show
+/// where the page sits without fetching everything.
+#[derive(Debug, Clone, Default)]
+pub struct RegionEventsPage {
+    pub rows: Vec<LedgerRow>,
+    /// Discrete events matching the query across all pages.
+    pub total: u64,
+    /// Row offset `rows` starts at.
+    pub offset: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct IngestLogRow {
     pub ts_epoch_s: i64,
@@ -225,6 +278,18 @@ enum Cmd {
         h3_cell: u64,
         window: EpochWindow,
         reply: mpsc::Sender<Result<RegionDetail, StorageError>>,
+    },
+    RegionHistory {
+        h3_cell: u64,
+        until_epoch_s: i64,
+        reply: mpsc::Sender<Result<Vec<RegionHistoryPoint>, StorageError>>,
+    },
+    RegionEvents {
+        h3_cell: u64,
+        window: EpochWindow,
+        offset: usize,
+        limit: usize,
+        reply: mpsc::Sender<Result<RegionEventsPage, StorageError>>,
     },
     IngestLog {
         limit: usize,
@@ -414,6 +479,49 @@ impl StorageHandle {
         Reply(rx)
     }
 
+    /// One cell's stored 6-h buckets over the trailing
+    /// `analytics::weights::BASELINE_WINDOW_DAYS` ending at `until_epoch_s` —
+    /// the sparkline behind the inspector's spike component. Bucket-grained
+    /// and cell-scoped, so it stays small (≤ 112 rows) and is not worth
+    /// folding into `region_detail`, which is window-scoped.
+    pub fn region_history(
+        &self,
+        h3_cell: u64,
+        until_epoch_s: i64,
+    ) -> Reply<Vec<RegionHistoryPoint>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::RegionHistory {
+            h3_cell,
+            until_epoch_s,
+            reply,
+        });
+        Reply(rx)
+    }
+
+    /// One page of a cell's **discrete events** in `window`, newest first.
+    ///
+    /// News-attention rows are excluded in SQL, not in the UI: media attention
+    /// and event data are computed and displayed separately (hard project
+    /// rule), so an attention observation must never be able to reach a view
+    /// titled "events".
+    pub fn region_events(
+        &self,
+        h3_cell: u64,
+        window: EpochWindow,
+        offset: usize,
+        limit: usize,
+    ) -> Reply<RegionEventsPage> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::RegionEvents {
+            h3_cell,
+            window,
+            offset,
+            limit,
+            reply,
+        });
+        Reply(rx)
+    }
+
     /// Total ingest-log row count plus the most recent `limit` rows.
     pub fn ingest_log(&self, limit: usize) -> Reply<(u64, Vec<IngestLogRow>)> {
         let (reply, rx) = mpsc::channel();
@@ -528,6 +636,22 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
                 reply,
             } => {
                 let _ = reply.send(do_region_detail(&conn, h3_cell, window));
+            }
+            Cmd::RegionHistory {
+                h3_cell,
+                until_epoch_s,
+                reply,
+            } => {
+                let _ = reply.send(do_region_history(&conn, h3_cell, until_epoch_s));
+            }
+            Cmd::RegionEvents {
+                h3_cell,
+                window,
+                offset,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(do_region_events(&conn, h3_cell, window, offset, limit));
             }
             Cmd::IngestLog { limit, reply } => {
                 let _ = reply.send(do_ingest_log(&conn, limit));
@@ -1074,6 +1198,111 @@ fn do_query_points(
         });
     }
     Ok(out)
+}
+
+fn do_region_history(
+    conn: &Connection,
+    h3_cell: u64,
+    until_epoch_s: i64,
+) -> Result<Vec<RegionHistoryPoint>, StorageError> {
+    let span = i64::from(analytics::weights::BASELINE_WINDOW_DAYS) * 86_400;
+    let from = until_epoch_s - span;
+    let mut stmt = conn.prepare(
+        "SELECT bucket_start, event_count, attention_count, baseline, spike_cold_start
+         FROM region_buckets
+         WHERE h3_cell = ? AND bucket_start >= ? AND bucket_start < ?
+         ORDER BY bucket_start",
+    )?;
+    let rows = stmt.query_map(params![u64_to_db(h3_cell), from, until_epoch_s], |r| {
+        Ok(RegionHistoryPoint {
+            bucket_start: r.get(0)?,
+            event_count: r.get::<_, i64>(1)?.max(0) as u32,
+            attention_count: r.get::<_, i64>(2)?.max(0) as u32,
+            baseline: r.get(3)?,
+            spike_cold_start: r.get(4)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn do_region_events(
+    conn: &Connection,
+    h3_cell: u64,
+    window: EpochWindow,
+    offset: usize,
+    limit: usize,
+) -> Result<RegionEventsPage, StorageError> {
+    // `kind <> 'news_attention'` is the attention/event separation, enforced
+    // here rather than in the UI so no caller can accidentally opt out of it.
+    const WHERE: &str = "WHERE h3_cell = ? AND ts_epoch_s >= ? AND ts_epoch_s < ?
+                           AND kind <> 'news_attention'";
+    let cell = u64_to_db(h3_cell);
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM events {WHERE}"),
+        params![cell, window.0, window.1],
+        |r| r.get(0),
+    )?;
+
+    // `id` breaks ties so paging can't show the same row twice or skip one
+    // when several events share a timestamp.
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, ts_epoch_s, kind, source, location_precision, location_confidence,
+                severity, headline, outlet_domains, urls
+         FROM events {WHERE}
+         ORDER BY ts_epoch_s DESC, id DESC
+         LIMIT ? OFFSET ?"
+    ))?;
+    let rows = stmt.query_map(
+        params![cell, window.0, window.1, limit as i64, offset as i64],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, f32>(5)?,
+                r.get::<_, Option<f32>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+            ))
+        },
+    )?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            id,
+            ts,
+            kind_s,
+            source_s,
+            precision_s,
+            confidence,
+            severity,
+            headline,
+            domains_s,
+            urls_s,
+        ) = row?;
+        out.push(LedgerRow {
+            id: u64_from_db(id),
+            ts_epoch_s: ts,
+            kind: parse_kind(&kind_s)?,
+            source: parse_source(&source_s)?,
+            precision: parse_precision(&precision_s)?,
+            confidence,
+            severity,
+            headline,
+            outlet_domains: serde_json::from_str(&domains_s).unwrap_or_default(),
+            urls: serde_json::from_str(&urls_s).unwrap_or_default(),
+        });
+    }
+    Ok(RegionEventsPage {
+        rows: out,
+        total: total.max(0) as u64,
+        offset,
+    })
 }
 
 fn do_region_detail(
@@ -1835,6 +2064,121 @@ mod tests {
                 (bucket_start, kind, count)
             );
         }
+    }
+
+    /// The attention/event separation is a hard project rule, so it is
+    /// enforced in the ledger's SQL rather than trusted to the caller.
+    #[test]
+    fn region_events_ledger_never_returns_attention_rows() {
+        let store = open_mem();
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        let mut acled = sample_event(70, EventKind::Conflict, 4, 100);
+        acled.source = SourceId::Acled;
+        acled.headline = Some("Armed clash".into()); // structural label only
+        acled.severity = Some(0.4);
+        store
+            .ingest(
+                vec![
+                    sample_event(71, EventKind::NewsAttention, 1, 100),
+                    sample_event(72, EventKind::NewsAttention, 2, 100),
+                    sample_event(73, EventKind::Protest, 3, 100),
+                    acled,
+                    sample_event(74, EventKind::Conflict, 5, 200), // other cell
+                ],
+                vec![],
+            )
+            .wait()
+            .unwrap();
+
+        let page = store
+            .region_events(100, (day, day + 86_400), 0, 50)
+            .wait()
+            .unwrap();
+        assert_eq!(page.total, 2, "only the cell's discrete events count");
+        assert!(page.rows.iter().all(|r| r.kind.is_discrete_event()));
+        // Newest first.
+        assert_eq!(page.rows[0].kind, EventKind::Conflict);
+        assert_eq!(page.rows[0].headline.as_deref(), Some("Armed clash"));
+        assert_eq!(page.rows[0].source, SourceId::Acled);
+        assert_eq!(page.rows[0].severity, Some(0.4));
+        assert_eq!(page.rows[1].kind, EventKind::Protest);
+    }
+
+    #[test]
+    fn region_events_paginates_without_repeating_or_skipping_rows() {
+        let store = open_mem();
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        // All five share one timestamp, so ordering rests entirely on the
+        // `id` tiebreak — exactly the case a naive ORDER BY would page wrong.
+        let events: Vec<GeoTemporalEvent> = (0..5)
+            .map(|i| sample_event(80 + i, EventKind::Protest, 4, 100))
+            .collect();
+        store.ingest(events, vec![]).wait().unwrap();
+
+        let window = (day, day + 86_400);
+        let mut seen = Vec::new();
+        for offset in [0usize, 2, 4] {
+            let page = store.region_events(100, window, offset, 2).wait().unwrap();
+            assert_eq!(page.total, 5);
+            assert_eq!(page.offset, offset);
+            seen.extend(page.rows.iter().map(|r| r.id));
+        }
+        assert_eq!(seen.len(), 5, "last page is short, not padded");
+        let unique: HashSet<u64> = seen.iter().copied().collect();
+        assert_eq!(unique.len(), 5, "a row appeared on two pages");
+
+        // Past the end is empty, not an error.
+        let past = store.region_events(100, window, 99, 2).wait().unwrap();
+        assert!(past.rows.is_empty());
+        assert_eq!(past.total, 5);
+    }
+
+    #[test]
+    fn region_history_returns_the_cells_own_buckets_within_the_trailing_window() {
+        let store = open_mem();
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        store
+            .ingest(
+                vec![
+                    sample_event(90, EventKind::NewsAttention, 1, 100),
+                    sample_event(91, EventKind::Protest, 2, 100), // same bucket
+                    sample_event(92, EventKind::Conflict, 8, 100), // next bucket
+                    sample_event(93, EventKind::Conflict, 8, 200), // other cell
+                ],
+                vec![],
+            )
+            .wait()
+            .unwrap();
+
+        let hist = store.region_history(100, day + 86_400).wait().unwrap();
+        assert_eq!(hist.len(), 2, "cell 200's bucket must not leak in");
+        assert_eq!(hist[0].bucket_start, day);
+        assert_eq!(hist[0].attention_count, 1);
+        assert_eq!(hist[0].event_count, 1);
+        assert_eq!(hist[0].records(), 2);
+        assert!(hist[0].spike_cold_start, "one day of history is cold start");
+        assert_eq!(hist[1].bucket_start, day + BUCKET_SECS);
+        assert_eq!(hist[1].records(), 1);
+
+        // A window that ends before the data holds nothing, rather than
+        // silently falling back to "all history".
+        let older = i64::from(analytics::weights::BASELINE_WINDOW_DAYS) * 86_400 + 86_400;
+        assert!(
+            store
+                .region_history(100, day - older)
+                .wait()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

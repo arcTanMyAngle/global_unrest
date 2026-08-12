@@ -77,6 +77,10 @@ pub mod weights {
     /// Cap on cells rendered with a halo at once, so a broad spike doesn't
     /// paint hundreds of rings.
     pub const SPIKE_HALO_MAX_CELLS: usize = 40;
+
+    /// Rows in the top-movers panel (docs/VISUALIZATION.md V2 item 6). A
+    /// ranked list is only useful while it stays scannable.
+    pub const TOP_MOVERS_LIMIT: usize = 12;
 }
 
 /// Aggregate events into fully scored (H3 res-3 cell × 6-hour bucket) rows.
@@ -356,6 +360,215 @@ pub fn spike_halo_cells(
     cells.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     cells.truncate(max_cells);
     cells
+}
+
+/// A cell's strongest bucket in the viewed window (docs/VISUALIZATION.md V2
+/// item 6), carrying enough to show *why* it ranked: the spike score plus the
+/// raw record count and baseline that score was computed from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mover {
+    pub h3_cell: u64,
+    /// Peak `spike_score` among the cell's non-cold-start buckets.
+    pub spike: f32,
+    /// Start of the bucket that peak came from.
+    pub bucket_start: i64,
+    /// Records in that bucket — discrete events *and* attention observations,
+    /// matching the denominator `baseline` is a median of.
+    pub records: u32,
+    /// Trailing 28-day median records/bucket behind that same bucket.
+    pub baseline: f32,
+}
+
+impl Mover {
+    /// Records above (or below) the cell's own trailing baseline — the spike
+    /// score in the units it was derived from, so the panel can show the
+    /// evidence next to the score rather than only the score.
+    pub fn delta(&self) -> f32 {
+        self.records as f32 - self.baseline
+    }
+}
+
+/// The strongest-spiking cells in `buckets`, ranked, for the top-movers panel.
+///
+/// Cold-start buckets are skipped for the same reason [`spike_halo_cells`]
+/// skips them: no baseline behind a bucket means no anomaly to claim. A cell
+/// whose every bucket is cold-start therefore never appears — being absent is
+/// correct, and better than ranking it on a neutral score.
+///
+/// Sorted by spike descending, ties broken by cell id so the panel never
+/// reorders between frames on equal scores.
+pub fn top_movers(buckets: &[RegionBucket], limit: usize) -> Vec<Mover> {
+    let mut best: BTreeMap<u64, Mover> = BTreeMap::new();
+    for b in buckets {
+        if b.spike_cold_start {
+            continue;
+        }
+        let candidate = Mover {
+            h3_cell: b.h3_cell,
+            spike: b.spike_score,
+            bucket_start: b.bucket_start,
+            records: b.event_count + b.attention_count,
+            baseline: b.baseline,
+        };
+        best.entry(b.h3_cell)
+            .and_modify(|m| {
+                if candidate.spike > m.spike {
+                    *m = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+    let mut movers: Vec<Mover> = best.into_values().collect();
+    movers.sort_by(|a, b| {
+        b.spike
+            .total_cmp(&a.spike)
+            .then_with(|| a.h3_cell.cmp(&b.h3_cell))
+    });
+    movers.truncate(limit);
+    movers
+}
+
+/// Dense per-bucket record counts for one cell across `window`, oldest first —
+/// the tiny series behind a top-movers row.
+///
+/// Built from the caller's already-loaded buckets, so the panel still issues
+/// no query of its own; the cost is one scan per ranked row, paid only on
+/// rebuild. Absent buckets are real zeros — the cell was silent, and silence
+/// is data (the same convention [`compose_window`] uses).
+pub fn cell_series(buckets: &[RegionBucket], cell: u64, window: (i64, i64)) -> Vec<u32> {
+    if window.1 <= window.0 {
+        return Vec::new();
+    }
+    let start = bucket_start_epoch(window.0);
+    let slots = ((window.1 - start).div_euclid(BUCKET_SECS) + 1).max(0) as usize;
+    let mut series = vec![0u32; slots];
+    for b in buckets.iter().filter(|b| b.h3_cell == cell) {
+        let idx = (b.bucket_start - start).div_euclid(BUCKET_SECS);
+        if idx >= 0 && (idx as usize) < slots {
+            series[idx as usize] += b.event_count + b.attention_count;
+        }
+    }
+    series
+}
+
+/// One display cell's attention/unrest components, folded from its buckets
+/// in the viewed window (docs/VISUALIZATION.md V2 item 5).
+///
+/// The display cell is not necessarily the stored res-3 cell — the heatmap
+/// rolls up to coarser H3 parents at world zoom — so the caller supplies the
+/// key and folds each bucket in with [`CellComponents::absorb`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellComponents {
+    pub h3_cell: u64,
+    /// Peak `attention_score` among the cell's buckets in the window.
+    pub attention: f32,
+    /// Peak `unrest_score` among the cell's buckets in the window.
+    pub unrest: f32,
+    /// At least one attention observation landed in this cell in the window.
+    pub has_attention: bool,
+    /// At least one discrete event record landed in this cell in the window.
+    pub has_events: bool,
+}
+
+impl CellComponents {
+    pub fn new(h3_cell: u64) -> Self {
+        Self {
+            h3_cell,
+            attention: 0.0,
+            unrest: 0.0,
+            has_attention: false,
+            has_events: false,
+        }
+    }
+
+    /// Fold one of this cell's buckets into the aggregate.
+    ///
+    /// Peak, not mean: both components are already normalized to [0, 1] per
+    /// bucket, and averaging over a window's slots would conflate "sustained"
+    /// with "strong" — the divergence question is about how hard each channel
+    /// registered here, which is what the max answers. Same per-cell reduction
+    /// [`spike_halo_cells`] already uses.
+    pub fn absorb(&mut self, b: &RegionBucket) {
+        self.attention = self.attention.max(b.attention_score);
+        self.unrest = self.unrest.max(b.unrest_score);
+        self.has_attention |= b.attention_count > 0;
+        self.has_events |= b.event_count > 0;
+    }
+
+    /// Both channels produced records here, so their ranks describe the same
+    /// cell and can be differenced. A cell with zero records on one side is
+    /// **not** "maximum divergence": the absence may be this project's own
+    /// coverage gap (GDELT DOC is source-country geocoded, ACLED is
+    /// event-only), and claiming a direction from it would over-read the data
+    /// — docs/SAFETY_AND_PRIVACY.md § "Known biases".
+    pub fn comparable(&self) -> bool {
+        self.has_attention && self.has_events
+    }
+}
+
+/// Fractional ranks of `values` mapped onto [0, 1], ties sharing their
+/// average rank so the result never depends on input order.
+///
+/// A single value has no distribution to rank against, so it maps to the
+/// midpoint rather than to an arbitrary end.
+fn normalized_ranks(values: &[f32]) -> Vec<f32> {
+    let n = values.len();
+    if n <= 1 {
+        return vec![0.5; n];
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut ranks = vec![0.0f32; n];
+    let mut i = 0;
+    while i < n {
+        // Span of the tie group starting at `i`.
+        let mut j = i + 1;
+        while j < n && values[order[j]] == values[order[i]] {
+            j += 1;
+        }
+        let avg = (i + j - 1) as f32 / 2.0;
+        for &idx in &order[i..j] {
+            ranks[idx] = avg / (n - 1) as f32;
+        }
+        i = j;
+    }
+    ranks
+}
+
+/// Attention ↔ unrest divergence per display cell (docs/VISUALIZATION.md V2
+/// item 5), as `(cell, divergence)` sorted by cell id.
+///
+/// `Some(d)`, `d` ∈ [-1, 1]: **positive** = media attention outruns event
+/// data here (covered but quiet), **negative** = events outrun attention
+/// (under-covered). `None` = no comparison to make, because one channel has
+/// no records in this cell at all.
+///
+/// Ranks, not raw magnitudes: `attention_score` and `unrest_score` are built
+/// from different components on different scales (article volume and outlet
+/// diversity vs. event count, type, severity and precision), so their
+/// difference is meaningless as a number. Their positions within the same
+/// window's distribution are comparable. Ranks are taken over the comparable
+/// cells only — an incomparable cell must not shift the distribution it was
+/// excluded from.
+pub fn divergence_ranks(cells: &[CellComponents]) -> Vec<(u64, Option<f32>)> {
+    let comparable: Vec<&CellComponents> = cells.iter().filter(|c| c.comparable()).collect();
+    let att: Vec<f32> = comparable.iter().map(|c| c.attention).collect();
+    let unr: Vec<f32> = comparable.iter().map(|c| c.unrest).collect();
+    let att_ranks = normalized_ranks(&att);
+    let unr_ranks = normalized_ranks(&unr);
+
+    let scored: BTreeMap<u64, f32> = comparable
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.h3_cell, att_ranks[i] - unr_ranks[i]))
+        .collect();
+
+    let mut out: Vec<(u64, Option<f32>)> = cells
+        .iter()
+        .map(|c| (c.h3_cell, scored.get(&c.h3_cell).copied()))
+        .collect();
+    out.sort_by_key(|&(cell, _)| cell);
+    out
 }
 
 #[cfg(test)]
@@ -709,5 +922,261 @@ mod tests {
             spike_halo_cells(&buckets, 0.8, 2),
             vec![(2, 0.95), (3, 0.88)]
         );
+    }
+
+    // ---- top_movers ---------------------------------------------------
+
+    fn mover_bucket(
+        cell: u64,
+        start: i64,
+        spike: f32,
+        records: u32,
+        baseline: f32,
+    ) -> RegionBucket {
+        let mut b = RegionBucket::empty(cell, start);
+        b.spike_score = spike;
+        b.event_count = records;
+        b.baseline = baseline;
+        b
+    }
+
+    #[test]
+    fn top_movers_ranks_by_spike_and_caps() {
+        let buckets = vec![
+            mover_bucket(1, 0, 0.55, 3, 2.0),
+            mover_bucket(2, 0, 0.95, 9, 1.0),
+            mover_bucket(3, 0, 0.72, 5, 3.0),
+        ];
+        let movers = top_movers(&buckets, 2);
+        assert_eq!(
+            movers.iter().map(|m| m.h3_cell).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!((movers[0].delta() - 8.0).abs() < F32_EPS);
+    }
+
+    #[test]
+    fn top_movers_keeps_the_peak_bucket_evidence_not_just_the_score() {
+        // Two buckets for one cell: the panel must report the counts from the
+        // bucket that actually produced the winning spike.
+        let buckets = vec![
+            mover_bucket(1, 0, 0.60, 40, 39.0),
+            mover_bucket(1, BUCKET_SECS, 0.91, 7, 1.0),
+        ];
+        let movers = top_movers(&buckets, 10);
+        assert_eq!(movers.len(), 1);
+        assert_eq!(movers[0].bucket_start, BUCKET_SECS);
+        assert_eq!(movers[0].records, 7);
+        assert!((movers[0].delta() - 6.0).abs() < F32_EPS);
+    }
+
+    #[test]
+    fn top_movers_counts_attention_and_events_together() {
+        let mut b = mover_bucket(1, 0, 0.9, 2, 1.5);
+        b.attention_count = 5;
+        assert_eq!(top_movers(&[b], 10)[0].records, 7);
+    }
+
+    #[test]
+    fn top_movers_excludes_cold_start_cells_entirely() {
+        let mut cold = mover_bucket(1, 0, 0.99, 20, 0.0);
+        cold.spike_cold_start = true;
+        let warm = mover_bucket(2, 0, 0.50, 2, 1.0);
+        let movers = top_movers(&[cold, warm], 10);
+        assert_eq!(
+            movers.iter().map(|m| m.h3_cell).collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn top_movers_breaks_ties_by_cell_id_for_a_stable_panel() {
+        let buckets = vec![
+            mover_bucket(9, 0, 0.8, 1, 1.0),
+            mover_bucket(3, 0, 0.8, 1, 1.0),
+            mover_bucket(6, 0, 0.8, 1, 1.0),
+        ];
+        assert_eq!(
+            top_movers(&buckets, 10)
+                .iter()
+                .map(|m| m.h3_cell)
+                .collect::<Vec<_>>(),
+            vec![3, 6, 9]
+        );
+    }
+
+    #[test]
+    fn cell_series_is_dense_and_scoped_to_one_cell() {
+        let buckets = vec![
+            mover_bucket(1, 0, 0.5, 3, 1.0),
+            // slot 1 deliberately absent for cell 1 -> a real zero, not a gap
+            mover_bucket(1, 2 * BUCKET_SECS, 0.5, 5, 1.0),
+            mover_bucket(2, BUCKET_SECS, 0.5, 99, 1.0), // other cell
+        ];
+        let series = cell_series(&buckets, 1, (0, 3 * BUCKET_SECS));
+        assert_eq!(series, vec![3, 0, 5, 0]);
+        assert!(
+            cell_series(&buckets, 7, (0, 3 * BUCKET_SECS))
+                .iter()
+                .all(|&v| v == 0)
+        );
+        assert!(cell_series(&buckets, 1, (0, 0)).is_empty());
+    }
+
+    #[test]
+    fn cell_series_counts_attention_and_events_and_ignores_out_of_window() {
+        let mut inside = mover_bucket(1, BUCKET_SECS, 0.5, 2, 1.0);
+        inside.attention_count = 4;
+        let outside = mover_bucket(1, -5 * BUCKET_SECS, 0.5, 50, 1.0);
+        let series = cell_series(&[inside, outside], 1, (0, 2 * BUCKET_SECS));
+        assert_eq!(series, vec![0, 6, 0]);
+    }
+
+    // ---- divergence ---------------------------------------------------
+
+    /// Cell with both components present (so it is comparable) at the given
+    /// scores.
+    fn comp(cell: u64, attention: f32, unrest: f32) -> CellComponents {
+        CellComponents {
+            h3_cell: cell,
+            attention,
+            unrest,
+            has_attention: true,
+            has_events: true,
+        }
+    }
+
+    fn assert_divergence(got: &[(u64, Option<f32>)], want: &[(u64, Option<f32>)]) {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert_eq!(g.0, w.0, "cell order: {got:?} vs {want:?}");
+            match (g.1, w.1) {
+                (Some(a), Some(b)) => assert!(
+                    (a - b).abs() < F32_EPS,
+                    "cell {}: {a} != {b} ({got:?})",
+                    g.0
+                ),
+                (None, None) => {}
+                _ => panic!("cell {}: {:?} != {:?}", g.0, g.1, w.1),
+            }
+        }
+    }
+
+    /// Golden case, hand-computed. Four comparable cells with attention
+    /// descending and unrest ascending, so the two rank orders are exact
+    /// mirrors; with n = 4 the normalized ranks are 0, 1/3, 2/3, 1.
+    ///
+    ///   cell  att   unrest | att rank  unrest rank  divergence
+    ///     10  0.90   0.10  |    1        0            +1
+    ///     20  0.70   0.30  |    2/3      1/3          +1/3
+    ///     30  0.50   0.50  |    1/3      2/3          -1/3
+    ///     40  0.30   0.70  |    0        1            -1
+    ///     50  0.95   0.00  | attention-only -> no comparison
+    #[test]
+    fn divergence_ranks_golden() {
+        let mut cells = vec![
+            comp(10, 0.90, 0.10),
+            comp(20, 0.70, 0.30),
+            comp(30, 0.50, 0.50),
+            comp(40, 0.30, 0.70),
+        ];
+        cells.push(CellComponents {
+            h3_cell: 50,
+            attention: 0.95,
+            unrest: 0.0,
+            has_attention: true,
+            has_events: false,
+        });
+        assert_divergence(
+            &divergence_ranks(&cells),
+            &[
+                (10, Some(1.0)),
+                (20, Some(1.0 / 3.0)),
+                (30, Some(-1.0 / 3.0)),
+                (40, Some(-1.0)),
+                (50, None),
+            ],
+        );
+    }
+
+    #[test]
+    fn divergence_ties_share_the_average_rank() {
+        // Attention identical across all three: that component carries no
+        // ordering information, so every cell sits at the midpoint of it and
+        // the divergence is driven entirely by unrest.
+        let cells = vec![comp(1, 0.5, 0.2), comp(2, 0.5, 0.4), comp(3, 0.5, 0.6)];
+        assert_divergence(
+            &divergence_ranks(&cells),
+            &[(1, Some(0.5)), (2, Some(0.0)), (3, Some(-0.5))],
+        );
+    }
+
+    #[test]
+    fn divergence_is_independent_of_input_order() {
+        let cells = vec![
+            comp(10, 0.90, 0.10),
+            comp(20, 0.70, 0.30),
+            comp(30, 0.5, 0.5),
+        ];
+        let mut shuffled = vec![cells[2], cells[0], cells[1]];
+        shuffled.swap(0, 2);
+        assert_divergence(&divergence_ranks(&cells), &divergence_ranks(&shuffled));
+    }
+
+    #[test]
+    fn incomparable_cells_do_not_shift_the_distribution() {
+        let base = vec![comp(1, 0.9, 0.1), comp(2, 0.1, 0.9)];
+        let mut with_gaps = base.clone();
+        // An events-only and an attention-only cell, both at extremes: if
+        // either entered the ranking it would move cells 1 and 2 off ±1.
+        with_gaps.push(CellComponents {
+            h3_cell: 3,
+            attention: 0.0,
+            unrest: 1.0,
+            has_attention: false,
+            has_events: true,
+        });
+        with_gaps.push(CellComponents {
+            h3_cell: 4,
+            attention: 1.0,
+            unrest: 0.0,
+            has_attention: true,
+            has_events: false,
+        });
+        assert_divergence(
+            &divergence_ranks(&with_gaps),
+            &[(1, Some(1.0)), (2, Some(-1.0)), (3, None), (4, None)],
+        );
+    }
+
+    #[test]
+    fn single_comparable_cell_is_neutral_not_extreme() {
+        // One cell has no distribution to rank against; neutral is the only
+        // honest answer, and it must not read as "maximally covered".
+        assert_divergence(&divergence_ranks(&[comp(7, 0.99, 0.01)]), &[(7, Some(0.0))]);
+        assert!(divergence_ranks(&[]).is_empty());
+    }
+
+    #[test]
+    fn cell_components_absorb_takes_peaks_and_ors_presence() {
+        let mut c = CellComponents::new(42);
+        assert!(!c.comparable());
+
+        let mut b1 = RegionBucket::empty(42, 0);
+        b1.attention_score = 0.4;
+        b1.unrest_score = 0.7;
+        b1.attention_count = 2;
+        c.absorb(&b1);
+        assert!(!c.comparable(), "attention alone is not comparable");
+
+        let mut b2 = RegionBucket::empty(42, BUCKET_SECS);
+        b2.attention_score = 0.9;
+        b2.unrest_score = 0.2;
+        b2.event_count = 1;
+        c.absorb(&b2);
+
+        assert!((c.attention - 0.9).abs() < F32_EPS);
+        assert!((c.unrest - 0.7).abs() < F32_EPS);
+        assert!(c.comparable());
     }
 }

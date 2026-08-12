@@ -5,7 +5,7 @@ use chrono::DateTime;
 use core_types::EventKind;
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Vec2};
 
-use crate::app::{App, HeatMetric, Phase, WindowLen};
+use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Phase, WindowLen};
 
 const TEXT_DIM: Color32 = Color32::from_rgb(148, 155, 168);
 
@@ -145,6 +145,18 @@ impl App {
                         &mut self.filters.heat_metric,
                         HeatMetric::Diversity,
                         "source diversity",
+                    )
+                    .changed();
+                changed |= ui
+                    .selectable_value(
+                        &mut self.filters.heat_metric,
+                        HeatMetric::Divergence,
+                        "attention ↔ unrest",
+                    )
+                    .on_hover_text(
+                        "Where media attention outruns event data, and where events \
+                         outrun attention. Ranks within this window, not raw scores. \
+                         See the legend for how to read it.",
                     )
                     .changed();
                 ui.separator();
@@ -363,6 +375,8 @@ impl App {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.inspector_status(ui);
                     ui.separator();
+                    self.top_movers_panel(ui);
+                    ui.separator();
                     match self.selected_cell {
                         Some(cell) => self.inspector_selection(ui, cell),
                         None => {
@@ -517,6 +531,85 @@ impl App {
             if !attribution.is_empty() {
                 ui.label(RichText::new(attribution).color(TEXT_DIM).small());
             }
+        }
+    }
+
+    /// Human-readable name for a cell, from the bundled country polygons.
+    /// Falls back to the cell id: over open ocean there is no country to name,
+    /// and inventing one would be worse than showing the raw key.
+    fn cell_label(&self, cell: u64) -> String {
+        geo_utils::cell_center_lonlat(cell)
+            .ok()
+            .and_then(|(lon, lat)| self.countries.country_at(lon, lat))
+            .map(|c| format!("{} ({})", c.name, c.iso_a3))
+            .unwrap_or_else(|| format!("cell {cell:#x}"))
+    }
+
+    /// Ranked spike regions in the current window (docs/VISUALIZATION.md V2
+    /// item 6). Sorted from the already-loaded buckets — this panel issues no
+    /// query of its own. Clicking a row selects the cell and flies to it.
+    fn top_movers_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Top movers");
+        if self.top_movers.is_empty() {
+            ui.label(
+                RichText::new(
+                    "No region in this window stands out against its own trailing \
+                     baseline yet. Regions with under 7 days of history behind them \
+                     are never ranked — there is nothing to compare them to.",
+                )
+                .color(TEXT_DIM)
+                .small(),
+            );
+            return;
+        }
+        ui.label(
+            RichText::new(
+                "Strongest spike vs. each region's own 28-day baseline, within the \
+                 visible time window. 0.50 = normal for that region.",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+        ui.add_space(4.0);
+
+        let mut clicked = None;
+        for (m, series) in &self.top_movers {
+            let selected = self.selected_cell == Some(m.h3_cell);
+            let row = ui.selectable_label(
+                selected,
+                // No glyph prefix: egui's bundled fonts have no geometric
+                // shapes, so a decorative one renders as a missing-glyph box
+                // (the app's existing colored swatches survive that only
+                // because a colored box still reads as a color chip).
+                RichText::new(format!("{:.2}   {}", m.spike, self.cell_label(m.h3_cell))).strong(),
+            );
+            if row.clicked() {
+                clicked = Some(m.h3_cell);
+            }
+            // Shape only: each row's bars are scaled to that row's own peak,
+            // so heights are never comparable between rows.
+            crate::sparkline::mini(ui, ui.available_width().min(200.0), series);
+            // The evidence the score came from, in the units it was derived
+            // from — a rank without its raw counts is not transparent.
+            let d = m.delta();
+            let delta_txt = if d >= 0.0 {
+                format!("+{d:.0}")
+            } else {
+                format!("{d:.0}")
+            };
+            ui.label(
+                RichText::new(format!(
+                    "{delta_txt} records vs {:.1}/6 h baseline · {}",
+                    m.baseline,
+                    fmt_ts(m.bucket_start)
+                ))
+                .color(TEXT_DIM)
+                .small(),
+            );
+            ui.add_space(3.0);
+        }
+        if let Some(cell) = clicked {
+            self.select_and_fly(cell);
         }
     }
 
@@ -730,6 +823,8 @@ impl App {
             }
         }
 
+        self.region_sparkline(ui);
+
         ui.add_space(6.0);
         ui.label(RichText::new("Location confidence (mean)").strong());
         if detail.counts_by_kind.is_empty() {
@@ -779,6 +874,245 @@ impl App {
                 ui.add_space(4.0);
             }
         }
+
+        // Last: the ledger is the only unbounded-length section, so putting it
+        // anywhere earlier would bury everything under it. The `detail` borrow
+        // above is dead by here, which is what lets the page jump apply.
+        if let Some(offset) = self.event_ledger(ui) {
+            self.set_ledger_offset(offset);
+        }
+    }
+
+    /// 28-day record history for the selected region with its own trailing
+    /// median underneath (docs/VISUALIZATION.md V2 item 7a) — the spike
+    /// component, made visible.
+    fn region_sparkline(&self, ui: &mut egui::Ui) {
+        let Some(span) = self.history_span else {
+            return;
+        };
+        ui.add_space(6.0);
+        ui.label(RichText::new("Region history (28 days)").strong());
+        crate::sparkline::show(
+            ui,
+            ui.available_width(),
+            &self.region_history,
+            span,
+            &self.map.style,
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(self.map.style.marker_attention, "▪");
+            ui.label(RichText::new("attention").color(TEXT_DIM).small());
+            ui.colored_label(crate::sparkline::EVENTS_FILL, "▪");
+            ui.label(RichText::new("events").color(TEXT_DIM).small());
+            ui.colored_label(crate::sparkline::BAND_LINE, "▬");
+            ui.label(RichText::new("trailing median").color(TEXT_DIM).small());
+        });
+        ui.label(
+            RichText::new(
+                "Bar height is records per 6 h — the same quantity the baseline is \
+                 a median of and the spike score is computed from — split so the \
+                 attention and event shares stay distinct. Buckets with too little \
+                 history behind them show a tick instead of a band: no baseline, \
+                 no anomaly claim.",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+    }
+
+    /// Paginated ledger of the region's **discrete events** in the window
+    /// (docs/VISUALIZATION.md V2 item 7b). Returns a requested page offset.
+    ///
+    /// Attention rows cannot appear here — `storage::region_events` excludes
+    /// them in SQL, keeping the attention/event separation off the UI's
+    /// good behaviour.
+    fn event_ledger(&self, ui: &mut egui::Ui) -> Option<usize> {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new("Event ledger").strong());
+        let Some(page) = &self.ledger else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("querying…").color(TEXT_DIM).small());
+            });
+            return None;
+        };
+        if page.total == 0 {
+            ui.label(
+                RichText::new(
+                    "No discrete event records for this region in the current window. \
+                     Media attention is listed separately above — it is never an event.",
+                )
+                .color(TEXT_DIM)
+                .small(),
+            );
+            return None;
+        }
+
+        let first = page.offset + 1;
+        let last = page.offset + page.rows.len();
+        ui.label(
+            RichText::new(format!("{first}–{last} of {} · newest first", page.total))
+                .color(TEXT_DIM)
+                .small(),
+        );
+
+        for row in &page.rows {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(self.map.style.marker_color(row.kind), "◆");
+                ui.label(RichText::new(row.kind.label()).small().strong());
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} · {}",
+                        fmt_ts(row.ts_epoch_s),
+                        row.source.as_str(),
+                        row.precision.label()
+                    ))
+                    .color(TEXT_DIM)
+                    .small(),
+                );
+            });
+            // ACLED's label lands here; its `notes` narrative is never fetched
+            // or stored, so there is nothing else this could show.
+            if let Some(headline) = &row.headline {
+                ui.label(RichText::new(headline).small());
+            }
+            let mut facts = Vec::new();
+            if let Some(sev) = row.severity {
+                facts.push(format!("severity {sev:.2}"));
+            }
+            facts.push(format!("confidence {:.0}%", row.confidence * 100.0));
+            if !row.outlet_domains.is_empty() {
+                facts.push(row.outlet_domains.join(", "));
+            }
+            ui.label(RichText::new(facts.join(" · ")).color(TEXT_DIM).small());
+            ui.horizontal_wrapped(|ui| {
+                for url in row.urls.iter().filter(|u| web_url(u).is_some()).take(3) {
+                    ui.hyperlink_to(RichText::new(format!("{} ↗", link_host(url))).small(), url);
+                }
+            });
+        }
+
+        // Paging, never an unbounded scroll: the query itself is limited to
+        // one page, so an enormous region cannot drag the frame down.
+        let mut jump = None;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let has_prev = page.offset > 0;
+            let has_next = (last as u64) < page.total;
+            if ui
+                .add_enabled(has_prev, egui::Button::new("← newer"))
+                .clicked()
+            {
+                jump = Some(page.offset.saturating_sub(LEDGER_PAGE_SIZE));
+            }
+            if ui
+                .add_enabled(has_next, egui::Button::new("older →"))
+                .clicked()
+            {
+                jump = Some(page.offset + LEDGER_PAGE_SIZE);
+            }
+        });
+        jump
+    }
+
+    /// Horizontal color strip sampled from `color`, with a caption at each end.
+    fn legend_ramp(
+        ui: &mut egui::Ui,
+        left: &str,
+        right: &str,
+        color: impl Fn(f32) -> egui::Color32,
+    ) {
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width().min(220.0), 12.0),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter();
+        let steps = 32;
+        for i in 0..steps {
+            let t0 = i as f32 / steps as f32;
+            let t1 = (i + 1) as f32 / steps as f32;
+            let seg = Rect::from_min_max(
+                Pos2::new(rect.min.x + rect.width() * t0, rect.min.y),
+                Pos2::new(rect.min.x + rect.width() * t1, rect.max.y),
+            );
+            painter.rect_filled(seg, 0.0, color((t0 + t1) / 2.0));
+        }
+        painter.text(
+            rect.left_bottom() + Vec2::new(0.0, 2.0),
+            Align2::LEFT_TOP,
+            left,
+            FontId::proportional(10.0),
+            TEXT_DIM,
+        );
+        painter.text(
+            rect.right_bottom() + Vec2::new(0.0, 2.0),
+            Align2::RIGHT_TOP,
+            right,
+            FontId::proportional(10.0),
+            TEXT_DIM,
+        );
+        ui.add_space(12.0);
+    }
+
+    fn sequential_heat_legend(&self, ui: &mut egui::Ui) {
+        let metric = match self.filters.heat_metric {
+            HeatMetric::Attention => "media attention",
+            HeatMetric::Events => "event count",
+            HeatMetric::Diversity => "source diversity (peak distinct outlets / 6 h)",
+            HeatMetric::Divergence => unreachable!("has its own legend"),
+        };
+        ui.label(RichText::new(format!("Heatmap · {metric} (log scale)")).small());
+        Self::legend_ramp(ui, "low", "high", renderer::heat_color);
+    }
+
+    /// docs/VISUALIZATION.md V2 item 5. The reading *and* its caveat — this
+    /// layer is a picture of coverage bias, so it must not be presented as a
+    /// picture of the world (docs/SAFETY_AND_PRIVACY.md § "Known biases").
+    fn divergence_legend(&self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Heatmap · attention ↔ unrest divergence").small());
+        Self::legend_ramp(ui, "events lead", "attention leads", |t| {
+            renderer::divergence_color(t * 2.0 - 1.0)
+        });
+        ui.label(
+            RichText::new(
+                "Each cell's media-attention and unrest components are ranked \
+                 separately against every other cell in this window; the color is \
+                 the gap between the two ranks. Violet = attention outruns the \
+                 event record (covered, but little happening on the ground). \
+                 Teal = events outrun attention (happening, but little covered).",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                renderer::divergence_color(0.0)
+                    .gamma_multiply(renderer::DIVERGENCE_NO_DATA_DIM + 0.4),
+                "■",
+            );
+            ui.label(
+                RichText::new("dimmed — one channel has no records here, so nothing is claimed")
+                    .color(TEXT_DIM)
+                    .small(),
+            );
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Read this as a map of our own coverage, not of the world. Media \
+                 density varies enormously by language and region, and this \
+                 project's attention feed is geocoded to the publisher's country \
+                 — so a teal cell may be genuinely under-reported, or simply \
+                 outside what our sources index. Ranks are relative to the \
+                 visible window: change the window and every cell can move. \
+                 See docs/SAFETY_AND_PRIVACY.md § \"Known biases\".",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
     }
 
     fn inspector_legend(&self, ui: &mut egui::Ui) {
@@ -797,41 +1131,11 @@ impl App {
             );
         });
         ui.add_space(4.0);
-        let metric = match self.filters.heat_metric {
-            HeatMetric::Attention => "media attention",
-            HeatMetric::Events => "event count",
-            HeatMetric::Diversity => "source diversity (peak distinct outlets / 6 h)",
-        };
-        ui.label(RichText::new(format!("Heatmap · {metric} (log scale)")).small());
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width().min(220.0), 12.0),
-            egui::Sense::hover(),
-        );
-        let painter = ui.painter();
-        let steps = 32;
-        for i in 0..steps {
-            let t0 = i as f32 / steps as f32;
-            let t1 = (i + 1) as f32 / steps as f32;
-            let seg = Rect::from_min_max(
-                Pos2::new(rect.min.x + rect.width() * t0, rect.min.y),
-                Pos2::new(rect.min.x + rect.width() * t1, rect.max.y),
-            );
-            painter.rect_filled(seg, 0.0, renderer::heat_color((t0 + t1) / 2.0));
+        if self.filters.heat_metric == HeatMetric::Divergence {
+            self.divergence_legend(ui);
+        } else {
+            self.sequential_heat_legend(ui);
         }
-        painter.text(
-            rect.left_bottom() + Vec2::new(0.0, 2.0),
-            Align2::LEFT_TOP,
-            "low",
-            FontId::proportional(10.0),
-            TEXT_DIM,
-        );
-        painter.text(
-            rect.right_bottom() + Vec2::new(0.0, 2.0),
-            Align2::RIGHT_TOP,
-            "high",
-            FontId::proportional(10.0),
-            TEXT_DIM,
-        );
         ui.add_space(16.0);
 
         ui.label(

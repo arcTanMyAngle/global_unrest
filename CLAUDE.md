@@ -4,7 +4,8 @@ Desktop-first Rust geospatial dashboard visualizing global news-attention
 and unrest/event signals. Civic-data research/visualization only.
 **M0–M6 complete 2026-07-18; V1 visualization batch complete 2026-08-10;
 IODA (internet-outage) live source added 2026-08-11; Bluesky Jetstream and
-Telegram aggregate-chatter sources added 2026-08-12** — M5 (ACLED + NOAA)
+Telegram aggregate-chatter sources added 2026-08-12; V2 visualization batch
+complete 2026-08-12** — M5 (ACLED + NOAA)
 fully live-verified; M6 shipped repo hygiene (CI feature matrix, `docker
 compose` smoke test, cargo-deny, Dependabot, tag-driven releases,
 CHANGELOG, portfolio README, CONTRIBUTING.md); V1 shipped the timeline
@@ -117,11 +118,13 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   (governor rate limiter + backoff + cadence/backfill). Keyless; parse/
   normalize pure and offline golden-tested, only `fetch*` touch the network.
 - `apps/global-signal-desktop` — eframe 0.35 shell; state machine in
-  `app.rs`, map widget in `map_view.rs`, panels in `panels.rs`. `ingest.rs`
+  `app.rs`, map widget in `map_view.rs`, panels in `panels.rs`, custom-painted
+  widgets in `timeline_strip.rs` (V1) and `sparkline.rs` (V2). `ingest.rs`
   is a long-lived, live-only GDELT/ACLED/NOAA worker. Startup purges legacy
   `source=fixtures` rows and treats an empty database as valid.
   UI thread never blocks on storage; it ingests worker batches (dedup makes
-  re-fetch idempotent).
+  re-fetch idempotent). `MapView::fly_to` is the only thing in the map that
+  requests repaints, and it is bounded — it settles and stops.
 - `services/workers` — M4 ingest worker binary: owns its own DuckDB, ingests
   fixtures + live GDELT (same `source-gdelt` loop as the desktop), and calls
   `StorageHandle::publish_snapshot` after every cycle.

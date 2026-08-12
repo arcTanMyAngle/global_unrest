@@ -10,6 +10,7 @@ mod app;
 mod ingest;
 mod map_view;
 mod panels;
+mod sparkline;
 mod timeline_strip;
 
 use tracing_subscriber::EnvFilter;
