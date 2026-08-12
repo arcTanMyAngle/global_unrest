@@ -1,0 +1,15 @@
+[package]
+name = "chatter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+core-types.workspace = true
+geo-utils.workspace = true
+
+[lints]
+workspace = true

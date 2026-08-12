@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "apps/global-signal-desktop",
     "crates/analytics",
+    "crates/chatter",
     "crates/core-types",
     "crates/geo-utils",
     "crates/renderer",
@@ -31,6 +32,7 @@ publish = false
 [workspace.dependencies]
 # Internal crates
 analytics = { path = "crates/analytics" }
+chatter = { path = "crates/chatter" }
 core-types = { path = "crates/core-types" }
 geo-utils = { path = "crates/geo-utils" }
 renderer = { path = "crates/renderer" }

@@ -1011,6 +1011,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chatter"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "core-types",
+ "geo-utils",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"

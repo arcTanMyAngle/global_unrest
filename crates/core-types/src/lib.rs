@@ -52,6 +52,7 @@ pub enum SourceId {
     Acled,
     Noaa,
     Ioda,
+    Bluesky,
 }
 
 impl SourceId {
@@ -62,6 +63,7 @@ impl SourceId {
             SourceId::Acled => "acled",
             SourceId::Noaa => "noaa",
             SourceId::Ioda => "ioda",
+            SourceId::Bluesky => "bluesky",
         }
     }
 
@@ -72,6 +74,7 @@ impl SourceId {
             "acled" => Some(SourceId::Acled),
             "noaa" => Some(SourceId::Noaa),
             "ioda" => Some(SourceId::Ioda),
+            "bluesky" => Some(SourceId::Bluesky),
             _ => None,
         }
     }
@@ -334,6 +337,41 @@ pub enum RawRecord {
     NoaaAlertJson(serde_json::Value),
     /// One outage event from the IODA `/outages/events` API (keyless).
     IodaEventJson(serde_json::Value),
+    /// One aggregate chatter count from a streaming social source.
+    ///
+    /// Unlike every other variant this is *not* one upstream record: the
+    /// individual posts were counted in memory and discarded unread, and only
+    /// this rollup ever leaves the source adapter. See [`ChatterRollup`].
+    ChatterRollup(ChatterRollup),
+}
+
+/// One aggregate chatter count: how many posts in a flush window mentioned
+/// both a known place and a known topic.
+///
+/// **This type is the privacy boundary for streaming social sources**
+/// (docs/SAFETY_AND_PRIVACY.md). It carries a count and nothing else — never
+/// post text, author handles/DIDs/user ids, post ids, or URLs. Individual
+/// posts are matched as they stream past and dropped immediately; nothing
+/// per-post is persisted, even transiently. Do not add a field here that
+/// could identify a person or reproduce a message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatterRollup {
+    /// Display name of the matched place ("Kyiv", "Sudan").
+    pub place_name: String,
+    /// ISO 3166-1 alpha-3 of the place, or of its containing country.
+    pub country_iso: String,
+    pub lat: f64,
+    pub lon: f64,
+    /// `City` for a gazetteer city hit, `Country` for a country-name hit.
+    pub precision: LocationPrecision,
+    /// Topic label the matched keyword belongs to ("protest", "flood").
+    pub topic: String,
+    /// Flush-window start (epoch seconds), aligned to `window_secs` so the
+    /// derived event id is stable across restarts and re-ingests.
+    pub window_start_epoch_s: i64,
+    pub window_secs: i64,
+    /// Posts matched in this window — a count, never a list.
+    pub post_count: u32,
 }
 
 impl RawRecord {
@@ -346,6 +384,12 @@ impl RawRecord {
             | RawRecord::NoaaAlertJson(v)
             | RawRecord::IodaEventJson(v) => v.to_string(),
             RawRecord::GdeltEventCsv(s) => s.clone(),
+            // Built by hand rather than derived-Debug'd so this can never
+            // start echoing a future field into the ingest log.
+            RawRecord::ChatterRollup(r) => format!(
+                "chatter place={} topic={} window_start={} count={}",
+                r.place_name, r.topic, r.window_start_epoch_s, r.post_count
+            ),
         };
         let mut cut = full;
         if cut.len() > max_len {
