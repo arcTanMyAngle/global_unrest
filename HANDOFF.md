@@ -1,13 +1,84 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (second session that day). **M0–M6 complete; V1
-shipped; IODA, Bluesky, and Telegram live sources all implemented.** This
-session built the **Telegram** aggregate-chatter source end to end — the
-third and last of the user-prioritized real-time sources — but **the gate
-battery was interrupted mid-run by a session/process boundary and never
-finished**, and **the one-time interactive login has not been run**. Both
-are the literal first things to do next session; see "Telegram — what
-shipped" and "Next session" below before touching anything else.
+Last session: 2026-08-12 (**third** session that day). **M0–M6 complete; V1
+shipped; IODA, Bluesky, and Telegram live sources all implemented.** The
+Telegram login is now **done**, the gate battery **finally ran clean**, and
+`cargo deny` is **green** — but that same battery uncovered a **blocking
+link failure that makes the desktop binary unbuildable with
+`telegram-live` enabled**. Read "🚨 BLOCKER" immediately below before
+anything else; it is the whole next session.
+
+## 🚨 BLOCKER — `libsql-ffi` and `libsqlite3-sys` both bundle SQLite (LNK2005)
+
+**`cargo build -p global-signal-desktop` does not link.** Two static copies
+of SQLite end up in the same binary:
+
+- `rusqlite` → `libsqlite3-sys` (storage's settings store), and
+- `grammers-session`'s `SqliteSession` → `libsql-ffi` (Telegram sessions).
+
+```
+liblibsqlite3_sys-*.rlib(sqlite3.o) : error LNK2005:
+  sqlite3_step already defined in liblibsql_ffi-*.rlib(sqlite3.o)
+  ... (dozens of sqlite3_* symbols)
+error: linking with `link.exe` failed: exit code: 1169
+```
+
+**Why nobody caught this until now:** `cargo clippy` and `cargo check`
+**do not link a binary**, so all four clippy legs pass happily. The
+previous session's "compile-verified in isolation" claim was `cargo check
+-p source-telegram --features live --examples`, and `login_setup` links
+fine *because it never pulls in `rusqlite`*. Only a real `cargo build`/
+`cargo test` of the desktop or worker binary trips it. **Lesson: for a new
+dependency carrying native C code, `cargo check` is not evidence — build
+the actual binary.**
+
+### Verified fix direction (checked against the pinned registry source)
+
+`grammers-session 0.10.0` has `default = ["sqlite-storage"]` and
+`sqlite-storage = ["dep:libsql"]`. Crucially, **`grammers-client` and
+`grammers-mtsender` both already declare `grammers-session` with
+`default-features = false`** — so *our own* `crates/source-telegram/Cargo.toml`
+is the only thing enabling it. Setting `default-features = false` there
+drops `libsql-ffi` entirely, which also removes the slow C build and the
+CI `libclang`/bindgen risk this file flagged earlier.
+
+That leaves `MemorySession` (`storages/memory.rs`), which does implement
+`Session`. The work is re-implementing session persistence:
+
+- `MemorySession(Mutex<SessionData>)`, with `impl From<SessionData>`.
+- `SessionData` (`src/session_data.rs`) has **all-public fields**
+  (`home_dc: i32`, `dc_options: HashMap<i32, DcOption>`, peer cache,
+  update state) and its docs name a `SessionData::import_to` conversion
+  usable with any `Session`, so getting data in/out is supported.
+- **`SessionData` itself has NO serde derives in 0.10.0** — only
+  `DcOption` and the `peer.rs`/`types.rs` types do (behind the crate's
+  `serde` feature). So persistence needs a small hand-written mirror
+  struct in `source-telegram` that serde-derives and converts both ways,
+  not a one-line `serde_json::to_string(&session_data)`. **Verify this
+  before designing around it** — confirm whether `import_to`/`From` give a
+  clean round-trip, and re-read the exact pinned source, not HEAD.
+- Changing the on-disk format **invalidates `./telegram.session`**, so the
+  one-time `login_setup` must be re-run after the switch (user at the
+  keyboard again — the SQLite file cannot be migrated field-for-field
+  without the libsql dep that's being removed).
+
+**Alternatives if that proves ugly:** (a) drop `rusqlite` from `storage`'s
+settings store, far more invasive and touches unrelated code; (b) keep
+Telegram out of the desktop/worker binaries and run it as its own process
+— but that abandons the single-binary shape every other source has. (a)
+and (b) are both worse; start with `default-features = false`.
+
+**Until this is fixed, `telegram-live` cannot be a desktop default
+feature** — the default `cargo build`/`cargo run`/`cargo test --workspace`
+are all broken by it, which is why GUI verification never happened.
+
+**Confirmed, not predicted:** `cargo test --workspace` was run to
+completion and fails identically — 24 `LNK2005` errors, `could not compile
+global-signal-desktop (bin "global-signal-desktop")`, and **zero test
+binaries ever ran** (no `test result:` line anywhere in the log). So the
+workspace suite currently provides *no* coverage signal at all, for every
+crate, not just Telegram. That makes this blocker the only thing worth
+doing first.
 
 **Before touching `chatter`, `source-bluesky`, or `source-telegram`, read
 [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.** The
@@ -19,13 +90,30 @@ Read this file, then [CLAUDE.md](CLAUDE.md).
 
 ## Instructions for next session (explicit, from the user)
 
-- **Use both `codex` and `gemini` CLIs this session.** Neither was
-  meaningfully exercised last time in the way the user wants: `gemini` was
-  tried for research and hit a hard quota wall (`429 RESOURCE_EXHAUSTED`,
-  see "Landmines" below) with zero usable output; `codex` was never invoked
-  at all. Look for a real opportunity to use each — see "On offloading"
-  under Token management for what each is actually good for in this repo,
-  and don't force it onto a task it's wrong for just to check a box.
+- **Both `codex` and `gemini` were used productively on 2026-08-12 (third
+  session); the workarounds each needs are now known — don't rediscover
+  them.**
+  - **`gemini`'s 429 wall is in its *web-search* tool path, not the model.**
+    The default model still dies with `429 RESOURCE_EXHAUSTED` after
+    retries (the stack trace bottoms out in
+    `WebSearchToolInvocation.execute`). **Working invocation:**
+    `gemini --skip-trust -m gemini-2.5-flash -p "<prompt>"` with an
+    explicit "Do NOT use any tools or web search" instruction in the
+    prompt. That returned a clean, correct answer immediately. Keep
+    `--skip-trust` (this repo isn't a Gemini-trusted workspace).
+  - **`codex` works well on a bounded, fully-specified coding task**, and
+    did the `source-telegram` test suite this session (7 tests, all its
+    own gates green, conventions followed — named constants, colocated
+    tests, no new deps). **Launch it from the Bash tool, not PowerShell:**
+    PowerShell word-splits a multi-line prompt and codex dies with
+    `error: unexpected argument '<some word>' found`. Write the prompt to
+    a file and pass `"$(cat file)"` from Bash. Its stdout stays at 0 bytes
+    while it thinks (it buffers) — check `git diff --stat` for real
+    progress instead of the log, and note an idle `node` process with
+    ~0.1s CPU is *waiting on the model API*, not wedged.
+  - Tell codex explicitly that another cargo process may hold the
+    target-dir lock, or it may misread "Blocking waiting for file lock" as
+    a hang.
 - **Use web research (WebSearch/WebFetch, or `curl`/PowerShell against a
   real API/registry) whenever verifying an external fact** — there is no
   literal browser tool in this harness; that combination is the
@@ -52,8 +140,8 @@ Read this file, then [CLAUDE.md](CLAUDE.md).
 | | |
 |---|---|
 | Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. **`origin/main` is behind by a lot**: the 2 IODA commits, the previous handoff commit, and *all* Bluesky + Telegram work (code and docs) are local-only and **uncommitted** (see "Commits" row — nothing from this session or the prior one has been committed yet). Ask before pushing *or* committing — the user said explicitly this session "I will commit once everything is complete for this session," so wait for that signal rather than committing unprompted. |
-| Commits | `git log --oneline` still ends at the Bluesky/geo/chatter commits from the *first* 2026-08-12 session (`9d1eafc` etc.) — nothing from Telegram or the rest of that session's docs pass has been committed. `git status` shows a long list of modified-and-further-modified (`MM`) files plus one new untracked directory, `crates/source-telegram/`. |
-| Tests | `cargo test --workspace` was **last confirmed fully green before Telegram existed** (Bluesky-wiring state only). After adding `source-telegram`, `cargo check -p source-telegram --features live --examples` passed clean (exit 0, verified from the actual log, not just an exit-code line — see the PIPESTATUS landmine below). The full `fmt`/`clippy` (default + 5-way feature matrix + `telegram-live` solo)/`cargo test --workspace` battery was **started but killed mid-run** when a session boundary was crossed — the surviving log shows an interrupted build (`process didn't exit successfully`, Windows abnormal-termination code), not a real compile error. **Rerun this clean first**, don't trust that log either way. |
+| Commits | **The Telegram work IS committed** — the tree was clean at the start of the third 2026-08-12 session, ending at `25549d5 overhaul again`. (The row that used to live here claimed everything was uncommitted; that went stale the moment the user committed.) **Newly uncommitted again** as of this session: codex's `ChannelSweep` refactor + 7 tests, the `Cargo.lock` `webbrowser` bump, the `cargo fmt` fixes to the three `source-telegram` files, and this handoff. |
+| Tests | `cargo fmt --all --check` ✅ (was failing — real, now fixed). `cargo clippy` ✅ on all three legs: workspace default, 5-way live matrix, `telegram-live` solo. **`cargo test --workspace` ❌ FAILS** on the LNK2005 blocker at the top of this file (confirmed by a full run: 24 `LNK2005`, **no test binary ran at all**, so there is currently zero workspace coverage signal). `cargo test -p source-telegram` ✅ 7 passed, with and without `--features live`. |
 | Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1, IODA, Bluesky, or Telegram — versioning is milestone-tied, not batch-tied |
 | Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` and now `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`/`LES_TELEGRAM_SESSION_FILE` (session file path: `./telegram.session`, not yet created — see below). IODA and Bluesky are keyless. `.env.example` and `.gitignore` (`*.session`/`*.session-*`) were both updated to match. |
 | Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; IODA/Bluesky/Telegram ✅, pulled forward from M8; M7/V2/M8-remainder next) |
@@ -304,44 +392,83 @@ entirely (never needed it). **Prefer the exact pinned-version registry
 source over a repo's HEAD branch** — this is the concrete case that proves
 the rule, not just a hypothetical.
 
+## What the 2026-08-12 (third) session actually closed
+
+1. **Telegram login — DONE.** `./telegram.session` exists and is
+   authorized; re-running `login_setup` prints `already logged in`, having
+   made a real MTProto round-trip. The user did the phone/SMS step at the
+   keyboard. **An agent cannot do this step**, and note the login example
+   needs a *real console* — the harness shell has stdin on the null
+   device, so launch it with `Start-Process powershell -NoExit` from the
+   repo root and let the user type into that window.
+2. **Gate battery — ran clean for the first time.** `cargo fmt --all
+   --check` **was genuinely failing** (all three `source-telegram` files
+   were committed unformatted — last session's killed run never reached
+   it); fixed. All three clippy legs pass: workspace default, the 5-way
+   live matrix, and the `telegram-live` solo leg. `cargo test --workspace`
+   ❌ **fails** on the LNK2005 blocker above (it links the desktop test
+   binary) — ran to completion, 24 `LNK2005`, no test binary executed.
+3. **`cargo deny check` — GREEN**: `advisories ok, bans ok, licenses ok,
+   sources ok`. The `grammers-*`/`libsql-ffi` tree that this file worried
+   about is clean on licenses/bans/sources. It initially failed on **one**
+   advisory that had nothing to do with Telegram: **RUSTSEC-2026-0257**,
+   `webbrowser 1.2.1` (Unix `BROWSER` argument injection) pulled in via
+   `egui-winit` → `eframe`. Fixed with `cargo update -p webbrowser`
+   (→ 1.2.4, lockfile-only, also dropped a duplicate `core-foundation`).
+4. **`source-telegram` now has a real test suite** — 7 deterministic
+   no-network tests, written by `codex` (see "On offloading"). The sweep
+   bookkeeping was extracted from `live.rs` into a `ChannelSweep` state
+   machine in `lib.rs` so it tests without the `live` feature. Reviewed by
+   hand: behaviour-identical to the old `newest > last_id.unwrap_or(0)`
+   logic in all four cases, and the streaming privacy property is
+   preserved (`observe` takes one `&str` and drops it in-call; nothing
+   buffered, returned, or logged).
+
 ## Next session (in priority order)
 
-1. **Run the login step.** `cargo run -p source-telegram --features live
-   --example login_setup` — needs the user for the phone/SMS code. Without
-   this, Telegram's `fetch()` errors every cycle.
-2. **Rerun the full gate battery clean.** The previous run was killed
-   mid-build by a session boundary, not a real failure — but it was never
-   confirmed green either:
-   ```sh
-   cargo fmt --all --check
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo clippy -p global-signal-desktop -p workers --features acled-live,noaa-live,ioda-live,bluesky-live,telegram-live --all-targets -- -D warnings
-   cargo clippy -p global-signal-desktop -p workers --no-default-features --features telegram-live --all-targets -- -D warnings
-   cargo test --workspace
-   ```
-   Start it `run_in_background: true` and wait for the real completion
-   notification (see Token management) — don't trust a stale in-flight
-   background task across what might be a session boundary; check the
-   process list for a still-running `cargo`/`rustc` first if in doubt.
-3. **`cargo deny check`** — the new `grammers-*`/`libsql-ffi` dependency
-   tree has never been run through the actual tool, only spot-checked by
-   hand against the crates.io API.
-4. **GUI-verify both Bluesky and Telegram chatter on the map** — both are
-   still open from before. Telegram needs step 1 done first and ≥15
-   minutes of runtime (its poll cadence) before the first cycle completes;
-   Bluesky needs ≥5 minutes (its flush cadence). Recall chatter events are
-   mostly Country precision, so they shade regions rather than appearing
-   as markers.
-5. **Commit, once the user says the session is complete** (their words,
-   this session) — there is a *lot* riding uncommitted right now: the
-   entire Telegram implementation, the carried-over Bluesky wiring from
-   the session before, and a full documentation pass across ~9 files. Ask
-   before pushing, same as always.
-6. After all of the above: **V2 visualization batch**
-   (docs/VISUALIZATION.md), interleaved with M7 service hardening — see
-   "Next up" below. The three user-prioritized real-time sources are now
-   all implemented, so this is genuinely the next body of work, not a
-   placeholder.
+1. **Fix the LNK2005 blocker** (top of this file). Nothing else about
+   Telegram can be verified until the desktop binary links.
+2. **Then finish the gate battery**: `cargo test --workspace` end to end,
+   plus `cargo test -p global-signal-desktop -p workers --features
+   acled-live,noaa-live,ioda-live,bluesky-live,telegram-live`.
+3. **GUI-verify both Bluesky and Telegram chatter on the map** — still
+   open, now blocked on (1). Useful timing facts established this session:
+   `telegram_next = Instant::now()` (ingest.rs:451), so Telegram's first
+   sweep fires **immediately** on startup and its `FIRST_SWEEP_LIMIT=30`
+   history read lands in already-closed chatter windows — expect rollups
+   on the **first** cycle, not after 15 minutes. Bluesky still needs its
+   5-minute first drain (ingest.rs:437). So the run is ~6–8 minutes, not
+   15+. **Caveat worth stating out loud when reporting**: the map has no
+   per-source visual identity yet (that's V3), so a screenshot alone
+   cannot prove *Telegram specifically* rendered — pair it with a direct
+   query for `source='telegram'`/`'bluesky'` rows in the rendered window.
+   Also: the app must be launched **from the workspace root**, since
+   `LES_TELEGRAM_SESSION_FILE` is the relative `./telegram.session`.
+4. **Commit** — still uncommitted and now larger: codex's `ChannelSweep`
+   refactor + tests, the `Cargo.lock` `webbrowser` bump, the fmt fixes,
+   and this handoff. Ask before pushing, same as always.
+5. After all of the above: **V2 visualization batch**
+   (docs/VISUALIZATION.md), interleaved with M7 service hardening.
+
+### Correction to the M8 backlog: Burmese topic tokens will not work as planned
+
+This file (and `source-telegram/src/lib.rs`'s `DVBTV` comment) says to add
+"Burmese equivalents" to `chatter`'s topic tokens so DVBTV registers
+signal. **That cannot work as written.** `chatter` matches whitespace-split
+word windows, and **written Burmese is not whitespace-word-segmented** —
+spaces fall irregularly at phrase/clause boundaries, not between words.
+
+Verified two ways rather than assumed: `gemini` said so, then it was
+checked against the real thing — fetching DVBTV's public `t.me/s/` preview
+and measuring **only aggregate statistics, never message text** gave a mean
+of **12.1 Myanmar codepoints per whitespace token** (max 33; 68 of 198
+tokens ≥15 chars), where a Burmese word is typically 2–6. Those tokens are
+whole phrases.
+
+So the real task is a segmentation strategy (syllable-level matching, or
+substring matching restricted to Burmese script runs), not a keyword-list
+addition. Same applies to any other unsegmented-script source (Thai, Khmer,
+Lao, Japanese, Chinese). Re-scope the M8 item before starting it.
 
 ### Loose ends carried forward (still open, not new this session)
 
@@ -394,6 +521,24 @@ which take priority per the user). Summary:
   actually registers signal (see Telegram section above).
 
 ## Landmines and quirks (learned the hard way)
+
+- **`cargo check`/`cargo clippy` do not link — they cannot catch duplicate
+  native symbols.** Two crates that each vendor the same C library
+  (`libsqlite3-sys` and `libsql-ffi` here) pass every clippy leg and fail
+  only at `cargo build` of a binary that pulls in both. See the 🚨 BLOCKER
+  at the top. When adding a dependency with a native/`-sys` component,
+  **build the real binary** before calling it verified — and prefer
+  checking whether it vendors a library the workspace already vendors
+  (`cargo tree -i libsqlite3-sys` etc.) *before* writing the integration.
+- **An example binary is not a representative link target.** `login_setup`
+  links fine with `libsql-ffi` because it never pulls in `rusqlite`; the
+  desktop binary pulls both and fails. Don't generalize from a small
+  example to the app.
+- **`Select-Object -Last N` on a build pipeline can truncate away the
+  actual error.** The first desktop build failure showed only
+  `linking with link.exe failed: exit code 1169` with every `LNK2005` line
+  cut off. Redirect the whole build to a file (`cargo build *> log`) and
+  grep it, rather than tailing a pipeline.
 
 - **A suspected prompt-injection attempt hit `docs/SAFETY_AND_PRIVACY.md`
   this session** — worth knowing about even though it was caught and
