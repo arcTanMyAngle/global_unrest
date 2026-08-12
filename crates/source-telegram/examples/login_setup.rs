@@ -82,9 +82,7 @@ async fn main() {
     }
 
     println!("Signed in. Session saved to `{session_path}`.");
-    println!(
-        "The live source will now read this file on every poll — nothing further to do here."
-    );
+    println!("The live source will now read this file on every poll — nothing further to do here.");
 }
 
 #[cfg(feature = "live")]

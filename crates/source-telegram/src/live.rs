@@ -24,7 +24,7 @@ use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use tokio::sync::OnceCell;
 
-use crate::ALLOWED_CHANNELS;
+use crate::{ALLOWED_CHANNELS, ChannelSweep};
 
 /// Don't ingest a channel's entire history the first time it's swept — just
 /// the most recent handful, enough to prime the per-channel high-water mark.
@@ -102,39 +102,36 @@ impl TelegramSource {
     /// Open (or reuse) the MTProto connection. On failure the cell stays
     /// uninitialized, so the next `fetch` retries rather than being stuck.
     async fn ensure_conn(&self) -> Result<&Client, SourceError> {
-        let conn = self
-            .conn
-            .get_or_try_init(|| async {
-                let session = SqliteSession::open(&self.session_path)
-                    .await
-                    .map_err(|e| {
+        let conn =
+            self.conn
+                .get_or_try_init(|| async {
+                    let session = SqliteSession::open(&self.session_path).await.map_err(|e| {
                         SourceError::Other(format!(
                             "opening telegram session file `{}`: {e}",
                             self.session_path
                         ))
                     })?;
-                let session = Arc::new(session);
-                let SenderPool { runner, handle, .. } =
-                    SenderPool::new(Arc::clone(&session), self.api_id);
-                let client = Client::new(handle);
-                let runner_task = tokio::spawn(runner.run());
-                let authorized = client
-                    .is_authorized()
-                    .await
-                    .map_err(|e| SourceError::Other(format!("checking telegram session: {e}")))?;
-                if !authorized {
-                    return Err(SourceError::Other(format!(
-                        "telegram session `{}` is not logged in — run `cargo run -p \
+                    let session = Arc::new(session);
+                    let SenderPool { runner, handle, .. } =
+                        SenderPool::new(Arc::clone(&session), self.api_id);
+                    let client = Client::new(handle);
+                    let runner_task = tokio::spawn(runner.run());
+                    let authorized = client.is_authorized().await.map_err(|e| {
+                        SourceError::Other(format!("checking telegram session: {e}"))
+                    })?;
+                    if !authorized {
+                        return Err(SourceError::Other(format!(
+                            "telegram session `{}` is not logged in — run `cargo run -p \
                          source-telegram --features live --example login_setup` once to create it",
-                        self.session_path
-                    )));
-                }
-                Ok(Conn {
-                    client,
-                    _runner: runner_task,
+                            self.session_path
+                        )));
+                    }
+                    Ok(Conn {
+                        client,
+                        _runner: runner_task,
+                    })
                 })
-            })
-            .await?;
+                .await?;
         Ok(&conn.client)
     }
 
@@ -170,7 +167,10 @@ impl TelegramSource {
         let peer_ref = match peer.to_ref().await {
             Ok(Some(p)) => p,
             Ok(None) => {
-                tracing::warn!(channel = name, "telegram channel has no addressable peer; skipping");
+                tracing::warn!(
+                    channel = name,
+                    "telegram channel has no addressable peer; skipping"
+                );
                 return;
             }
             Err(e) => {
@@ -186,8 +186,7 @@ impl TelegramSource {
             None => iter.limit(FIRST_SWEEP_LIMIT),
         };
 
-        let mut newest = last_id.unwrap_or(0);
-        let mut scanned = 0u32;
+        let mut sweep = ChannelSweep::new(last_id);
         loop {
             let msg = match iter.next().await {
                 Ok(Some(m)) => m,
@@ -197,17 +196,21 @@ impl TelegramSource {
                     break;
                 }
             };
-            scanned += 1;
-            newest = newest.max(msg.id());
-            let text = msg.text();
-            if !text.trim().is_empty() {
-                self.lock_accumulator().observe(text, msg.date());
-            }
+            sweep.observe(
+                &mut self.lock_accumulator(),
+                msg.id(),
+                msg.text(),
+                msg.date(),
+            );
         }
-        if newest > last_id.unwrap_or(0) {
+        if let Some(newest) = sweep.finish() {
             self.lock_last_seen().insert(name.to_owned(), newest);
         }
-        tracing::info!(channel = name, scanned, "telegram channel swept");
+        tracing::info!(
+            channel = name,
+            scanned = sweep.scanned(),
+            "telegram channel swept"
+        );
     }
 }
 
