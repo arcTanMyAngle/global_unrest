@@ -10,6 +10,33 @@ project with no published crate API to stabilize against.
 
 ### Added
 
+- `source-bluesky`: a new optional live source (feature `bluesky-live`,
+  keyless, desktop default) for the Bluesky Jetstream firehose — the first
+  **streaming** source in the workspace. It publishes **aggregate chatter
+  volume only**: counts of posts mentioning both a known place and a known
+  topic in a 5-minute window, as a media-attention signal alongside GDELT's
+  article counts. No post text, author identity, post id, or URL is ever
+  stored, logged, or returned by any API in the crate
+  (docs/SAFETY_AND_PRIVACY.md hard rule 6).
+- `chatter`: the shared aggregate-before-storage machinery both Bluesky and
+  Telegram use, unchanged between the two — gazetteer place matching, a
+  fixed topic keyword table, an in-memory accumulator, and `ChatterRollup`
+  normalization. Requires a place *and* a topic in the same post; matched
+  0.27% of a live 5,918-post sample.
+- `source-telegram`: a new optional live source (feature `telegram-live`,
+  credential-gated, desktop default) for public Telegram channels — the
+  third real-time chatter source. MTProto (`grammers-client`, pure Rust) is
+  the only mechanism that can read a third-party public channel's history
+  without that channel's owner cooperating; poll-based (not streamed) like
+  NOAA/IODA, sweeping a small live-verified curated allowlist of 8 channels
+  every 15 minutes. Login is a one-time interactive step
+  (`examples/login_setup.rs`) that saves a local session file; the source
+  itself only ever opens it. Same **aggregate chatter volume only**
+  guarantee as Bluesky (docs/SAFETY_AND_PRIVACY.md hard rule 6).
+- `geo-utils`: bundles Natural Earth's 1:110m populated-places gazetteer
+  (243 major cities) behind a new `CityIndex`, plus
+  `CountryIndex::iter_with_centroid`.
+
 - The region inspector now exposes real source URLs for the selected area,
   identifies direct/known-host video candidates, and offers an opt-in external
   YouTube search using the area and event context. Nothing is fetched or

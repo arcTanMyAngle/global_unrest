@@ -3,20 +3,23 @@
 Desktop-first Rust geospatial dashboard visualizing global news-attention
 and unrest/event signals. Civic-data research/visualization only.
 **M0–M6 complete 2026-07-18; V1 visualization batch complete 2026-08-10;
-IODA (internet-outage) live source added 2026-08-11** — M5 (ACLED + NOAA)
+IODA (internet-outage) live source added 2026-08-11; Bluesky Jetstream and
+Telegram aggregate-chatter sources added 2026-08-12** — M5 (ACLED + NOAA)
 fully live-verified; M6 shipped repo hygiene (CI feature matrix, `docker
 compose` smoke test, cargo-deny, Dependabot, tag-driven releases,
 CHANGELOG, portfolio README, CONTRIBUTING.md); V1 shipped the timeline
 histogram, spike halos, severity markers, and recency fade
 (docs/VISUALIZATION.md); IODA added a fourth optional live source
 (`ioda-live`, keyless, country-precision internet-outage severity signal).
+Telegram is the third real-time chatter source (after Bluesky), reading a
+small live-verified public-channel allowlist over MTProto — credential-gated
+like ACLED, and needs a one-time interactive login
+(`crates/source-telegram/examples/login_setup.rs`) before it activates.
 Branch protection on `main` is the one M6 item left, and it's a manual
 GitHub-settings step (no authenticated `gh`/API access from this machine)
-— see HANDOFF.md. Next: Bluesky Jetstream + public Telegram channels
-(queued, aggregate-chatter-only design — see HANDOFF.md), then V2
-visualization batch, interleaved with M7 service hardening. See
-[HANDOFF.md](HANDOFF.md) for status and the next task list, and
-[docs/PLAN.md](docs/PLAN.md) for the approved plan.
+— see HANDOFF.md. Next: V2 visualization batch, interleaved with M7 service
+hardening. See [HANDOFF.md](HANDOFF.md) for status and the next task list,
+and [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
 ## Commands
 
@@ -31,16 +34,20 @@ cargo run -p workers                                   # M4 ingest worker (publi
 cargo run -p api                                       # M4 read API (needs LES_PUBLISH_DIR)
 docker compose up                                      # M4 worker + api stack (WSL2 on Windows)
 cargo test -p source-acled --features live             # M5 ACLED mock-server tests
-cargo run -p global-signal-desktop                     # ACLED + NOAA + IODA are desktop defaults
-cargo run -p workers --features acled-live,noaa-live,ioda-live  # worker with all live sources
+cargo run -p global-signal-desktop                     # ACLED + NOAA + IODA + Bluesky + Telegram are desktop defaults
+cargo run -p workers --features acled-live,noaa-live,ioda-live,bluesky-live,telegram-live  # worker with all live sources
+cargo run -p source-bluesky --features live --example live_probe -- 60  # manual live firehose check (aggregate output only)
+cargo run -p source-telegram --features live --example login_setup      # one-time interactive Telegram login
 cargo deny check                                       # M6 gate: advisories + license allowlist
 ```
 
 Live sources are cargo features on both binaries: `acled-live` (needs
 `ACLED_EMAIL`/`ACLED_PASSWORD` — myACLED OAuth; ACLED retired API keys),
-`noaa-live` (keyless), and `ioda-live` (keyless). All three are desktop
-default features; the worker keeps them opt-in. Clippy the feature matrix
-when touching ingest loops.
+`noaa-live` (keyless), `ioda-live` (keyless), `bluesky-live` (keyless), and
+`telegram-live` (needs `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` plus a one-time
+interactive `login_setup` run — see `crates/source-telegram`). All five are
+desktop default features; the worker keeps them opt-in. Clippy the feature
+matrix when touching ingest loops.
 
 M4 services env: worker reads `LES_WORKER_DATA_DIR` (its own DuckDB),
 `LES_PUBLISH_DIR` (snapshot root), `LES_FIXTURES_DIR`, `LES_RETENTION_DAYS`,
@@ -56,12 +63,21 @@ DuckDB C++ (several minutes) — never `cargo clean` casually.
 
 - Public/authorized data sources only; no scraping restricted sources, no
   bypassing paywalls/auth/rate limits. Live APIs land only in their
-  milestone (GDELT M3; ACLED + NOAA M5; IODA added 2026-08-11 — all
-  feature-gated, credentials via env vars only where credentials exist).
+  milestone (GDELT M3; ACLED + NOAA M5; IODA 2026-08-11; Bluesky and
+  Telegram 2026-08-12 — all feature-gated, credentials via env vars only
+  where credentials exist).
   ACLED data is never redistributed — `notes` never stored, ACLED-bearing
   snapshots never served publicly.
 - No person-level identification/tracking/targeting features. Aggregate
-  signals only (H3 cells, countries).
+  signals only (H3 cells, countries). For **streaming/social sources**
+  (Bluesky, Telegram) this is enforced by construction: never
+  store a post/message, author handle/DID/user id, its text, or its URL —
+  not in the DB, not in a log, not transiently. Match text as it streams,
+  increment a counter, drop the text in the same call; persist only the
+  `(place, topic, window) -> count` rollup. Place attribution is keyword
+  matching against a real gazetteer, never NLP location inference. This
+  was a deliberate hold-the-line decision, not a default — read
+  docs/SAFETY_AND_PRIVACY.md hard rule 6 before changing anything here.
 - Store headline/URL/outlet-domain **metadata only**, never article bodies.
 - "Media attention" and "event data" are computed and displayed
   **separately**; score components are always shown, never only the
@@ -126,6 +142,35 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   `score` onto [0,1] (`weights::IODA_SCORE_FLOOR`/`IODA_SCORE_CEIL`);
   country centroid via `geo_utils::CountryIndex::centroid_by_iso_a2`
   (bundled Natural Earth data, never a hand-typed coordinate table).
+- `crates/chatter` — aggregate-before-storage machinery for streaming
+  social sources (added 2026-08-12). Place/topic word-window matching over
+  bundled Natural Earth gazetteers, an in-memory `ChatterAccumulator`, and
+  `normalize_rollup`. **This crate is a privacy boundary**: `observe` takes
+  only `(&str, ts)` so author identity cannot be passed in, and the only
+  output is a `(place, topic, window) -> count` rollup. Never add an API
+  here that accepts or returns post text or identity — SAFETY_AND_PRIVACY
+  hard rule 6, and read it before touching this crate.
+- `crates/source-bluesky` — Bluesky Jetstream (keyless, feature `live`,
+  added 2026-08-12). The only **streaming** source: a long-lived WebSocket
+  task counts into a shared accumulator and `fetch` drains **completed
+  windows only** (a half-counted window would claim its `source_event_id`
+  and lose the remainder to dedup-by-id). Uses the message's `time_us`, not
+  client-supplied `createdAt`; no cursor on reconnect (replay would
+  double-count — undercounting is the honest failure). `live_probe` example
+  checks it against the real firehose, printing aggregates only.
+- `crates/source-telegram` — Telegram public channels (credential-gated,
+  feature `live`, added 2026-08-12). MTProto via `grammers-client` (pure
+  Rust, no TDLib/C++), the only mechanism that can read a third-party public
+  channel's history without that channel's owner cooperating (a bot token
+  cannot — Telegram only delivers channel messages to a bot the channel's
+  own admin added). Poll-based like NOAA/IODA, not streamed: each cycle
+  sweeps `ALLOWED_CHANNELS` (a small, live-verified, curated allowlist —
+  excluded candidates documented by name and reason alongside it) and
+  advances a per-channel in-memory high-water mark. Login is a one-time
+  interactive step (`examples/login_setup.rs`, phone number + SMS code)
+  that saves a local SQLite session file; the real source only ever opens
+  that file, never logs in itself — a missing/unauthorized session surfaces
+  as a `fetch` error naming the setup command. Reuses `chatter` unchanged.
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).
@@ -146,8 +191,28 @@ markers; Country/Admin1 shade regions (enforced in the storage query).
   every DuckDB call (the connection is `!Sync` and blocking); each request
   opens a throwaway in-memory connection — no shared connection, no cache.
   Docker builds need `cmake` in the builder image (bundled DuckDB C++).
+- Bluesky deps: `tokio-tungstenite` 0.30 (`default-features = false`,
+  features `connect` + `rustls-tls-webpki-roots` — same rustls stack as
+  reqwest, no OpenSSL) plus `futures-util`. **Also a direct `rustls` dep
+  with the `ring` feature**: tokio-tungstenite's rustls feature pulls
+  rustls but selects *no* crypto provider, and rustls 0.23 panics on the
+  first handshake if it cannot infer one. `source-bluesky`'s graph has no
+  reqwest to supply it, so `live.rs` installs `ring` explicitly rather than
+  relying on cross-crate feature unification (which silently works in the
+  desktop binary and fails in a standalone example/test).
+- Telegram deps: `grammers-client`/`grammers-session`/`grammers-mtsender`
+  0.10 (pure Rust MTProto, no TDLib/C++). `grammers-session`'s
+  `SqliteSession` pulls in `libsql-ffi` (a real C build step, like DuckDB's
+  bundled C++ — expect a slower first cold build). `Message::date()` returns
+  plain `chrono::DateTime<Utc>` in the published 0.10.0, **not**
+  `jiff::Timestamp`: the crate's `master` branch had already migrated to
+  `jiff` when this was researched, one release ahead of what crates.io
+  actually serves. Caught by the compiler, not by re-reading source — a live
+  reminder for the next bullet.
 - When an API surprises you, read the crate source in
-  `~/.cargo/registry/src/index.crates.io-*/<crate>/` before guessing.
+  `~/.cargo/registry/src/index.crates.io-*/<crate>/` before guessing — and
+  prefer it over a repo's `master` branch, which can be ahead of what Cargo
+  actually resolved (see the grammers/jiff note above).
 
 ## Conventions
 

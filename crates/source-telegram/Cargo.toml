@@ -1,0 +1,43 @@
+[package]
+name = "source-telegram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Telegram (public channels, aggregate chatter volume) — third real-time
+# source after IODA and Bluesky, reusing `chatter` unchanged. Poll-based
+# (not streaming, unlike Bluesky): each cycle sweeps a small curated channel
+# allowlist via MTProto and drains completed chatter windows.
+#
+# Aggregate-only by construction, same as `source-bluesky`: nothing here may
+# ever return message text or author identity to a caller
+# (docs/SAFETY_AND_PRIVACY.md hard rule 6).
+
+[features]
+default = []
+live = [
+    "dep:tokio",
+    "dep:grammers-client",
+    "dep:grammers-session",
+    "dep:grammers-mtsender",
+]
+
+[dependencies]
+chatter.workspace = true
+chrono.workspace = true
+core-types.workspace = true
+tracing.workspace = true
+grammers-client = { workspace = true, optional = true }
+grammers-mtsender = { workspace = true, optional = true }
+grammers-session = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `login_setup` (one-time interactive login) only.
+dotenvy.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

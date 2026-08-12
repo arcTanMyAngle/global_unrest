@@ -13,6 +13,7 @@ members = [
     "crates/source-gdelt",
     "crates/source-ioda",
     "crates/source-noaa",
+    "crates/source-telegram",
     "crates/storage",
     "services/api",
     "services/workers",
@@ -43,6 +44,7 @@ source-fixtures = { path = "crates/source-fixtures" }
 source-gdelt = { path = "crates/source-gdelt" }
 source-ioda = { path = "crates/source-ioda" }
 source-noaa = { path = "crates/source-noaa" }
+source-telegram = { path = "crates/source-telegram" }
 storage = { path = "crates/storage" }
 
 # External crates — pinned at the workspace level; do not re-declare versions
@@ -67,6 +69,13 @@ futures-util = { version = "0.3", default-features = false }
 geo = "0.33"
 geojson = "1.0"
 governor = "0.10"
+# Telegram MTProto (source-telegram, feature `live`): pure-Rust client, no
+# TDLib/C++ dependency — keeps this workspace's "no bundled C++ beyond
+# DuckDB" posture. All grammers-* crates are one workspace and version
+# together upstream.
+grammers-client = "0.10"
+grammers-session = "0.10"
+grammers-mtsender = "0.10"
 h3o = "0.10"
 # GDELT live ingestion (M3). rustls (not native-tls) so CI stays OpenSSL-free
 # on both Windows and Linux; no default TLS/http2 pulled in.

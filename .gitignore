@@ -17,6 +17,11 @@
 /var/
 /data/
 
+# Telegram MTProto session (source-telegram) — holds a live login, treat it
+# like a credential. Covers SQLite's own -journal/-wal/-shm sidecar files.
+*.session
+*.session-*
+
 # Editor noise
 .vscode/
 .idea/

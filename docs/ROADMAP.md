@@ -3,8 +3,10 @@
 M0–M5 of [PLAN.md](PLAN.md) are complete (statuses there). This document is
 the forward plan, user-approved 2026-07-16. The visualization work has its
 own detailed design doc: **[VISUALIZATION.md](VISUALIZATION.md)** — batch V1
-shipped 2026-08-10 (see HANDOFF.md); **V2 is the next session's focus**, with
-M7 hygiene/hardening items free to interleave.
+shipped 2026-08-10 (see HANDOFF.md). The user-prioritized real-time source
+run (IODA ✅, Bluesky ✅, Telegram ✅ — all shipped 2026-08-11/12) is
+complete; **V2 is the focus now**, with M7 hygiene/hardening items free to
+interleave.
 
 ## Standing loose ends
 
@@ -80,6 +82,17 @@ perf guardrails are defined there and are binding.
   new `source-ioda` crate, feature `ioda-live` (keyless, desktop default),
   country-precision `Disruption` events with a log-scaled severity from
   IODA's unbounded anomaly score. See HANDOFF.md and CHANGELOG.md.
+- **Bluesky Jetstream chatter volume ✅ 2026-08-12** — second of the three
+  user-prioritized real-time sources. New `chatter` + `source-bluesky`
+  crates, feature `bluesky-live` (keyless, desktop default): the first
+  streaming source, publishing **aggregate chatter counts only** per
+  SAFETY_AND_PRIVACY.md hard rule 6.
+- **Telegram public-channel chatter volume ✅ 2026-08-12** — third and last
+  of the user-prioritized real-time sources. New `source-telegram` crate,
+  feature `telegram-live` (desktop default, credential-gated — needs a
+  one-time interactive login), reusing `chatter` unchanged. MTProto over a
+  small live-verified curated allowlist (`ALLOWED_CHANNELS`), poll-based
+  like NOAA/IODA rather than streamed. See HANDOFF.md.
 - walkers 0.56 slippy-tile basemap: its own design pass first —
   Web-Mercator vs equirectangular projection decision, OSM tile-policy row
   in SAFETY, online-only and clearly toggled.

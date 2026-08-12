@@ -9,12 +9,21 @@ publish.workspace = true
 # The user-facing desktop is live-only, so its authorized/keyless live source
 # adapters are included by default. Credentials remain runtime env vars.
 [features]
-default = ["acled-live", "noaa-live", "ioda-live"]
+default = ["acled-live", "noaa-live", "ioda-live", "bluesky-live", "telegram-live"]
 acled-live = ["dep:source-acled", "source-acled/live"]
 # NOAA/NWS active alerts (M5 optional layer): keyless, US coverage.
 noaa-live = ["dep:source-noaa", "source-noaa/live"]
 # IODA internet-outage events (optional layer, keyless): country-precision.
 ioda-live = ["dep:source-ioda", "source-ioda/live"]
+# Bluesky Jetstream chatter volume (optional layer, keyless): aggregate-only,
+# never individual posts (docs/SAFETY_AND_PRIVACY.md).
+bluesky-live = ["dep:source-bluesky", "source-bluesky/live"]
+# Telegram public-channel chatter volume (optional layer): aggregate-only,
+# same posture as Bluesky. Needs a one-time interactive login
+# (`cargo run -p source-telegram --features live --example login_setup`)
+# before it activates; without that it stays gracefully "off", same as ACLED
+# without credentials.
+telegram-live = ["dep:source-telegram", "source-telegram/live"]
 
 [dependencies]
 analytics.workspace = true
@@ -30,9 +39,11 @@ renderer.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 source-acled = { workspace = true, optional = true }
+source-bluesky = { workspace = true, optional = true }
 source-gdelt.workspace = true
 source-ioda = { workspace = true, optional = true }
 source-noaa = { workspace = true, optional = true }
+source-telegram = { workspace = true, optional = true }
 storage.workspace = true
 tokio.workspace = true
 tracing.workspace = true

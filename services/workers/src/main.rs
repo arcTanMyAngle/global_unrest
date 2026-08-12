@@ -35,6 +35,13 @@ const NOAA_POLL_SECS: u64 = 10 * 60;
 /// absorb any gap between polls).
 const IODA_POLL_SECS: u64 = 15 * 60;
 const IODA_LOOKBACK_HOURS: i64 = 6;
+/// Bluesky is a stream: the socket counts continuously and each cycle only
+/// drains the windows that have completed, so this is a flush cadence rather
+/// than a poll interval.
+const BLUESKY_POLL_SECS: u64 = 5 * 60;
+/// Telegram is poll-based (unlike Bluesky): each cycle sweeps a small
+/// curated channel allowlist over MTProto, same cadence as IODA.
+const TELEGRAM_POLL_SECS: u64 = 15 * 60;
 
 /// Feature-gated ACLED handle; the stub keeps the loop cfg-free (with the
 /// feature off `make()` is always `None` and `source-acled` isn't compiled).
@@ -144,6 +151,83 @@ mod ioda {
         }
         fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
             unreachable!("built without the ioda-live feature")
+        }
+    }
+}
+
+/// Feature-gated Bluesky handle — same stub pattern, except `make()` also
+/// starts the socket task, since a stream nobody started would drain empty
+/// forever without surfacing an error.
+#[cfg(feature = "bluesky-live")]
+mod bluesky {
+    pub use source_bluesky::BlueskySource;
+    pub fn make() -> Result<Option<BlueskySource>, core_types::SourceError> {
+        let src = BlueskySource::from_env()?;
+        src.spawn_stream();
+        Ok(Some(src))
+    }
+}
+#[cfg(not(feature = "bluesky-live"))]
+mod bluesky {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct BlueskySource;
+    pub fn make() -> Result<Option<BlueskySource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for BlueskySource {
+        fn id(&self) -> SourceId {
+            SourceId::Bluesky
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the bluesky-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the bluesky-live feature")
+        }
+    }
+}
+
+/// Feature-gated Telegram handle — same credential-gated stub pattern as
+/// [`acled`] (a missing session means missing setup, not a hard error).
+#[cfg(feature = "telegram-live")]
+mod telegram {
+    pub use source_telegram::TelegramSource;
+    pub fn make() -> Result<Option<TelegramSource>, core_types::SourceError> {
+        TelegramSource::from_env()
+    }
+}
+#[cfg(not(feature = "telegram-live"))]
+mod telegram {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct TelegramSource;
+    pub fn make() -> Result<Option<TelegramSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for TelegramSource {
+        fn id(&self) -> SourceId {
+            SourceId::Telegram
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the telegram-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the telegram-live feature")
         }
     }
 }
@@ -276,6 +360,46 @@ async fn run(
         tracing::info!("ioda source enabled (poll every {}s)", IODA_POLL_SECS);
     }
 
+    // Bluesky (feature-gated, keyless): aggregate chatter volume from the
+    // Jetstream firehose. Never individual posts (docs/SAFETY_AND_PRIVACY.md).
+    let bluesky_src = if online {
+        match bluesky::make() {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!(error = %e, "bluesky source init failed; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if bluesky_src.is_some() {
+        tracing::info!(
+            "bluesky source enabled (flush every {}s)",
+            BLUESKY_POLL_SECS
+        );
+    }
+
+    // Telegram (feature-gated, credential-gated): aggregate chatter volume
+    // over a curated public-channel allowlist.
+    let telegram_src = if online {
+        match telegram::make() {
+            Ok(src) => src,
+            Err(e) => {
+                tracing::warn!(error = %e, "telegram source init failed; continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if telegram_src.is_some() {
+        tracing::info!(
+            "telegram source enabled (poll every {}s)",
+            TELEGRAM_POLL_SECS
+        );
+    }
+
     let Some(gdelt) = gdelt else {
         // Fixtures-only mode never runs live loops, ACLED/NOAA/IODA included.
         return Ok(());
@@ -302,6 +426,14 @@ async fn run(
     let ioda_limiter = sched::request_limiter();
     let mut ioda_backoff = sched::Backoff::default();
     let mut ioda_next = Instant::now();
+    let bluesky_limiter = sched::request_limiter();
+    let mut bluesky_backoff = sched::Backoff::default();
+    // First flush waits a full window: draining immediately would only find
+    // an empty accumulator.
+    let mut bluesky_next = Instant::now() + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
+    let telegram_limiter = sched::request_limiter();
+    let mut telegram_backoff = sched::Backoff::default();
+    let mut telegram_next = Instant::now();
 
     loop {
         tokio::select! {
@@ -339,6 +471,26 @@ async fn run(
                 let delay = live_cycle(ioda_src, "ioda", window, IODA_POLL_SECS,
                     &ioda_limiter, &mut ioda_backoff, &store, &publish_root, keep_last).await;
                 ioda_next = Instant::now() + delay;
+            }
+            _ = sleep_until(bluesky_next), if bluesky_src.is_some() => {
+                let bluesky_src = bluesky_src.as_ref().unwrap();
+                // Nominal window: a stream has no addressable past, the
+                // accumulator holds whatever arrived since the last drain.
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::seconds(BLUESKY_POLL_SECS as i64), now);
+                let delay = live_cycle(bluesky_src, "bluesky", window, BLUESKY_POLL_SECS,
+                    &bluesky_limiter, &mut bluesky_backoff, &store, &publish_root, keep_last).await;
+                bluesky_next = Instant::now() + delay;
+            }
+            _ = sleep_until(telegram_next), if telegram_src.is_some() => {
+                let telegram_src = telegram_src.as_ref().unwrap();
+                // Nominal window: each channel's own high-water mark bounds
+                // the sweep to new messages, so the query window is unused.
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::seconds(TELEGRAM_POLL_SECS as i64), now);
+                let delay = live_cycle(telegram_src, "telegram", window, TELEGRAM_POLL_SECS,
+                    &telegram_limiter, &mut telegram_backoff, &store, &publish_root, keep_last).await;
+                telegram_next = Instant::now() + delay;
             }
         }
     }

@@ -1,35 +1,36 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-10/11 (one continuous session spanning both dates).
-**M0–M6 complete; V1 visualization batch shipped; IODA live source shipped.**
-M6 shipped everything in [docs/ROADMAP.md](docs/ROADMAP.md) except branch
-protection on `main` (manual GitHub-settings step, no authenticated `gh` on
-this machine — see "Loose ends"). This session: all four **V1** items
-(timeline histogram, spike halos, severity markers + tooltip, recency fade)
-plus a user-requested "has video" marker filter; then a new **IODA**
-internet-outage live source (`ioda-live`, keyless, country-precision) — see
-the two "what shipped" sections below.
+Last session: 2026-08-12. **M0–M6 complete; V1 visualization batch shipped;
+IODA and Bluesky live sources shipped.** This session: verified IODA live in
+the running app (the previous session's open item), then built the **Bluesky
+Jetstream** aggregate-chatter source — new `crates/chatter` (the shared
+aggregate-before-storage machinery) and `crates/source-bluesky` (the first
+*streaming* source), wired into both binaries behind `bluesky-live`.
 
-**Next session: Bluesky Jetstream, then public Telegram channels, in that
-exact order** (user's explicit sequencing) — real-time chatter-volume
-signals, **aggregate-only** (no individual posts/messages/authors ever
-stored — this is not a style choice, see "Why aggregate-only" below). Full
-design write-up: **"Next session: Bluesky Jetstream + Telegram" below** —
-read that section first, it has the concrete plan. V2 visualization
-(docs/VISUALIZATION.md) and M7 service hardening remain queued after that.
+**Next session: public Telegram channels**, reusing `crates/chatter`
+unchanged. It is blocked on **two user decisions** (which channels; bot
+token vs. personal MTProto credentials) — see "Next session: Telegram"
+below; ask those before writing code. After Telegram: V2 visualization
+(docs/VISUALIZATION.md), interleaved with M7 service hardening.
+
+**Before touching `chatter` or `source-bluesky`, read
+[docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.** The
+aggregate-only shape of these sources is a deliberate hold-the-line
+decision (see "Why aggregate-only"), not a default to relax.
+
 Read this file, then [CLAUDE.md](CLAUDE.md).
 
 ## Where things stand
 
 | | |
 |---|---|
-| Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. `origin/main` already has the V1 commits as of this session (verified via `git fetch`) — apparently pushed outside this session's tool calls, since this session never ran `git push`. The IODA commits (2, code + docs) are **local only, not pushed** — see "Loose ends." CI: `check` (fmt/clippy/test × Windows+Ubuntu), `feature-matrix` (now `acled-live`/`noaa-live`/`ioda-live`/all-three × Ubuntu), `acled-live-mock`, `compose-smoke`, `cargo-deny`. |
-| Commits | Clean PR-sized commits through M6, then 4 for V1, then 2 for IODA (code, docs) — `git log --oneline` |
-| Tests | `cargo test --workspace` green throughout (V1's new tests + IODA's new `source-ioda`/`geo-utils` tests); E2E pipeline test green; clippy `-D warnings` clean on default **and** the full 3-way feature matrix (`acled-live,noaa-live,ioda-live`, verified locally); `cargo deny check` clean |
-| Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1 or IODA — versioning is milestone-tied, not batch-tied |
-| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD`; `.env.example` is the committed template. IODA is keyless — nothing to configure. |
+| Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. **`origin/main` is behind: the 2 IODA commits, the previous handoff commit, and this session's Bluesky commits are all local-only.** The user was asked this session and chose **not** to push yet — ask again rather than pushing unprompted. CI: `check` (fmt/clippy/test × Windows+Ubuntu), `feature-matrix` (now each of `acled-live`/`noaa-live`/`ioda-live`/`bluesky-live` solo plus all four × Ubuntu), `acled-live-mock`, `compose-smoke`, `cargo-deny`. |
+| Commits | Clean PR-sized commits through M6, then 4 for V1, 2 for IODA, then this session's Bluesky set (gazetteer, `chatter`, `source-bluesky`, wiring, docs) — `git log --oneline` |
+| Tests | `cargo test --workspace` green; E2E pipeline test green; clippy `-D warnings` clean on default **and** the 4-way feature matrix (`acled-live,noaa-live,ioda-live,bluesky-live`), plus `bluesky-live` solo and `--no-default-features` |
+| Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1, IODA, or Bluesky — versioning is milestone-tied, not batch-tied |
+| Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD`; `.env.example` is the committed template. IODA and Bluesky are both keyless — nothing to configure. |
 | Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; IODA ✅ pulled forward from M8; M7/V2/M8-remainder next) |
-| **GUI live-visual verification** | **Done for V1** (real live data, screenshots — see below). **Skipped for IODA** this session — user asked to move straight to the handoff before the app was ever launched with `ioda-live` on. What *is* verified for IODA: the real endpoint via a live `curl` (logged in this session's transcript, real JSON back), and `cargo check`/`clippy`/`test` green including the full 3-way feature matrix. What's **not yet verified**: actually launching the desktop app and watching a real IODA fetch cycle complete in its logs, or seeing an IODA-sourced event render on the map. Do this first next session — it's the natural first check (`cargo run -p global-signal-desktop`, watch for `ioda source enabled`/`live cycle ok origin="ioda"` in the logs). |
+| **GUI live-visual verification** | **Done for V1** (real live data, screenshots — see below). **IODA: log-verified this session** (see "IODA verification" below) — a real fetch cycle completed in the running app. **Bluesky: verified at the data level, not in the GUI** — the real client was run against the live firehose via the `live_probe` example (5,918 posts scanned → 16 matched → 15 rollups → 15 normalized events), but the desktop app was not launched with `bluesky-live` on and no chatter event has been *seen on the map*. That's the natural first check next session. Note it takes ≥5 minutes of runtime before the first flush publishes anything, and chatter events are mostly Country precision, so they shade regions rather than appearing as markers. No screenshots were taken this session: the user was actively at the machine, and the run skill's landmine #8 says stop sending synthetic input in that case. |
 
 ## V1 — what shipped (2026-08-10, 4 PR-sized commits, see `git log`)
 
@@ -162,12 +163,115 @@ per `CONTRIBUTING.md`'s new-source checklist (see `git log` for the docs
 commit) — `docs/DATA_MODEL.md` has the fullest technical writeup if you need
 more detail than this.
 
-## Next session: Bluesky Jetstream + Telegram (in that order, aggregate-only)
+## IODA verification (2026-08-12) — the previous session's open item, closed
 
-The user wants these two next, in this exact order, as the second and third
-"real-time, ahead of mainstream media" sources. **Neither is implemented —
-this section is the design to start from**, written so this can be pasted
-into a fresh session with minimal re-derivation.
+Launched the desktop app headlessly with logs and watched a real IODA cycle
+complete:
+
+```
+INFO source_ioda::live: ioda outage events fetched records=7
+INFO global_signal_desktop::ingest: live cycle ok records=6 origin="ioda"
+INFO storage: ingest complete inserted=6 duplicates=0 failures=1 pruned=0
+```
+
+The `failures=1` is **the designed path, not a bug**, and it's worth knowing
+why before someone "fixes" it. The same 6-hour window fetched by hand
+returned 7 events, one of them `country/VG` (British Virgin Islands).
+Natural Earth's 1:110m set has ~177 countries and does not include VG, so
+normalization fails into `ingest_log` rather than inventing a coordinate —
+exactly the documented behaviour. Expect a steady trickle of these for small
+territories. If that ever becomes annoying, the fix is bundling `ne_50m`
+rather than hand-typing a fallback table.
+
+## Bluesky — what shipped (2026-08-12)
+
+New `crates/chatter` + `crates/source-bluesky`, feature `bluesky-live`
+(keyless, desktop default), wired into both binaries. Second of the three
+user-prioritized real-time sources. Full technical writeup:
+`docs/DATA_MODEL.md` § "Chatter normalization"; policy in
+`docs/SAFETY_AND_PRIVACY.md` hard rule 6.
+
+**Verified against the real thing, twice.** The endpoint and exact message
+schema came from a live socket capture *before* any Rust was written (the
+same discipline IODA got), and then the finished client was run against the
+live firehose via the committed `live_probe` example:
+
+```
+cargo run -p source-bluesky --features live --example live_probe -- 120
+scanned 5918 posts, matched 16 (0.270%)  ->  15 rollups, 15 events
+```
+
+Results were plausible (Colombia+earthquake, Ukraine+strike, Athens+flood,
+Chicago+flood). **0.27% is the honest hit rate** — worth remembering before
+anyone assumes the source is broken because a quiet window produces nothing.
+
+### Design decisions worth knowing about
+
+- **A stream behind a poll interface.** `SignalSource` is fetch-a-window
+  shaped, and Bluesky is not. Rather than adding a new source shape, the
+  socket task counts continuously into a shared accumulator and `fetch()`
+  drains it, so `ingest.rs`'s select loop needed no new structure — just
+  another arm identical to NOAA/IODA's.
+- **Only *completed* windows drain.** This one is subtle and was a real bug
+  caught during wiring. `source_event_id` is `{place}-{topic}-{window_start}`,
+  so a mid-window drain publishes a partial count under an id that the
+  window's remainder would later collide with — and dedup-by-id would
+  silently drop those posts. `drain_completed(now)` leaves the in-progress
+  window accumulating. Do not "simplify" this back to a plain drain.
+- **`time_us`, not `createdAt`.** The record's `createdAt` is written by the
+  posting client and can be backdated, wrong, or in the future; `time_us` is
+  the firehose's own ordering clock.
+- **No cursor on reconnect.** Jetstream can replay from a `time_us` cursor,
+  but replayed posts would be counted twice and inflate the aggregates. A
+  gap while disconnected undercounts instead — the honest direction to fail.
+- **Place *and* topic both required.** This is the main false-positive
+  defence, not a filter refinement: a place name alone matches recipes and
+  given names. One place and one topic per post (leftmost, longest) so a
+  widely-shared multi-country post can't inflate several aggregates.
+- **Named ambiguity list.** `AMBIGUOUS_TOKENS` drops `male` (Malé, which
+  Natural Earth itself ASCII-folds into the English word), plus `chad`,
+  `jordan`, `georgia`. "us" is deliberately *not* a United States alias.
+  Countries beat cities on token collisions ("Panama").
+- **Chatter is attention, never an event.** Rollups are
+  `EventKind::NewsAttention` with the post count in `article_count`, so they
+  feed the attention component and never the unrest one.
+  `location_confidence` is 0.5, saying in the number the UI already shows
+  that keyword matching is crude.
+
+### Landmine found here: rustls needs an explicit crypto provider
+
+`tokio-tungstenite`'s rustls feature pulls rustls but selects **no** crypto
+provider, and rustls 0.23 panics on the first handshake if it can't infer
+one. `source-bluesky`'s dependency graph has no `reqwest` to supply it, so
+`live.rs` installs `ring` explicitly. This is the nasty kind of bug: feature
+unification means it would have *appeared* to work inside the desktop binary
+(which links reqwest) while failing in any standalone example or test.
+Caught by running the probe, not by reading code.
+
+## Next session: Telegram (aggregate-only, reusing `chatter`)
+
+The third real-time source. `crates/chatter` was built to be reused
+unchanged — a Telegram source needs only its own message-fetching path plus
+`ChatterAccumulator::observe` + `drain_completed`, then the same cfg-stub
+wiring `bluesky` uses in `ingest.rs` and `services/workers/src/main.rs`.
+
+**Ask the user these two questions before writing code** (they were flagged
+as decisions in the previous handoff and are still open):
+
+1. **Which specific channels** — a small explicit curated allowlist (known
+   conflict/OSINT-monitoring channels), not open crawling. Reading public
+   channels with an explicit allowlist is a materially different posture
+   from scraping, but it's still a real list someone has to choose.
+2. **Credential path** — a bot token (can only read channels it has been
+   added to as admin) vs. a personal account's MTProto API id/hash (can read
+   any public channel's history, but ties ingestion to a real Telegram
+   account). Don't default to the personal-account path; it's the more
+   invasive of the two.
+
+Note Telegram differs from Bluesky in one way that matters: it is
+**poll-based**, not streaming, so it does *not* need the spawn-a-socket
+pattern — it can use `live_cycle` directly like NOAA/IODA, with the
+accumulator filled during `fetch` rather than by a background task.
 
 ### Why aggregate-only (read this before writing any code here)
 
@@ -336,19 +440,29 @@ README; no second attempt was made this session.
 - **`compose-smoke` untested locally** — validated the YAML and the logic
   by hand (no local docker CLI, unchanged from prior sessions); first real
   run will be on CI's next push.
-- **IODA commits not pushed to origin** — the V1 commits reached
-  `origin/main` somehow during this session (confirmed via `git fetch`;
-  this session never ran `git push` itself), but the 2 IODA commits (code,
-  docs) are local-only as of session end. `git push` when ready — CI will
-  run the same gates verified locally this session, now including the
-  3-way feature matrix.
-- **IODA never actually launched in the running app this session** — see
-  the "GUI live-visual verification" row above. Do this first next session.
-- **README screenshot not refreshed for V1 or IODA** — `assets/screenshots/
-  map-overview.png` still shows the pre-V1 map (bare slider, no halos, no
-  IODA-shaded regions). VISUALIZATION.md's own guardrail says shipped views
-  should get a screenshot; deferred this session — worth doing next session
-  or on request.
+- **Nothing is pushed to origin** — the 2 IODA commits, the previous
+  handoff commit, and all of this session's Bluesky commits are local-only.
+  The user was asked directly this session and chose "not yet", so **ask
+  before pushing**; don't treat it as a pending chore to clear. When it
+  happens, CI runs the same gates verified locally, now including the
+  4-way feature matrix.
+- **Dependabot PRs are open on origin** — `git fetch` this session showed
+  two new remote branches (`dependabot/cargo/...`,
+  `dependabot/github_actions/...`). Nobody has looked at them. Note the
+  standing rule that `wgpu` must not be bumped independently of `eframe`.
+- **Bluesky not yet seen rendering on the map** — see the GUI row above.
+  Data-level verification is done; the visual check is the natural first
+  task next session (allow ≥5 min for the first flush).
+- **No Bluesky mock-server test** — `source-acled` has one
+  (`--features live`), and the equivalent for Bluesky would be a local
+  WebSocket server driving `run_once`. `LES_BLUESKY_ENDPOINT` already
+  exists to point the client at one; the parsing/counting path is covered
+  by unit tests, but the socket/reconnect path is only covered by the
+  manual probe. Worth adding when the streaming path next changes.
+- **README screenshot not refreshed for V1, IODA, or Bluesky** —
+  `assets/screenshots/map-overview.png` still shows the pre-V1 map (bare
+  slider, no halos). VISUALIZATION.md's guardrail says shipped views should
+  get a screenshot; deferred again — worth doing next session or on request.
 
 ## Next up — professional-level roadmap (user-approved)
 
@@ -356,10 +470,9 @@ Canonical version: **[docs/ROADMAP.md](docs/ROADMAP.md)** (+
 [docs/VISUALIZATION.md](docs/VISUALIZATION.md) for the V1–V3 view batches,
 which take priority per the user). Summary:
 
-- **Real-time signal sources (immediate next, user-prioritized)**: IODA ✅
-  shipped this session; **Bluesky Jetstream, then Telegram, in that order**
-  — see "Next session: Bluesky Jetstream + Telegram" above for the full
-  design (aggregate-only, both queued not implemented).
+- **Real-time signal sources (user-prioritized)**: IODA ✅, Bluesky ✅,
+  **Telegram next** — see "Next session: Telegram" above (aggregate-only,
+  reuses `crates/chatter`, blocked on two user decisions).
 - **V1–V3 visualization batches**: timeline histogram + spike halos +
   severity markers + recency fade (V1) ✅ shipped this session (see "V1 —
   what shipped" above). **V2 next** (after the two social sources above) —
@@ -381,6 +494,22 @@ which take priority per the user). Summary:
   benches in CI.
 
 ## Landmines and quirks (learned the hard way)
+
+- **rustls 0.23 needs an explicit crypto provider (Bluesky)**: see the
+  Bluesky section above. The trap is that cross-crate feature unification
+  hides it — the desktop binary links `reqwest`, which enables `ring`, so
+  the socket would work there while any standalone example/test in
+  `source-bluesky` panics on the first handshake. Install the provider
+  explicitly in the crate that needs it.
+- **Aggregate-before-storage sources and dedup-by-id (Bluesky)**: when a
+  source derives `source_event_id` from a time window, it must publish that
+  window **once, complete**. Publishing a partial window claims the id, and
+  storage's dedup-by-id then silently discards the remainder. Any future
+  source of this shape (Telegram) inherits the hazard.
+- **Verifying a streaming API**: a plain `curl` can't check a WebSocket, but
+  .NET's `ClientWebSocket` from PowerShell can, and it took ~15 lines to
+  capture the real Jetstream message schema before writing any Rust. Use it
+  rather than trusting a documented schema — the same rule IODA established.
 
 - **Researching a new live API (IODA)**: the provider's own docs pages were
   a JS SPA — `WebFetch` got an empty shell every time, no matter the URL.
@@ -458,6 +587,59 @@ which take priority per the user). Summary:
   needed beyond what `map_view.rs`'s pan/zoom handling and
   `draw_cell_outline`'s per-frame `Shape` painting already established.
 
+## Token management for the next session (learned here, repo-specific)
+
+This repo is large and its files are long; most waste comes from reading
+more than needed and from polling slow builds. What worked:
+
+**Map before you read.** Never open a big source file to find one type.
+Get a line-number map first, then read only that range:
+
+```powershell
+Select-String -Path crates\core-types\src\lib.rs -Pattern '^pub (struct|enum|fn|const|trait)|^impl ' |
+  ForEach-Object { "{0,5}: {1}" -f $_.LineNumber, $_.Line }
+```
+
+**Avoid wide `Grep -A/-C` on core files.** A `Grep` with `-A 42` across
+`core-types` this session returned 23.7 KB and got spilled to a file —
+strictly worse than the map-then-`Read` pattern above. Keep context windows
+to `-C 3` unless you know the match count is small.
+
+**Never poll a `cargo` build.** Cold/feature-matrix builds here run 5–15
+minutes (bundled DuckDB C++, eframe). Start them with
+`run_in_background: true` and *wait for the completion notification* — each
+manual status check costs a round trip and returns nothing useful. Batch the
+whole gate set into one background command that echoes `$LASTEXITCODE` after
+each step, then read the exit codes once.
+
+**Scope gates while iterating, run the full set once.** `cargo clippy -p
+<crate>` during development; the workspace-wide clippy and the feature
+matrix only before committing. A full-workspace clippy after every edit is
+the single biggest time/token sink in this repo.
+
+**Commit messages via `-F <file>`.** PowerShell parses `git commit -m @'`
+as splatting and mangles the here-string (it failed that way this session).
+`Write` the message to the scratchpad and `git commit -F` it — one attempt,
+no retry loop, and long structured messages stay intact.
+
+**Verify live APIs directly, not through a summarizing tool.** One
+`Invoke-RestMethod` (or `ClientWebSocket`) returns the exact shape in a few
+lines; `WebFetch` costs a model call and paraphrases. Both IODA and Bluesky
+were pinned down this way.
+
+**Read only `HANDOFF.md` + `CLAUDE.md` to start.** They are maintained to
+make re-reading the crates unnecessary; if something in them is stale, fix
+it there rather than compensating by reading more code.
+
+**On offloading to another model** (the user has Gemini and a `gemini`/
+`codex` CLI on this machine): there is no browser tool in this harness, so
+`gemini.google.com` cannot be driven directly — the installed `gemini` CLI
+is the deterministic equivalent. It is worth it for self-contained research
+with a compact answer (API schemas, "what changed in crate X"). It is *not*
+worth it for editing this codebase: the conventions here (privacy rules,
+comment style, named-constant discipline, precision contract) take more
+context to convey than the edit saves.
+
 ## Quality gates (run after every step; CI runs the same, plus more)
 
 ```sh
@@ -473,6 +655,15 @@ crate, also run the M5 feature matrix (CI's `feature-matrix` job does this
 automatically, but it's fast enough to run locally too):
 
 ```sh
-cargo clippy -p global-signal-desktop -p workers --features acled-live,noaa-live --all-targets -- -D warnings
-cargo test -p global-signal-desktop -p workers --features acled-live,noaa-live
+cargo clippy -p global-signal-desktop -p workers --features acled-live,noaa-live,ioda-live,bluesky-live --all-targets -- -D warnings
+cargo test -p global-signal-desktop -p workers --features acled-live,noaa-live,ioda-live,bluesky-live
+# and at least one solo-feature leg, since the desktop enables all by default:
+cargo clippy -p global-signal-desktop -p workers --no-default-features --features bluesky-live --all-targets -- -D warnings
+```
+
+Manual live check for the streaming source (not part of CI; prints
+aggregate counts only, never post text):
+
+```sh
+cargo run -p source-bluesky --features live --example live_probe -- 60
 ```

@@ -53,6 +53,7 @@ pub enum SourceId {
     Noaa,
     Ioda,
     Bluesky,
+    Telegram,
 }
 
 impl SourceId {
@@ -64,6 +65,7 @@ impl SourceId {
             SourceId::Noaa => "noaa",
             SourceId::Ioda => "ioda",
             SourceId::Bluesky => "bluesky",
+            SourceId::Telegram => "telegram",
         }
     }
 
@@ -75,6 +77,7 @@ impl SourceId {
             "noaa" => Some(SourceId::Noaa),
             "ioda" => Some(SourceId::Ioda),
             "bluesky" => Some(SourceId::Bluesky),
+            "telegram" => Some(SourceId::Telegram),
             _ => None,
         }
     }

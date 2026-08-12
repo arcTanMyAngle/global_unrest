@@ -156,9 +156,43 @@ impl ChatterAccumulator {
         true
     }
 
-    /// Drain the counters into rollups, emptying the accumulator.
-    pub fn drain(&mut self) -> Vec<ChatterRollup> {
+    /// Drain the counters for every window that has **finished** by `now`,
+    /// leaving the in-progress window still accumulating.
+    ///
+    /// Completed-only is a correctness requirement, not tidiness. A rollup's
+    /// derived event id is `(place, topic, window_start)`, so publishing a
+    /// half-counted window would claim that id; the rest of that window would
+    /// then be discarded by storage's dedup-by-id and those posts would
+    /// vanish. Draining whole windows only means every window is published
+    /// exactly once, with its full count, no matter how often this is called.
+    pub fn drain_completed(&mut self, now: DateTime<Utc>) -> Vec<ChatterRollup> {
+        let cutoff = window_start(now.timestamp(), self.window_secs);
+        // BTreeMap ordering is by (place, topic, window), so a completed
+        // window cannot be found by a range scan — partition explicitly.
+        let mut completed = std::collections::BTreeMap::new();
+        let mut pending = std::collections::BTreeMap::new();
+        for (key, count) in std::mem::take(&mut self.counts) {
+            if key.2 < cutoff {
+                completed.insert(key, count);
+            } else {
+                pending.insert(key, count);
+            }
+        }
+        self.counts = pending;
+        self.rollups_from(completed)
+    }
+
+    /// Drain everything, finished or not. Tests and shutdown paths only —
+    /// live callers want [`ChatterAccumulator::drain_completed`].
+    pub fn drain_all(&mut self) -> Vec<ChatterRollup> {
         let counts = std::mem::take(&mut self.counts);
+        self.rollups_from(counts)
+    }
+
+    fn rollups_from(
+        &self,
+        counts: std::collections::BTreeMap<(usize, usize, i64), u32>,
+    ) -> Vec<ChatterRollup> {
         counts
             .into_iter()
             .map(|((place_idx, topic_idx, window), post_count)| {
@@ -352,7 +386,7 @@ mod tests {
         // Same window, different topic.
         acc.observe("flooding in Kyiv", ts(1_000));
 
-        let rollups = acc.drain();
+        let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 3);
         let protest_first: Vec<_> = rollups
             .iter()
@@ -365,8 +399,32 @@ mod tests {
 
         // Draining empties the accumulator; the running totals survive.
         assert_eq!(acc.pending(), 0);
-        assert!(acc.drain().is_empty());
+        assert!(acc.drain_all().is_empty());
         assert_eq!(acc.matched(), 4);
+    }
+
+    #[test]
+    fn drain_completed_leaves_the_in_progress_window_alone() {
+        let mut acc = accumulator();
+        // Window [900, 1200) is finished; [1200, 1500) is still running.
+        acc.observe("protest in Kyiv", ts(1_000));
+        acc.observe("protest in Kyiv", ts(1_250));
+
+        let now = ts(1_300);
+        let first = acc.drain_completed(now);
+        assert_eq!(first.len(), 1, "only the finished window drains");
+        assert_eq!(first[0].window_start_epoch_s, 900);
+
+        // Draining again mid-window publishes nothing, so the running window
+        // cannot be published half-counted and then lost to dedup-by-id.
+        assert!(acc.drain_completed(now).is_empty());
+
+        // More posts land in the still-open window and are not lost.
+        acc.observe("protest in Kyiv", ts(1_400));
+        let second = acc.drain_completed(ts(1_600));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].window_start_epoch_s, 1_200);
+        assert_eq!(second[0].post_count, 2, "both posts in that window");
     }
 
     #[test]
@@ -374,7 +432,7 @@ mod tests {
         let mut acc = accumulator();
         // Three places and two topics in one post still counts exactly once.
         acc.observe("protest and flooding in Kyiv, Berlin and Sudan", ts(0));
-        let rollups = acc.drain();
+        let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].post_count, 1);
     }

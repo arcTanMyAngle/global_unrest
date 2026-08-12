@@ -45,6 +45,55 @@ const NOAA_POLL_SECS: u64 = 10 * 60;
 const IODA_POLL_SECS: u64 = 15 * 60;
 const IODA_LOOKBACK_HOURS: i64 = 6;
 
+/// Feature-gated Telegram handle — same credential-gated stub pattern as
+/// [`acled`] (a missing session means missing setup, not a hard error).
+#[cfg(feature = "telegram-live")]
+mod telegram {
+    pub use source_telegram::TelegramSource;
+    pub const BUILT: bool = true;
+    pub fn make() -> Result<Option<TelegramSource>, core_types::SourceError> {
+        TelegramSource::from_env()
+    }
+}
+#[cfg(not(feature = "telegram-live"))]
+mod telegram {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct TelegramSource;
+    pub const BUILT: bool = false;
+    pub fn make() -> Result<Option<TelegramSource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for TelegramSource {
+        fn id(&self) -> SourceId {
+            SourceId::Telegram
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the telegram-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the telegram-live feature")
+        }
+    }
+}
+
+/// Bluesky is a *stream*, not a feed: the socket task counts continuously and
+/// each "poll" only drains what it counted. Draining on the accumulator's own
+/// flush cadence keeps at most one partial window pending at a time.
+const BLUESKY_POLL_SECS: u64 = 5 * 60;
+
+/// Telegram is poll-based (unlike Bluesky): each cycle sweeps a small
+/// curated channel allowlist over MTProto. Kept well clear of flood limits —
+/// eight channels every 15 minutes, same cadence as IODA.
+const TELEGRAM_POLL_SECS: u64 = 15 * 60;
+
 /// Feature-gated ACLED handle. The stub keeps the ingest loop cfg-free: with
 /// the feature off `make()` is always `None`, so the ACLED select arm is dead
 /// code that still typechecks, and `source-acled` is not compiled at all.
@@ -156,6 +205,48 @@ mod ioda {
         }
         fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
             unreachable!("built without the ioda-live feature")
+        }
+    }
+}
+
+/// Feature-gated Bluesky handle — same stub pattern, with one difference:
+/// `make()` also starts the long-lived socket task, because a stream that is
+/// never started would drain empty forever with no visible error.
+#[cfg(feature = "bluesky-live")]
+mod bluesky {
+    pub use source_bluesky::BlueskySource;
+    pub fn make() -> Result<Option<BlueskySource>, core_types::SourceError> {
+        let src = BlueskySource::from_env()?;
+        // Detached on purpose: it reconnects on its own and lives as long as
+        // the worker's runtime.
+        src.spawn_stream();
+        Ok(Some(src))
+    }
+}
+#[cfg(not(feature = "bluesky-live"))]
+mod bluesky {
+    use core_types::{
+        GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
+        SourceId, TimeWindow,
+    };
+
+    pub struct BlueskySource;
+    pub fn make() -> Result<Option<BlueskySource>, SourceError> {
+        Ok(None)
+    }
+    impl SignalSource for BlueskySource {
+        fn id(&self) -> SourceId {
+            SourceId::Bluesky
+        }
+        async fn fetch(
+            &self,
+            _: TimeWindow,
+            _: &SourceFilters,
+        ) -> Result<Vec<RawRecord>, SourceError> {
+            unreachable!("built without the bluesky-live feature")
+        }
+        fn normalize(&self, _: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
+            unreachable!("built without the bluesky-live feature")
         }
     }
 }
@@ -330,6 +421,42 @@ async fn worker(
     let mut ioda_next = Instant::now();
     let mut ioda_status = SourceStatus::offline("IODA");
 
+    // Bluesky (feature-gated, keyless): aggregate chatter volume. `make()`
+    // already started the socket; these cycles only drain what it counted, so
+    // the first drain waits a full flush window rather than firing instantly
+    // on an empty accumulator.
+    let bluesky_src = match bluesky::make() {
+        Ok(src) => src,
+        Err(e) => {
+            tracing::warn!(error = %e, "bluesky source init failed; continuing without it");
+            None
+        }
+    };
+    let bluesky_limiter = sched::request_limiter();
+    let mut bluesky_backoff = sched::Backoff::default();
+    let mut bluesky_next = Instant::now() + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
+    let mut bluesky_status = SourceStatus::offline("Bluesky");
+
+    // Telegram (feature-gated, credential-gated): aggregate chatter volume
+    // over a curated public-channel allowlist.
+    let telegram_src = match telegram::make() {
+        Ok(src) => src,
+        Err(e) => {
+            tracing::warn!(error = %e, "telegram source init failed; continuing without it");
+            None
+        }
+    };
+    let telegram_limiter = sched::request_limiter();
+    let mut telegram_backoff = sched::Backoff::default();
+    let mut telegram_next = Instant::now();
+    let mut telegram_status = SourceStatus::offline("Telegram");
+    if telegram::BUILT && telegram_src.is_none() {
+        telegram_status.detail =
+            "off — set TELEGRAM_API_ID / TELEGRAM_API_HASH and run login_setup".into();
+        let _ = tx.send(IngestMsg::Status(telegram_status.clone()));
+        wake();
+    }
+
     loop {
         tokio::select! {
             ctl = rx_ctl.recv() => match ctl {
@@ -340,6 +467,8 @@ async fn worker(
                     acled_status.online = on && acled_src.is_some();
                     noaa_status.online = on && noaa_src.is_some();
                     ioda_status.online = on && ioda_src.is_some();
+                    bluesky_status.online = on && bluesky_src.is_some();
+                    telegram_status.online = on && telegram_src.is_some();
                     if on {
                         status.detail = "online — fetching…".into();
                         status.partial = false;
@@ -359,6 +488,19 @@ async fn worker(
                             ioda_status.partial = false;
                             ioda_next = Instant::now();
                         }
+                        if bluesky_src.is_some() {
+                            // Counting resumes immediately, but a drain now
+                            // would publish a stub window; wait one cadence.
+                            bluesky_status.detail = "online — counting…".into();
+                            bluesky_status.partial = false;
+                            bluesky_next = Instant::now()
+                                + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
+                        }
+                        if telegram_src.is_some() {
+                            telegram_status.detail = "online — fetching…".into();
+                            telegram_status.partial = false;
+                            telegram_next = Instant::now();
+                        }
                     } else {
                         backoff.reset();
                         status.degraded = false;
@@ -369,6 +511,8 @@ async fn worker(
                             (&mut acled_backoff, &mut acled_status),
                             (&mut noaa_backoff, &mut noaa_status),
                             (&mut ioda_backoff, &mut ioda_status),
+                            (&mut bluesky_backoff, &mut bluesky_status),
+                            (&mut telegram_backoff, &mut telegram_status),
                         ] {
                             b.reset();
                             s.degraded = false;
@@ -387,6 +531,12 @@ async fn worker(
                     if ioda_src.is_some() {
                         let _ = tx.send(IngestMsg::Status(ioda_status.clone()));
                     }
+                    if bluesky_src.is_some() {
+                        let _ = tx.send(IngestMsg::Status(bluesky_status.clone()));
+                    }
+                    if telegram_src.is_some() {
+                        let _ = tx.send(IngestMsg::Status(telegram_status.clone()));
+                    }
                     wake();
                 }
                 Some(Ctl::FetchNow) => {
@@ -400,6 +550,14 @@ async fn worker(
                         }
                         if ioda_src.is_some() {
                             ioda_next = Instant::now();
+                        }
+                        if bluesky_src.is_some() {
+                            // Safe to drain early: only completed windows are
+                            // published, so nothing is half-counted.
+                            bluesky_next = Instant::now();
+                        }
+                        if telegram_src.is_some() {
+                            telegram_next = Instant::now();
                         }
                     }
                 }
@@ -435,6 +593,26 @@ async fn worker(
                 let delay = live_cycle(ioda_src, "ioda", window, IODA_POLL_SECS,
                     &ioda_limiter, &mut ioda_backoff, &mut ioda_status, &tx, &wake).await;
                 ioda_next = Instant::now() + delay;
+            }
+            _ = sleep_until(bluesky_next), if online && bluesky_src.is_some() => {
+                let bluesky_src = bluesky_src.as_ref().unwrap();
+                // Nominal window: draining a stream has no addressable past,
+                // the accumulator simply holds everything since the last drain.
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::seconds(BLUESKY_POLL_SECS as i64), now);
+                let delay = live_cycle(bluesky_src, "bluesky", window, BLUESKY_POLL_SECS,
+                    &bluesky_limiter, &mut bluesky_backoff, &mut bluesky_status, &tx, &wake).await;
+                bluesky_next = Instant::now() + delay;
+            }
+            _ = sleep_until(telegram_next), if online && telegram_src.is_some() => {
+                let telegram_src = telegram_src.as_ref().unwrap();
+                // Nominal window: each channel's own high-water mark bounds
+                // the sweep to new messages, so the query window is unused.
+                let now = Utc::now();
+                let window = TimeWindow::new(now - ChronoDuration::seconds(TELEGRAM_POLL_SECS as i64), now);
+                let delay = live_cycle(telegram_src, "telegram", window, TELEGRAM_POLL_SECS,
+                    &telegram_limiter, &mut telegram_backoff, &mut telegram_status, &tx, &wake).await;
+                telegram_next = Instant::now() + delay;
             }
         }
     }

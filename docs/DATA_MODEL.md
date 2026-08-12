@@ -105,6 +105,90 @@ source from the others:
 the existing theme filter doubles as provenance filtering (which detection
 method/data source flagged the outage) without any new schema.
 
+## Chatter normalization (Bluesky, and any future social stream)
+
+Streaming social sources invert the usual pipeline. Every other source
+stores one `GeoTemporalEvent` per upstream record and lets
+`storage::score_buckets` aggregate later; chatter sources aggregate
+**before** storage and persist only the rollup. That inversion is required
+by hard rule 6 in [SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md), not chosen
+for performance.
+
+`crates/chatter` owns the shared machinery (`source-bluesky` is its first
+user; `source-telegram` its second, unchanged — Telegram needed no changes
+to `chatter` at all):
+
+- **`ChatterRollup` is the privacy boundary.** It is a count for a
+  `(place, topic, window)` triple — `place_name`, `country_iso`, lat/lon,
+  precision, `topic`, `window_start_epoch_s`, `window_secs`, `post_count`.
+  There is deliberately no field for post text, author identity, or a URL,
+  and `RawRecord::excerpt` formats the chatter line by hand rather than
+  deriving `Debug`, so a future field cannot start leaking into
+  `ingest_log`.
+- **Matching requires a place *and* a topic.** Post text is tokenized into
+  lowercase words and scanned with a 1..=N word window against a place
+  table (Natural Earth country names + aliases + the 1:110m populated-places
+  gazetteer) and a fixed topic-keyword table (`chatter::topic::TOPICS`,
+  seeded from the same signal classes the GDELT DOC query tracks). Requiring
+  both is the main false-positive defence — a place name alone matches
+  recipes and given names. One place and one topic per post (leftmost,
+  longest match), so a widely-shared multi-country post cannot inflate
+  several aggregates at once. Measured against the live firehose: 5,918
+  posts scanned, 16 matched (0.27%).
+- **Named judgment calls.** Countries beat cities on a token collision
+  ("Panama" the country, not Panama City). `AMBIGUOUS_TOKENS` drops
+  `male`/`chad`/`jordan`/`georgia` — real collisions with an English word
+  and common given names. "us" is deliberately not a United States alias.
+  Aliases add spellings only; coordinates always come from bundled geometry.
+- **Chatter is attention, not an event.** Rollups normalize to
+  `EventKind::NewsAttention` with `post_count` in `article_count`, so they
+  count in the attention component and never in the unrest component —
+  the same class as GDELT article counts. `location_confidence` is 0.5,
+  stating in the number the UI already shows that keyword place-matching is
+  crude. `themes` is `["chatter", <topic>]`.
+- **Only completed windows are published.** `source_event_id` is
+  `{place}-{topic}-{window_start}`, so publishing a half-counted window
+  would claim that id and the remainder would then be dropped by
+  dedup-by-id. `ChatterAccumulator::drain_completed(now)` leaves the
+  in-progress window accumulating; every window is published exactly once
+  with its full count, however often a drain is called.
+
+### Telegram (`source-telegram`) — the same rollup, a different mechanism
+
+Where Bluesky is a keyless public firehose, Telegram has none: reading a
+public channel's history requires a real MTProto session (a phone-number
+account — Telegram's Bot API only delivers messages from channels its own
+admin added the bot to, which rules out reading a third party's channel).
+`crates/source-telegram` uses `grammers-client` (pure Rust, no TDLib/C++
+dependency) purely to *read*: it never posts, never joins a channel, and
+never touches anything outside `ALLOWED_CHANNELS`.
+
+- **Poll-based, not streaming.** Unlike Bluesky's long-lived socket, each
+  poll cycle (`TELEGRAM_POLL_SECS`, 15 minutes) sweeps
+  `source_telegram::ALLOWED_CHANNELS` — a small, live-verified, curated
+  allowlist, documented with excluded candidates and reasons right next to
+  it — resolving each by username and walking new messages via MTProto's
+  `iter_messages`.
+- **A per-channel high-water mark, not a cursor.** Each channel tracks the
+  highest message id already processed (in memory only, not persisted); a
+  poll only walks messages newer than that. A restart re-sweeps a bounded
+  number of recent messages per channel, but any chatter window that had
+  already published re-derives the same `source_event_id` and is discarded
+  by storage's dedup-by-id — safe, just occasionally redundant work, never
+  double counted (the same corrections-reuse-ids behavior ACLED relies on).
+- **Login is a one-time, out-of-band step.** Telegram account login needs a
+  phone number and an SMS/app code — not something a long-lived worker or
+  GUI app can do for itself. `examples/login_setup.rs` is a small
+  interactive tool: run it once, it saves a local SQLite session file at
+  `LES_TELEGRAM_SESSION_FILE`. `TelegramSource` only ever *opens* that file;
+  if it's missing or not yet authorized, `fetch` returns a clear error
+  naming the setup command rather than trying to prompt for input from
+  inside a GUI app. `TELEGRAM_API_HASH` is read only by that setup tool,
+  never by the routine polling path.
+- **Same privacy boundary as Bluesky.** Message text goes straight into
+  `ChatterAccumulator::observe` and is dropped in the same call; nothing in
+  this crate returns message text, sender identity, or a message URL.
+
 ## RegionBucket
 
 Aggregate keyed by `(h3_cell res 3, bucket_start)` with a **6-hour** bucket.

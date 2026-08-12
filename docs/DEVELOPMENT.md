@@ -40,6 +40,10 @@ cargo test --workspace
 | `LES_ACLED_WINDOW` | Fixed `YYYY-MM-DD\|YYYY-MM-DD` fetch window (inclusive) replacing the rolling 14-day lookback — for date-restricted ACLED tiers (e.g. accounts limited to events older than 12 months). |
 | `LES_NOAA_ENDPOINT` | Point the NOAA alerts adapter at a local/mock server (testing). |
 | `LES_IODA_ENDPOINT` | Point the IODA outage-events adapter at a local/mock server (testing). IODA itself is keyless — no credential env vars needed. |
+| `LES_BLUESKY_ENDPOINT` | Pin the Jetstream WebSocket to one endpoint (e.g. a local mock) instead of rotating the public instances. Bluesky is keyless — no credential env vars. |
+| `LES_BLUESKY_WINDOW_SECS` | Chatter aggregation window, default 300. Only whole completed windows are ever published, so this also sets how long a burst takes to appear. |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | MTProto app credentials from [my.telegram.org](https://my.telegram.org) for a dedicated account (feature `telegram-live`) — not a bot token. `TELEGRAM_API_HASH` is only read by the one-time `login_setup` example, never by the running source. Never committed; see `.env.example`. |
+| `LES_TELEGRAM_SESSION_FILE` | Path to the local SQLite session file created by `cargo run -p source-telegram --features live --example login_setup`. Treat it like a credential — it holds a live login (gitignored). |
 
 ## Where data lives
 

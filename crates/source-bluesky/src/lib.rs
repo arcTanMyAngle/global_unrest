@@ -149,7 +149,7 @@ mod tests {
             observe_message(&post_message("huge protest in Kyiv today"), &mut a),
             MessageOutcome::Scanned { matched: true }
         );
-        let rollups = a.drain();
+        let rollups = a.drain_all();
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].place_name, "Kyiv");
         assert_eq!(rollups[0].topic, "protest");
@@ -165,7 +165,7 @@ mod tests {
         );
         assert_eq!(a.scanned(), 1);
         assert_eq!(a.matched(), 0);
-        assert!(a.drain().is_empty());
+        assert!(a.drain_all().is_empty());
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
         let stream_ts = message_time(&msg).unwrap();
         let mut a = acc();
         observe_message(&msg, &mut a);
-        let rollups = a.drain();
+        let rollups = a.drain_all();
         assert_eq!(
             rollups[0].window_start_epoch_s,
             chatter::window_start(stream_ts.timestamp(), DEFAULT_WINDOW_SECS)

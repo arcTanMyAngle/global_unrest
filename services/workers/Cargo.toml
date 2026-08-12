@@ -19,11 +19,20 @@ acled-live = ["dep:source-acled", "source-acled/live"]
 noaa-live = ["dep:source-noaa", "source-noaa/live"]
 # IODA internet-outage events (optional layer, keyless): country-precision.
 ioda-live = ["dep:source-ioda", "source-ioda/live"]
+# Bluesky Jetstream chatter volume (optional layer, keyless): aggregate-only,
+# never individual posts (docs/SAFETY_AND_PRIVACY.md).
+bluesky-live = ["dep:source-bluesky", "source-bluesky/live"]
+# Telegram public-channel chatter volume (optional layer): aggregate-only,
+# same posture as Bluesky. Needs a one-time interactive login (see
+# crates/source-telegram/examples/login_setup.rs) before it activates.
+telegram-live = ["dep:source-telegram", "source-telegram/live"]
 
 [dependencies]
 source-acled = { workspace = true, optional = true }
+source-bluesky = { workspace = true, optional = true }
 source-ioda = { workspace = true, optional = true }
 source-noaa = { workspace = true, optional = true }
+source-telegram = { workspace = true, optional = true }
 anyhow.workspace = true
 chrono.workspace = true
 core-types.workspace = true

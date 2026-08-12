@@ -200,9 +200,12 @@ impl SignalSource for BlueskySource {
         _window: TimeWindow,
         _filters: &SourceFilters,
     ) -> Result<Vec<RawRecord>, SourceError> {
+        // Completed windows only: the window still being counted stays
+        // pending, so a drain can never publish a half-counted window whose
+        // remainder would then be lost to dedup-by-id.
         let rollups = {
             let mut guard = Self::lock(&self.accumulator);
-            guard.drain()
+            guard.drain_completed(chrono::Utc::now())
         };
         tracing::info!(rollups = rollups.len(), "bluesky chatter rollups drained");
         Ok(rollups.into_iter().map(RawRecord::ChatterRollup).collect())

@@ -22,7 +22,7 @@ history, corroboration, corrections, and a clear confidence state.
 [CHANGELOG.md](CHANGELOG.md)), plus the V1 visualization batch and an IODA
 internet-outage layer. The desktop runtime is **live-data-only**: **GDELT**
 (keyless), **ACLED** (authorized myACLED account), **NOAA/NWS active
-alerts** (keyless), and **IODA internet-outage events** (keyless). Synthetic
+alerts** (keyless), **IODA internet-outage events** (keyless), and
 fixtures remain test assets but are never loaded into or displayed by the
 desktop app.
 
@@ -83,6 +83,8 @@ flowchart LR
         ACLED["source-acled\n(M5, acled-live)"]
         NOAA["source-noaa\n(M5, noaa-live)"]
         IODA["source-ioda\n(ioda-live, keyless)"]
+        BSKY["source-bluesky\n(bluesky-live, keyless)\nstreaming"]
+        TG["source-telegram\n(telegram-live)\ncredential-gated, MTProto"]
     end
 
     FIX["source-fixtures\ntests only; never displayed"]
@@ -101,6 +103,8 @@ flowchart LR
     ACLED --> CT
     NOAA --> CT
     IODA --> CT
+    BSKY --> CHAT["chatter\naggregate-only rollups"] --> CT
+    TG --> CHAT
     FIX -. tests only .-> CT
     CT --> Storage
     Storage --> AN
@@ -210,8 +214,9 @@ docker compose up                                # M4 worker+api stack (see dock
 ```
 
 CI (`.github/workflows/ci.yml`) runs all of the above plus the feature
-matrix (`acled-live`/`noaa-live`/`ioda-live`/all three), the `source-acled`
-live-mock suite, and a `docker compose` smoke test. Tag-driven releases
+matrix (each of `acled-live`/`noaa-live`/`ioda-live`/`bluesky-live`/
+`telegram-live` alone, plus the full union), the ACLED OAuth live-mock
+suite, and a `docker compose` smoke test. Tag-driven releases
 (`.github/workflows/release.yml`) build desktop binaries for Windows/Linux/
 macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -250,9 +255,13 @@ macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.
   markers, recency fade ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)).
 - **IODA ✅** internet-outage events layer (feature `ioda-live`, keyless,
   country-precision).
-- **Next**: Bluesky Jetstream + public Telegram channels (queued,
-  aggregate-chatter-only design — see HANDOFF.md), visualization batch V2,
-  M7 service hardening — see [docs/ROADMAP.md](docs/ROADMAP.md).
+- **Bluesky ✅** Jetstream chatter-volume layer (feature `bluesky-live`,
+  keyless, aggregate-only).
+- **Telegram ✅** public-channel chatter-volume layer (feature
+  `telegram-live`, credential-gated, aggregate-only, curated channel
+  allowlist).
+- **Next**: visualization batch V2, M7 service hardening — see
+  [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ### Product direction: on-scene channels
 
@@ -330,6 +339,22 @@ profiling, or following a person without consent is not. In short:
   Georgia Tech Internet Intelligence Research Lab — keyless public API,
   © Georgia Tech Research Corporation. Country-precision internet-outage
   severity signal; aggregate network telemetry only, no person-level data.
+- Bluesky (included in desktop defaults): **Jetstream** public firehose
+  ([bsky.app](https://bsky.app)) — keyless. This app stores **aggregate
+  chatter counts only**: how many public posts in a five-minute window
+  mentioned both a known place and a known topic. Post text, author
+  handles/DIDs, post ids, and links are never stored, logged, or exposed by
+  any API in the source adapter, and place attribution is keyword matching
+  against a public gazetteer, never inference about where a person is. See
+  [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.
+- Telegram (included in desktop defaults, credential-gated): a small,
+  live-verified, curated allowlist of public channels
+  ([telegram.org](https://telegram.org)), read via a dedicated account's own
+  MTProto session — not a bot, since Telegram's Bot API cannot read a
+  channel it wasn't added to. Same **aggregate chatter counts only**
+  guarantee as Bluesky: no message text, sender identity, or message URL is
+  ever stored, logged, or exposed by any API in the source adapter. See
+  [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.
 
 ## License
 
