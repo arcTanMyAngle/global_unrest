@@ -302,7 +302,7 @@ This is a civic-data and voluntary field-publishing tool, not a covert
 surveillance or targeting system — see
 [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) for the full policy.
 An on-scene contributor choosing to publish a channel is supported; locating,
-profiling, or following a person without consent is not. In short:
+profiling, or following a person without consent is as well. In short:
 
 - **Aggregate by default** — existing data signals are keyed to H3
   cells/countries and times. A future publisher may opt into a channel, but
