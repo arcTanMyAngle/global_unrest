@@ -94,6 +94,18 @@ pub struct TimelineHistogramPoint {
 }
 
 /// One headline row in the region inspector.
+/// One H3 cell carrying NOAA/NWS weather alerts in a window — the input to
+/// the map's alert overlay (docs/VISUALIZATION.md V3 item 8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AlertCell {
+    pub h3_cell: u64,
+    /// Peak alert severity in the cell, 0..1. Alerts whose NWS severity is
+    /// `Unknown` carry no severity at all and contribute 0 — the layer's dark
+    /// end therefore means "an alert with no severity claim", not "mild".
+    pub severity: f32,
+    pub alerts: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct HeadlineRow {
     pub ts_epoch_s: i64,
@@ -273,6 +285,10 @@ enum Cmd {
     },
     TimelineHistogram {
         reply: mpsc::Sender<Result<Vec<TimelineHistogramPoint>, StorageError>>,
+    },
+    AlertCells {
+        window: EpochWindow,
+        reply: mpsc::Sender<Result<Vec<AlertCell>, StorageError>>,
     },
     RegionDetail {
         h3_cell: u64,
@@ -469,6 +485,18 @@ impl StorageHandle {
         Reply(rx)
     }
 
+    /// H3 cells carrying NOAA/NWS weather alerts in `window`, with the peak
+    /// severity per cell — the map's weather-alert overlay.
+    ///
+    /// Source-scoped in SQL rather than by filtering a general query in the
+    /// UI: this layer's whole claim is "these are weather alerts, not
+    /// unrest", so nothing else must ever be able to reach it.
+    pub fn alert_cells(&self, window: EpochWindow) -> Reply<Vec<AlertCell>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::AlertCells { window, reply });
+        Reply(rx)
+    }
+
     pub fn region_detail(&self, h3_cell: u64, window: EpochWindow) -> Reply<RegionDetail> {
         let (reply, rx) = mpsc::channel();
         self.send(Cmd::RegionDetail {
@@ -629,6 +657,9 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
             }
             Cmd::TimelineHistogram { reply } => {
                 let _ = reply.send(do_timeline_histogram(&conn));
+            }
+            Cmd::AlertCells { window, reply } => {
+                let _ = reply.send(do_alert_cells(&conn, window));
             }
             Cmd::RegionDetail {
                 h3_cell,
@@ -1054,6 +1085,39 @@ fn do_timeline_histogram(conn: &Connection) -> Result<Vec<TimelineHistogramPoint
             bucket_start,
             kind: parse_kind(&kind)?,
             count: count.max(0) as u32,
+        });
+    }
+    Ok(out)
+}
+
+/// Cells with NOAA alerts in a window, peak severity first so a caller that
+/// truncates to a display cap keeps the most severe alerts.
+///
+/// `source = 'noaa'` is fixed here, in SQL, not passed in: the overlay this
+/// feeds asserts "weather, not unrest", and a caller must not be able to
+/// aim it at another source.
+fn do_alert_cells(conn: &Connection, window: EpochWindow) -> Result<Vec<AlertCell>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT h3_cell, MAX(COALESCE(severity, 0.0)) AS sev, COUNT(*) AS cnt
+         FROM events
+         WHERE source = 'noaa' AND ts_epoch_s >= ? AND ts_epoch_s < ?
+         GROUP BY h3_cell
+         ORDER BY sev DESC, cnt DESC, h3_cell",
+    )?;
+    let rows = stmt.query_map(params![window.0, window.1], |r| {
+        Ok((
+            r.get::<_, i64>(0)? as u64,
+            r.get::<_, f64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (h3_cell, severity, alerts) = row?;
+        out.push(AlertCell {
+            h3_cell,
+            severity: (severity as f32).clamp(0.0, 1.0),
+            alerts: alerts.max(0) as u32,
         });
     }
     Ok(out)
@@ -1654,6 +1718,17 @@ mod tests {
         }
     }
 
+    /// A NOAA-shaped alert: `Disruption`, Admin1 precision, optional severity.
+    fn noaa_alert(seq: u32, hour: u32, cell: u64, severity: Option<f32>) -> GeoTemporalEvent {
+        let mut e = sample_event(seq, EventKind::Disruption, hour, cell);
+        e.id = event_id(SourceId::Noaa, &format!("nws-{seq}"));
+        e.source = SourceId::Noaa;
+        e.source_event_id = format!("nws-{seq}");
+        e.location_precision = LocationPrecision::Admin1;
+        e.severity = severity;
+        e
+    }
+
     fn failure() -> IngestFailure {
         IngestFailure {
             source: SourceId::Fixtures,
@@ -1665,6 +1740,57 @@ mod tests {
 
     fn open_mem() -> StorageHandle {
         StorageHandle::open(None, Box::new(|| {})).unwrap()
+    }
+
+    /// The alert overlay's claim is "this is weather, not unrest". That holds
+    /// only if nothing but NOAA can reach it, which is asserted in SQL — so a
+    /// non-NOAA `Disruption` sitting in the same cell must not appear.
+    #[test]
+    fn alert_cells_are_noaa_only_and_report_peak_severity() {
+        let store = open_mem();
+        let day = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        store
+            .ingest(
+                vec![
+                    noaa_alert(1, 1, 100, Some(0.5)),
+                    noaa_alert(2, 3, 100, Some(0.9)), // peak in cell 100
+                    noaa_alert(3, 5, 200, None),      // severity Unknown ⇒ 0.0
+                    // Same kind, same cell, different source — IODA outages are
+                    // Disruptions too, and must stay out of the weather layer.
+                    {
+                        let mut e = sample_event(4, EventKind::Disruption, 7, 100);
+                        e.id = event_id(SourceId::Ioda, "ioda-4");
+                        e.source = SourceId::Ioda;
+                        e.severity = Some(1.0);
+                        e
+                    },
+                ],
+                vec![],
+            )
+            .wait()
+            .unwrap();
+
+        let cells = store.alert_cells((day, day + 86_400)).wait().unwrap();
+        assert_eq!(cells.len(), 2, "{cells:?}");
+        // Ordered peak-severity first, so truncating to a display cap keeps
+        // the most severe alerts.
+        assert_eq!(cells[0].h3_cell, 100);
+        assert!((cells[0].severity - 0.9).abs() < 1e-6, "{:?}", cells[0]);
+        assert_eq!(cells[0].alerts, 2, "the IODA row must not be counted");
+        assert_eq!(cells[1].h3_cell, 200);
+        assert_eq!(cells[1].severity, 0.0, "unknown severity is not a claim");
+
+        // Windowed: a range before the alerts returns nothing.
+        assert!(
+            store
+                .alert_cells((day - 86_400, day))
+                .wait()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -7,10 +7,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod how_to_read;
 mod ingest;
 mod map_view;
 mod panels;
 mod sparkline;
+mod style;
 mod timeline_strip;
 
 use tracing_subscriber::EnvFilter;

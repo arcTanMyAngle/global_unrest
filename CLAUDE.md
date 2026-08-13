@@ -4,8 +4,8 @@ Desktop-first Rust geospatial dashboard visualizing global news-attention
 and unrest/event signals. Civic-data research/visualization only.
 **M0–M6 complete 2026-07-18; V1 visualization batch complete 2026-08-10;
 IODA (internet-outage) live source added 2026-08-11; Bluesky Jetstream and
-Telegram aggregate-chatter sources added 2026-08-12; V2 visualization batch
-complete 2026-08-12** — M5 (ACLED + NOAA)
+Telegram aggregate-chatter sources added 2026-08-12; V2 and V3 visualization
+batches complete 2026-08-12** — M5 (ACLED + NOAA)
 fully live-verified; M6 shipped repo hygiene (CI feature matrix, `docker
 compose` smoke test, cargo-deny, Dependabot, tag-driven releases,
 CHANGELOG, portfolio README, CONTRIBUTING.md); V1 shipped the timeline
@@ -18,8 +18,11 @@ like ACLED, and needs a one-time interactive login
 (`crates/source-telegram/examples/login_setup.rs`) before it activates.
 Branch protection on `main` is the one M6 item left, and it's a manual
 GitHub-settings step (no authenticated `gh`/API access from this machine)
-— see HANDOFF.md. Next: V2 visualization batch, interleaved with M7 service
-hardening. See [HANDOFF.md](HANDOFF.md) for status and the next task list,
+— see HANDOFF.md. V3 shipped per-source marker identity (shape = source,
+color = kind), a NOAA weather-alert overlay, a full painted legend, an
+offline graticule/labels/border-hierarchy orientation pass, and the
+"how to read this map" overlay. Next: M7 service hardening. See
+[HANDOFF.md](HANDOFF.md) for status and the next task list,
 and [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
 ## Commands
@@ -111,7 +114,17 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
 - `crates/renderer` — egui **layer library**, not a wgpu engine: geometry
   tessellated once in lon/lat (`GeoMesh`), screen meshes rebuilt only on
   viewport change (affine mul-add per vertex), world-copy offsets for ±180°.
-  Never add per-frame path tessellation.
+  Never add per-frame path tessellation. V3 added `glyph.rs`
+  (`MarkerGlyph` — marker **shape encodes the source**, color still encodes
+  `EventKind`; the unit polygons are equal-**area** so shape never leaks into
+  the severity-size channel), `alerts.rs` (`AlertLayer` — NOAA weather alerts
+  as a cool severity tint inside a dashed outline whose dash length comes from
+  each ring's *screen* perimeter, giving a fixed dash count at any zoom), and
+  `graticule.rs` (meridians/parallels; affine projection makes each one a
+  single screen-aligned segment, spacing adapts to zoom, only in-viewport
+  lines are generated). `BasemapLayer::paint` takes an `emphasis` ISO-A3 for
+  the border hierarchy and resolves codes exactly as `geo_utils::CountryIndex`
+  does — a test pins the agreement, because a mismatch fails silently.
 - `crates/source-gdelt` — M3 live GDELT: `doc` (DOC 2.0 artlist JSON →
   country-precision attention), `events` (15-min Events CSV-zip dumps → CAMEO
   discrete events), `country` (name/FIPS → ISO-A3 + centroid), `sched`
@@ -119,7 +132,14 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   normalize pure and offline golden-tested, only `fetch*` touch the network.
 - `apps/global-signal-desktop` — eframe 0.35 shell; state machine in
   `app.rs`, map widget in `map_view.rs`, panels in `panels.rs`, custom-painted
-  widgets in `timeline_strip.rs` (V1) and `sparkline.rs` (V2). `ingest.rs`
+  widgets in `timeline_strip.rs` (V1) and `sparkline.rs` (V2). V3 added
+  `style.rs` (UI constants + **painted** legend swatches — egui's bundled
+  fonts have no `◆`/`●`/`■` glyphs, so those rendered as missing-glyph boxes;
+  swatches now draw from `MarkerGlyph::unit_corners` so the legend cannot
+  drift from the map) and `how_to_read.rs` (the first-run / `?`-key reading
+  guide; its copy is structured data because `RichText` renders markdown
+  markup literally). `MapView::show` takes a `MapInputs` struct, not a row of
+  positional bools. `ingest.rs`
   is a long-lived, live-only GDELT/ACLED/NOAA worker. Startup purges legacy
   `source=fixtures` rows and treats an empty database as valid.
   UI thread never blocks on storage; it ingests worker batches (dedup makes

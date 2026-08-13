@@ -127,6 +127,41 @@ impl App {
                 changed |= ui
                     .checkbox(&mut self.filters.show_spike_halos, "spike halos")
                     .changed();
+                changed |= ui
+                    .checkbox(&mut self.filters.show_alerts, "NOAA alerts")
+                    .on_hover_text(
+                        "Active NOAA/NWS weather alerts as severity-tinted cells with a \
+                         dashed outline. Weather, not unrest — a separate layer so the \
+                         two never blend together. US coverage only.",
+                    )
+                    .changed();
+                ui.menu_button("orientation", |ui| {
+                    ui.label(
+                        RichText::new("Offline basemap aids — no online tiles.")
+                            .color(TEXT_DIM)
+                            .small(),
+                    );
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_graticule, "graticule")
+                        .on_hover_text("Meridians and parallels; spacing adapts to zoom.")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_labels, "country labels")
+                        .on_hover_text(
+                            "Country names at their centroids. Labels that would \
+                             collide are dropped largest-country-first, so a label \
+                             missing here means it did not fit, not that there is \
+                             no data.",
+                        )
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.focus_selection, "dim outside selection")
+                        .on_hover_text(
+                            "Wash the map outside the selected cell. Off by default \
+                             — dimming hides real data.",
+                        )
+                        .changed();
+                });
                 ui.separator();
 
                 ui.label(RichText::new("heat:").color(TEXT_DIM));
@@ -254,6 +289,15 @@ impl App {
                 if ui.button("reset view").clicked() {
                     self.map.viewport = None;
                 }
+                // The `?` shortcut alone is not discoverable, and this window
+                // is where the map's caveats live.
+                if ui
+                    .button("how to read this")
+                    .on_hover_text("What the map shows, what it cannot show, and why (?)")
+                    .clicked()
+                {
+                    self.show_how_to_read = true;
+                }
                 if ui
                     .button("export parquet")
                     .on_hover_text("write this session as date-partitioned Parquet")
@@ -279,7 +323,7 @@ impl App {
             } else {
                 Color32::from_rgb(120, 210, 140)
             };
-            ui.colored_label(color, "●").on_hover_text(&s.detail);
+            crate::style::dot_swatch(ui, color).on_hover_text(&s.detail);
             ui.label(RichText::new(s.name).color(TEXT_DIM).small())
                 .on_hover_text(&s.detail);
         }
@@ -466,23 +510,30 @@ impl App {
                 continue;
             }
 
-            let (dot, color, state) = if s.degraded {
+            // A hollow ring for anything less than fully healthy, filled for
+            // online: the shape carries the state even in a grayscale
+            // screenshot, which a color-only dot did not.
+            let (healthy, color, state) = if s.degraded {
                 (
-                    "▲",
+                    false,
                     Color32::from_rgb(255, 170, 90),
                     "degraded — showing cached real data",
                 )
             } else if s.partial {
                 (
-                    "▲",
+                    false,
                     Color32::from_rgb(255, 170, 90),
                     "partial — one feed unavailable",
                 )
             } else {
-                ("●", Color32::from_rgb(120, 210, 140), "online")
+                (true, Color32::from_rgb(120, 210, 140), "online")
             };
             ui.horizontal(|ui| {
-                ui.colored_label(color, dot);
+                if healthy {
+                    crate::style::dot_swatch(ui, color);
+                } else {
+                    crate::style::ring_swatch(ui, color);
+                }
                 ui.label(RichText::new(state).color(color));
             });
             ui.label(RichText::new(&s.detail).color(TEXT_DIM).small());
@@ -658,8 +709,7 @@ impl App {
             if kind.is_discrete_event() {
                 any_events = true;
                 ui.horizontal(|ui| {
-                    let color = self.map.style.marker_color(*kind);
-                    ui.colored_label(color, "●");
+                    crate::style::dot_swatch(ui, self.map.style.marker_color(*kind));
                     ui.label(format!("{} × {}", count, kind.label()));
                 });
             }
@@ -960,7 +1010,12 @@ impl App {
         for row in &page.rows {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                ui.colored_label(self.map.style.marker_color(row.kind), "◆");
+                // The map's own encoding, reused: kind color, source shape.
+                crate::style::glyph_swatch(
+                    ui,
+                    renderer::MarkerGlyph::for_source(row.source),
+                    self.map.style.marker_color(row.kind),
+                );
                 ui.label(RichText::new(row.kind.label()).small().strong());
                 ui.label(
                     RichText::new(format!(
@@ -1088,10 +1143,10 @@ impl App {
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.colored_label(
+            crate::style::region_swatch(
+                ui,
                 renderer::divergence_color(0.0)
                     .gamma_multiply(renderer::DIVERGENCE_NO_DATA_DIM + 0.4),
-                "■",
             );
             ui.label(
                 RichText::new("dimmed — one channel has no records here, so nothing is claimed")
@@ -1115,38 +1170,179 @@ impl App {
         );
     }
 
-    fn inspector_legend(&self, ui: &mut egui::Ui) {
-        ui.heading("Legend");
-        ui.label(RichText::new("Markers (city/exact precision only)").small());
-        for kind in EventKind::ALL {
-            ui.horizontal(|ui| {
-                ui.colored_label(self.map.style.marker_color(kind), "◆");
-                ui.label(RichText::new(kind.label()).small());
-            });
-        }
+    /// Small caption above a legend group.
+    fn legend_group(ui: &mut egui::Ui, title: &str) {
+        ui.add_space(8.0);
+        ui.label(RichText::new(title).strong().small());
+    }
+
+    /// One swatch + label row, with the swatch painted by `draw`.
+    fn legend_row(
+        ui: &mut egui::Ui,
+        draw: impl FnOnce(&mut egui::Ui),
+        text: &str,
+        note: Option<&str>,
+    ) {
         ui.horizontal(|ui| {
-            ui.colored_label(self.map.style.halo_color, "○");
+            draw(ui);
+            ui.label(RichText::new(text).small());
+            if let Some(note) = note {
+                ui.label(RichText::new(note).color(TEXT_DIM).small());
+            }
+        });
+    }
+
+    /// The full encoding reference (docs/VISUALIZATION.md V3 item 8).
+    ///
+    /// Collapsible and open by default: it is long on purpose — every channel
+    /// on the map is documented here, including the ones that mean "we are not
+    /// claiming anything" — but it sits under the region inspector, so a user
+    /// who has read it once should be able to fold it away.
+    fn inspector_legend(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new(RichText::new("Legend").heading())
+            .default_open(true)
+            .show_unindented(ui, |ui| self.legend_body(ui));
+    }
+
+    fn legend_body(&self, ui: &mut egui::Ui) {
+        let style = &self.map.style;
+
+        Self::legend_group(ui, "Marker color — what kind of thing");
+        for kind in EventKind::ALL {
+            Self::legend_row(
+                ui,
+                |ui| {
+                    crate::style::glyph_swatch(
+                        ui,
+                        renderer::MarkerGlyph::Diamond,
+                        style.marker_color(kind),
+                    );
+                },
+                kind.label(),
+                None,
+            );
+        }
+
+        Self::legend_group(ui, "Marker shape — which feed reported it");
+        for glyph in renderer::MarkerGlyph::ALL {
+            Self::legend_row(
+                ui,
+                |ui| {
+                    crate::style::glyph_swatch(ui, glyph, Color32::from_rgb(210, 214, 224));
+                },
+                glyph.source_label(),
+                None,
+            );
+        }
+        ui.label(
+            RichText::new(
+                "Color and shape are independent: both chatter feeds report \
+                 news attention, so they share the violet fill and are told \
+                 apart only by their shape.",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+
+        Self::legend_group(ui, "Marker size — severity");
+        ui.horizontal(|ui| {
+            for sev in [0.0f32, 0.5, 1.0] {
+                crate::style::severity_swatch(ui, sev, style.marker_conflict);
+            }
             ui.label(
-                RichText::new("Spike halo — cell clearly above its own trailing baseline").small(),
+                RichText::new("source-reported severity (e.g. ACLED fatalities)")
+                    .color(TEXT_DIM)
+                    .small(),
             );
         });
-        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Records with no severity fall back to sizing by article count. \
+                 Size is never a claim about importance.",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+
+        Self::legend_group(ui, "Overlays");
+        Self::legend_row(
+            ui,
+            |ui| {
+                crate::style::ring_swatch(ui, style.halo_color);
+            },
+            "Spike halo",
+            Some("cell clearly above its own trailing baseline"),
+        );
+        Self::legend_row(
+            ui,
+            |ui| {
+                crate::style::alert_swatch(
+                    ui,
+                    renderer::alert_color(0.9)
+                        .gamma_multiply(f32::from(style.alert_alpha) / 255.0 + 0.35),
+                    style.alert_outline,
+                );
+            },
+            "NOAA/NWS weather alert",
+            Some("US only"),
+        );
+        ui.horizontal(|ui| {
+            for s in [0.0f32, 0.5, 1.0] {
+                crate::style::region_swatch(ui, renderer::alert_color(s));
+            }
+            ui.label(
+                RichText::new("alert severity: none claimed → extreme")
+                    .color(TEXT_DIM)
+                    .small(),
+            );
+        });
+        ui.label(
+            RichText::new(
+                "Weather alerts get a cool palette and a dashed outline no other \
+                 layer uses, so a storm warning is never read as unrest. Their \
+                 darkest tint means the alert carried no severity rating — not \
+                 that it is mild.",
+            )
+            .color(TEXT_DIM)
+            .small(),
+        );
+
+        Self::legend_group(ui, "Heatmap");
         if self.filters.heat_metric == HeatMetric::Divergence {
             self.divergence_legend(ui);
         } else {
             self.sequential_heat_legend(ui);
         }
-        ui.add_space(16.0);
 
+        Self::legend_group(ui, "Precision — what may be drawn where");
+        Self::legend_row(
+            ui,
+            |ui| {
+                crate::style::glyph_swatch(ui, renderer::MarkerGlyph::Diamond, style.marker_other);
+            },
+            "City / exact",
+            Some("drawn as a point"),
+        );
+        Self::legend_row(
+            ui,
+            |ui| {
+                crate::style::region_swatch(ui, renderer::heat_color(0.6));
+            },
+            "Country / admin",
+            Some("shades a region, never a point"),
+        );
         ui.label(
             RichText::new(
-                "Coarse-precision records (country/admin centroids) shade regions \
-                 but never render as points.",
+                "A country-precision record is placed at a centroid we did not \
+                 observe, so drawing it as a dot would invent a location. NOAA \
+                 and IODA are region-only for exactly this reason, which is why \
+                 neither has a marker shape.",
             )
             .color(TEXT_DIM)
             .small(),
         );
-        ui.add_space(4.0);
+
+        ui.add_space(12.0);
         let update_state = if self.online {
             "Live updates are enabled."
         } else {
@@ -1162,11 +1358,35 @@ impl App {
         ui.label(
             RichText::new(
                 "Basemap: Natural Earth (public domain). Data sources: GDELT, \
-                 authorized ACLED, NOAA/NWS, and IODA.",
+                 authorized ACLED, NOAA/NWS, IODA, Bluesky, and Telegram.",
             )
             .color(TEXT_DIM)
             .small(),
         );
+    }
+
+    /// Per-frame map inputs, gathered in one place so the two `map.show` call
+    /// sites (loading and ready) can never drift apart.
+    ///
+    /// Takes the fields it reads rather than `&self`: `map.show` needs
+    /// `&mut self.map`, and only field-level borrows are disjoint enough for
+    /// the two to coexist.
+    fn map_inputs<'a>(
+        filters: &crate::app::Filters,
+        selected_cell: Option<u64>,
+        countries: &'a geo_utils::CountryIndex,
+    ) -> crate::map_view::MapInputs<'a> {
+        crate::map_view::MapInputs {
+            selected_cell,
+            show_heatmap: filters.show_heatmap,
+            show_markers: filters.show_markers,
+            show_spike_halos: filters.show_spike_halos,
+            show_alerts: filters.show_alerts,
+            show_graticule: filters.show_graticule,
+            show_labels: filters.show_labels,
+            focus_selection: filters.focus_selection,
+            countries,
+        }
     }
 
     pub fn central_map(&mut self, ui: &mut egui::Ui) {
@@ -1186,10 +1406,7 @@ impl App {
                         let msg = msg.clone();
                         let actions = self.map.show(
                             ui,
-                            self.selected_cell,
-                            self.filters.show_heatmap,
-                            self.filters.show_markers,
-                            self.filters.show_spike_halos,
+                            &Self::map_inputs(&self.filters, self.selected_cell, &self.countries),
                         );
                         let _ = actions; // no selection while loading
                         let rect = ui.max_rect();
@@ -1206,15 +1423,37 @@ impl App {
                 }
                 let actions = self.map.show(
                     ui,
-                    self.selected_cell,
-                    self.filters.show_heatmap,
-                    self.filters.show_markers,
-                    self.filters.show_spike_halos,
+                    &Self::map_inputs(&self.filters, self.selected_cell, &self.countries),
                 );
                 if let Some(cell) = actions.selected_cell {
                     self.select_cell(cell, actions.clicked_lonlat);
                 }
             });
+    }
+
+    /// "How to read this map" (docs/VISUALIZATION.md V3 item 10).
+    ///
+    /// Dismissing it — by either button or the window's close control — is
+    /// what records it as seen, so a user who closes it without reading is not
+    /// nagged again, and `?` always brings it back.
+    pub fn how_to_read_window(&mut self, ctx: &egui::Context) {
+        if !self.show_how_to_read {
+            return;
+        }
+        let mut open = true;
+        let mut dismissed = false;
+        egui::Window::new("How to read this map")
+            .open(&mut open)
+            .default_width(600.0)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                dismissed = crate::how_to_read::show(ui);
+            });
+        if dismissed || !open {
+            self.show_how_to_read = false;
+            self.mark_how_to_read_seen();
+        }
     }
 
     pub fn log_window(&mut self, ctx: &egui::Context) {

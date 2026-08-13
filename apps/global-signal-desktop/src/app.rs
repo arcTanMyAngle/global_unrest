@@ -63,6 +63,20 @@ pub struct Filters {
     /// settings saved before this toggle existed loadable.
     #[serde(default = "default_true")]
     pub show_spike_halos: bool,
+    /// NOAA/NWS weather-alert cell overlay (docs/VISUALIZATION.md V3 item 8).
+    /// `serde(default)` keeps settings saved before this toggle existed
+    /// loadable.
+    #[serde(default = "default_true")]
+    pub show_alerts: bool,
+    // --- orientation (docs/VISUALIZATION.md V3 item 9) ---
+    #[serde(default = "default_true")]
+    pub show_graticule: bool,
+    #[serde(default = "default_true")]
+    pub show_labels: bool,
+    /// Dim the map outside the selected cell. Off by default: dimming hides
+    /// real data, so it stays something the user turns on.
+    #[serde(default)]
+    pub focus_selection: bool,
     pub heat_metric: HeatMetric,
     /// Selected themes; empty = no theme filtering. `serde(default)` keeps
     /// settings saved before M2 loadable.
@@ -89,6 +103,10 @@ impl Default for Filters {
             show_heatmap: true,
             show_markers: true,
             show_spike_halos: true,
+            show_alerts: true,
+            show_graticule: true,
+            show_labels: true,
+            focus_selection: false,
             heat_metric: HeatMetric::Attention,
             themes: Vec::new(),
             video_only: false,
@@ -214,6 +232,9 @@ pub struct App {
     pending_log: Option<Reply<(u64, Vec<IngestLogRow>)>>,
     pub ingest_log: Option<(u64, Vec<IngestLogRow>)>,
     pub show_log_window: bool,
+    /// "How to read this map" (docs/VISUALIZATION.md V3 item 10). Opens once
+    /// on first run and on `?` thereafter.
+    pub show_how_to_read: bool,
 
     pending_extent: Option<Reply<Option<EpochWindow>>>,
     /// Bucket-aligned data extent `[start, end)`.
@@ -237,6 +258,11 @@ pub struct App {
 
     pending_buckets: Option<Reply<Vec<RegionBucket>>>,
     pending_points: Option<Reply<Vec<EventPoint>>>,
+    pending_alerts: Option<Reply<Vec<storage::AlertCell>>>,
+    /// NOAA alert cells in the current window, kept at storage resolution so
+    /// the overlay can re-roll to a different H3 parent on zoom without a new
+    /// query — the same contract `window_buckets` has for the heatmap.
+    alert_cells: Vec<storage::AlertCell>,
     pub bucket_count: usize,
     /// Buckets of the current window, kept so the heatmap can re-aggregate
     /// at a different H3 rollup resolution when the zoom crosses a threshold
@@ -298,6 +324,12 @@ impl App {
         // Do not carry fixture-era theme selections into the live-only UI.
         // Subsequent live selections persist under this new key normally.
         let filters: Filters = settings.get("filters_live_v1")?.unwrap_or_default();
+        // First run (or a first run after the text was revised): open the
+        // reading guide before the user has drawn any conclusion from the map.
+        let how_to_read_seen: bool = settings
+            .get(crate::how_to_read::SEEN_KEY)?
+            .unwrap_or(Some(false))
+            .unwrap_or(false);
 
         // Retention: env override wins, else the saved setting, else unbounded.
         let retention_days: Option<u32> = match std::env::var("LES_RETENTION_DAYS") {
@@ -343,6 +375,7 @@ impl App {
             pending_log,
             ingest_log: None,
             show_log_window: false,
+            show_how_to_read: !how_to_read_seen,
             pending_extent,
             extent: None,
             pending_vocab,
@@ -361,6 +394,8 @@ impl App {
             dirty: false,
             pending_buckets: None,
             pending_points: None,
+            pending_alerts: None,
+            alert_cells: Vec::new(),
             bucket_count: 0,
             window_buckets: Vec::new(),
             heat_res: core_types::H3_RESOLUTION,
@@ -588,6 +623,19 @@ impl App {
             });
         }
 
+        if let Some(reply) = &self.pending_alerts
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_alerts = None;
+            match result {
+                Ok(cells) => {
+                    self.alert_cells = cells;
+                    self.rebuild_alerts();
+                }
+                Err(e) => tracing::error!("alert cells query: {e}"),
+            }
+        }
+
         // 3. Window queries → rebuild layers.
         if let Some(reply) = &self.pending_buckets
             && let Some(result) = reply.try_take()
@@ -660,6 +708,14 @@ impl App {
     }
 
     /// Jump the ledger to a new page offset and re-query just that page.
+    /// Record that the reading guide has been dismissed, so it stops opening
+    /// on launch. A failure here only costs one extra showing next run.
+    pub fn mark_how_to_read_seen(&mut self) {
+        if let Err(e) = self.settings.set(crate::how_to_read::SEEN_KEY, &true) {
+            tracing::warn!("saving how-to-read flag: {e}");
+        }
+    }
+
     pub fn set_ledger_offset(&mut self, offset: usize) {
         self.ledger_offset = offset;
         if let (Some(cell), Some(window)) = (self.selected_cell, self.current_window()) {
@@ -684,6 +740,7 @@ impl App {
             self.filters.min_confidence,
             self.filters.video_only,
         ));
+        self.pending_alerts = Some(self.store.alert_cells(window));
         if let Some(cell) = self.selected_cell {
             // The window moved under the existing page, so the old offset no
             // longer points at the same rows.
@@ -801,6 +858,31 @@ impl App {
         self.map.spike_halos = HaloLayer::new(cells);
     }
 
+    /// NOAA weather-alert overlay (docs/VISUALIZATION.md V3 item 8), rolled up
+    /// to the heatmap's display resolution so alert cells register with the
+    /// regions shaded underneath them.
+    ///
+    /// Peak severity wins a rollup, matching how `spike_halo_cells` and the
+    /// divergence layer both summarize a parent cell: a coarse cell that
+    /// contains a severe alert is a cell with a severe alert in it, and
+    /// averaging would dilute exactly the case the layer exists to show.
+    fn rebuild_alerts(&mut self) {
+        let mut per_cell: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
+        for a in &self.alert_cells {
+            let Ok(cell) = geo_utils::cell_parent(a.h3_cell, self.heat_res) else {
+                continue; // cells were validated at ingest
+            };
+            let slot = per_cell.entry(cell).or_insert(0.0);
+            *slot = slot.max(a.severity);
+        }
+        let mut cells: Vec<(u64, f32)> = per_cell.into_iter().collect();
+        // Most severe first, then by cell id so the truncation below is
+        // deterministic across runs (a `HashMap` hands them over in any order).
+        cells.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        cells.truncate(renderer::ALERT_MAX_CELLS);
+        self.map.alerts = renderer::AlertLayer::new(&cells, &self.map.style);
+    }
+
     fn rebuild_markers(&mut self, points: Vec<EventPoint>) {
         let article_norm = 81f32.ln(); // saturates at 80 articles
         // Recency fade only applies during playback — pausing always shows
@@ -822,9 +904,19 @@ impl App {
                 alpha: fade_window.map_or(1.0, |(ws, we)| {
                     fade_alpha(we - p.ts_epoch_s, we - ws, FADE_FLOOR_ALPHA)
                 }),
+                glyph: renderer::MarkerGlyph::for_source(p.source),
                 source_index: i,
             })
             .collect();
+        // Point markers are the sparsest layer on the map and the easiest to
+        // mistake for a rendering fault when a window happens to hold only
+        // coarse-precision records. Log the count so "no markers" can be told
+        // apart from "markers not drawing" without a rebuild.
+        tracing::info!(
+            markers = inputs.len(),
+            rows = points.len(),
+            "marker layer rebuilt"
+        );
         self.map.markers = MarkerLayer::new(inputs);
         self.map.marker_rows = points;
     }
@@ -925,12 +1017,20 @@ impl eframe::App for App {
         self.poll_async();
         self.advance_playback(&ctx);
 
+        // `?` reopens the reading guide. Ignored while a text field has focus
+        // so typing a question mark into the theme filter doesn't fire it.
+        if !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Questionmark))
+        {
+            self.show_how_to_read = !self.show_how_to_read;
+        }
+
         // Panel order matters in egui 0.35: sides first, central last.
         self.top_bar(ui);
         self.timeline_panel(ui);
         self.inspector_panel(ui);
         self.central_map(ui);
         self.log_window(&ctx);
+        self.how_to_read_window(&ctx);
 
         // Zoom crossed a rollup threshold → re-aggregate the cached buckets
         // at the new display resolution (no storage round-trip).
@@ -938,6 +1038,9 @@ impl eframe::App for App {
             let deg_per_px = self.map.viewport.as_ref().map_or(0.225, |v| v.deg_per_px);
             if Self::heat_resolution(deg_per_px) != self.heat_res {
                 self.rebuild_heatmap();
+                // The alert overlay shares the heatmap's display resolution so
+                // its cells line up with the shaded regions underneath.
+                self.rebuild_alerts();
             }
         }
 

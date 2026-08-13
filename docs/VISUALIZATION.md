@@ -148,7 +148,7 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
   Paging orders by `(ts_epoch_s DESC, id DESC)` — without the id tiebreak,
   events sharing a timestamp would repeat or vanish across pages.
 
-## V3 — Layer identity & orientation
+## V3 — Layer identity & orientation ✅ shipped 2026-08-12 (see HANDOFF.md)
 
 8. **Per-source visual identity + real legend.** NOAA alerts render as
    translucent severity-tinted cell overlays with a distinct outline style
@@ -165,6 +165,63 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
     explaining the precision contract, attention/event separation, badges,
     and biases in plain language — the SAFETY doc's honesty, surfaced in
     the UI where users actually look.
+
+### V3 as built — decisions worth carrying forward
+
+- **Markers gained a second, independent encoding channel: shape = source.**
+  Color still means `EventKind` and nothing else. Shape means which feed
+  reported the record — diamond ACLED, square GDELT, triangle-up Bluesky,
+  triangle-down Telegram (`renderer::MarkerGlyph`). This is what finally lets
+  a *screenshot* attribute a marker to Telegram vs Bluesky; both are
+  `NewsAttention`, so before this they were pixel-identical and every GUI
+  verification had to fall back to a database query.
+- **The glyphs are equal-area, not equal-extent.** Size is the severity
+  channel, so a triangle and a diamond at one severity must read as the same
+  size; sizing by half-extent would leak shape into the size channel. A unit
+  test pins the areas, and `renderer::marker_half_px` is public so the legend
+  draws its size ramp at the real sizes rather than an approximation.
+- **NOAA alerts became their own layer** (`renderer::AlertLayer`), a cool
+  navy→ice severity tint inside a **dashed** outline no other layer uses, so
+  weather never reads as unrest. Its darkest tint means "this alert carried no
+  severity rating", not "mild" — NWS `Unknown` is not a claim of low severity.
+  A unit test asserts the ramp never comes near the heat or divergence ramps.
+- **The alert outline's dash length is derived from each ring's screen
+  perimeter**, giving a fixed dash *count* per ring. A fixed dash length would
+  make a zoomed-in cell emit thousands of segments a frame — the exact
+  per-frame growth this doc's perf guardrail forbids. Tested across four
+  decades of zoom.
+- **`storage::alert_cells` fixes `source = 'noaa'` in SQL**, the same way the
+  ledger's attention exclusion is in SQL: the layer's claim is "weather, not
+  unrest", so no caller may aim it elsewhere. IODA outages are `Disruption`
+  too and must not leak in; there is a test for exactly that.
+- **egui's bundled fonts have no geometric-shape glyphs, so every legend
+  swatch is painted** (`apps/global-signal-desktop/src/style.rs`). `◆`, `●`
+  and `■` were rendering as missing-glyph boxes and only "worked" because a
+  colored box still reads as a color chip. Painted swatches draw from
+  `MarkerGlyph::unit_corners` — the same table the marker mesh uses — so the
+  legend cannot drift from the map.
+- **The graticule is drawn under the land fill**, adapts its spacing to zoom
+  from a fixed ladder, and only generates lines inside the viewport. Meridians
+  are exactly vertical screen lines and parallels exactly horizontal, because
+  equirectangular is affine — one segment each, nothing to cache.
+- **Border emphasis resolves ISO-A3 the same way `geo_utils::CountryIndex`
+  does**, `-99` fallback included, with a test asserting the two agree.
+  Mismatched codes would make emphasis match nothing and fail *silently*.
+- **Country labels are laid out once and blitted.** Nothing about a galley
+  depends on the viewport, so per-frame layout would be the text equivalent of
+  re-tessellating a mesh every frame. Colliding labels are dropped
+  largest-country-first (bounding-box extent as a rough size proxy — explicitly
+  not an area, and never surfaced as one).
+- **Focus dimming uses the selected cell's bounding box, not its hexagon.**
+  Four rectangles a frame versus building a "world minus hexagon" polygon on
+  every viewport change. The cell outline is drawn on top, so the exact
+  selection stays unambiguous, and a test asserts the bands tile
+  `rect \ focus` without ever covering the focus. It is **off by default** —
+  dimming hides real data, so it stays something the user opts into.
+- **The reading overlay's limits section is a section of equal weight**, not
+  an appendix, and a test fails if it is trimmed. Its copy is structured data
+  (bold lead-in + sentence) because `egui::RichText` renders markdown markup
+  literally — a test rejects any `*` that creeps back in.
 
 ## Sequencing & guardrails
 

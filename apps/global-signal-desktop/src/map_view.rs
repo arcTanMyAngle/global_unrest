@@ -1,11 +1,27 @@
 //! The central map widget: viewport interactions (pan/zoom), layer painting,
 //! marker hover tooltips, and cell selection.
 
+use std::sync::Arc;
+
 use core_types::H3_RESOLUTION;
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
-use geo_utils::MapViewport;
-use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerLayer};
+use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2};
+use geo_utils::{CountryIndex, MapViewport};
+use renderer::{
+    AlertLayer, BasemapLayer, GraticuleLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerLayer,
+};
 use storage::EventPoint;
+
+/// Point size of a country label. Small and low-contrast on purpose: labels
+/// are orientation, never a data layer.
+const LABEL_FONT_PX: f32 = 11.0;
+
+/// Most country labels drawn in one frame. Collision culling usually stops
+/// well short of this; it caps the work when it does not.
+const MAX_LABELS: usize = 40;
+
+/// Padding added around a label's box when testing it against labels already
+/// placed, so two survivors never sit shoulder to shoulder.
+const LABEL_PAD_PX: f32 = 5.0;
 
 /// Seconds a fly-to takes. Long enough to keep the viewer oriented (the point
 /// of animating instead of jumping), short enough not to feel like waiting.
@@ -30,16 +46,53 @@ struct Flight {
     t: f32,
 }
 
+/// One country label: where it goes, how big it is, and the galley to blit.
+struct MapLabel {
+    lon: f64,
+    lat: f64,
+    /// Bounding-box extent in square degrees — the collision ranking key, so
+    /// a large country keeps its label and a small neighbour loses it. Not an
+    /// area; see `CountryIndex::iter_with_extent`.
+    extent: f64,
+    galley: Arc<Galley>,
+}
+
+/// Everything the map needs from the app for one frame. A struct rather than
+/// a dozen positional `bool`s — V3 added four of them and the call sites had
+/// become unreadable.
+pub struct MapInputs<'a> {
+    pub selected_cell: Option<u64>,
+    pub show_heatmap: bool,
+    pub show_markers: bool,
+    pub show_spike_halos: bool,
+    pub show_alerts: bool,
+    pub show_graticule: bool,
+    pub show_labels: bool,
+    /// Dim everything outside the selected cell.
+    pub focus_selection: bool,
+    /// Resolves the hovered point to a country, for border emphasis and the
+    /// label cache.
+    pub countries: &'a CountryIndex,
+}
+
 pub struct MapView {
     pub viewport: Option<MapViewport>,
     pub basemap: BasemapLayer,
     pub heatmap: HeatmapLayer,
+    /// NOAA/NWS weather alerts. A layer of its own so weather never reads as
+    /// unrest (docs/VISUALIZATION.md V3 item 8).
+    pub alerts: AlertLayer,
     pub markers: MarkerLayer,
     pub spike_halos: HaloLayer,
     /// Rows behind the marker layer, indexed by `MarkerInput::source_index`.
     pub marker_rows: Vec<EventPoint>,
     pub style: MapStyle,
     flight: Option<Flight>,
+    /// Country labels, laid out **once** and blitted thereafter. Text layout
+    /// is the expensive part and none of it depends on the viewport, so doing
+    /// it per frame would be the text equivalent of re-tessellating a mesh
+    /// every frame (docs/VISUALIZATION.md perf guardrail).
+    labels: Vec<MapLabel>,
 }
 
 /// Ease-in-out on [0, 1]: the viewport accelerates away and decelerates in,
@@ -82,11 +135,13 @@ impl MapView {
             viewport: None,
             basemap,
             heatmap: HeatmapLayer::empty(),
+            alerts: AlertLayer::empty(),
             markers: MarkerLayer::new(Vec::new()),
             spike_halos: HaloLayer::new(Vec::new()),
             marker_rows: Vec::new(),
             style,
             flight: None,
+            labels: Vec::new(),
         }
     }
 
@@ -140,15 +195,8 @@ impl MapView {
     }
 
     /// Paint the map into the available space and handle interactions.
-    #[allow(clippy::too_many_arguments)]
-    pub fn show(
-        &mut self,
-        ui: &mut Ui,
-        selected_cell: Option<u64>,
-        show_heatmap: bool,
-        show_markers: bool,
-        show_spike_halos: bool,
-    ) -> MapActions {
+    pub fn show(&mut self, ui: &mut Ui, inputs: &MapInputs<'_>) -> MapActions {
+        let selected_cell = inputs.selected_cell;
         let size = ui.available_size().max(Vec2::new(64.0, 64.0));
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
         let rect = response.rect;
@@ -205,18 +253,46 @@ impl MapView {
         aff.b += f64::from(rect.min.x);
         aff.d += f64::from(rect.min.y);
 
-        // --- layers (background → heat → borders/markers → overlays) ---
+        // The hovered country drives the border hierarchy; a selection holds
+        // the emphasis when the cursor leaves the map, so clicking a region
+        // doesn't make its outline flicker away.
+        let emphasis = response
+            .hover_pos()
+            .map(|h| {
+                let local = h - rect.min;
+                let (lon, lat) = vp.unproject(local.x, local.y);
+                (wrap_lon(lon), lat)
+            })
+            .or_else(|| selected_cell.and_then(|c| geo_utils::cell_center_lonlat(c).ok()))
+            .and_then(|(lon, lat)| inputs.countries.country_at(lon, lat))
+            .map(|c| c.iso_a3.clone());
+
+        // --- layers (background → grid → land → heat → alerts → markers) ---
         painter.rect_filled(rect, 0.0, self.style.background);
-        self.basemap
-            .paint(&painter, &aff, rect.width(), &self.style);
-        if show_heatmap {
+        // Under the land fill: the graticule is a backdrop, not an overlay.
+        if inputs.show_graticule {
+            GraticuleLayer::paint(&painter, &aff, rect, &self.style);
+        }
+        self.basemap.paint(
+            &painter,
+            &aff,
+            rect.width(),
+            &self.style,
+            emphasis.as_deref(),
+        );
+        if inputs.show_heatmap {
             self.heatmap.paint(&painter, &aff, rect.width());
         }
-        if show_markers {
+        // Above the heatmap so the alert tint is visibly *on* the shading it
+        // shares a cell with, below the markers so it never buries a point.
+        if inputs.show_alerts {
+            self.alerts.paint(&painter, &aff, rect.width(), &self.style);
+        }
+        if inputs.show_markers {
             self.markers
                 .paint(&painter, &aff, rect.width(), &self.style);
         }
-        if show_spike_halos && !self.spike_halos.is_empty() {
+        if inputs.show_spike_halos && !self.spike_halos.is_empty() {
             let time_secs = ui.input(|i| i.time);
             self.spike_halos
                 .paint(&painter, &aff, rect.width(), &self.style, time_secs);
@@ -225,6 +301,17 @@ impl MapView {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(50));
         }
+        // Focus dimming covers the data layers but not the labels or the
+        // selection outline, so the region being focused on stays legible.
+        if inputs.focus_selection
+            && let Some(cell) = selected_cell
+        {
+            self.dim_outside_cell(&painter, &aff, rect, cell);
+        }
+        if inputs.show_labels {
+            self.ensure_labels(&painter, inputs.countries);
+            self.draw_labels(&painter, &aff, rect);
+        }
         if let Some(cell) = selected_cell {
             self.draw_cell_outline(&painter, &aff, rect.width(), cell);
         }
@@ -232,7 +319,7 @@ impl MapView {
         // --- hover tooltip (custom-painted; no per-frame layout churn) ---
         let mut actions = MapActions::default();
         if let Some(hover) = response.hover_pos() {
-            if show_markers
+            if inputs.show_markers
                 && let Some(hit) = self.markers.hit_test(&aff, rect.width(), hover, 8.0)
                 && let Some(row) = self.marker_rows.get(hit.source_index)
             {
@@ -252,6 +339,101 @@ impl MapView {
         }
 
         actions
+    }
+
+    /// Lay out the country labels once. Text and font never change, so this
+    /// runs on the first labelled frame and never again.
+    fn ensure_labels(&mut self, painter: &egui::Painter, countries: &CountryIndex) {
+        if !self.labels.is_empty() || countries.is_empty() {
+            return;
+        }
+        let font = FontId::proportional(LABEL_FONT_PX);
+        self.labels = countries
+            .iter_with_extent()
+            .map(|(info, (lon, lat), extent)| MapLabel {
+                lon,
+                lat,
+                extent,
+                galley: painter.layout_no_wrap(
+                    info.name.clone(),
+                    font.clone(),
+                    self.style.label_color,
+                ),
+            })
+            .collect();
+        // Biggest first, so when two labels collide the one that survives is
+        // the one a reader is more likely to be orienting by.
+        self.labels
+            .sort_by(|a, b| b.extent.total_cmp(&a.extent).then(a.lon.total_cmp(&b.lon)));
+    }
+
+    /// Blit the cached galleys, dropping any that would overlap one already
+    /// placed. Greedy and O(placed) per candidate, with both ends capped by
+    /// `MAX_LABELS` — no layout, no allocation of new text per frame.
+    fn draw_labels(&self, painter: &egui::Painter, aff: &geo_utils::Affine, rect: Rect) {
+        let offsets = renderer::visible_world_offsets(aff, rect.width());
+        let mut placed: Vec<Rect> = Vec::with_capacity(MAX_LABELS);
+        for label in &self.labels {
+            if placed.len() >= MAX_LABELS {
+                break;
+            }
+            for &offset in &offsets {
+                let (x, y) = aff.apply(label.lon + offset, label.lat);
+                let at = Rect::from_center_size(Pos2::new(x, y), label.galley.size());
+                if !label_fits(&placed, at, rect) {
+                    continue;
+                }
+                painter.galley(at.min, label.galley.clone(), self.style.label_color);
+                placed.push(at);
+            }
+        }
+    }
+
+    /// Wash everything outside the selected cell's screen bounding box.
+    ///
+    /// The box, not the hexagon: four rectangles are four shapes a frame,
+    /// whereas masking to the exact cell would mean building a "world minus
+    /// hexagon" polygon on every viewport change. The cell's own outline is
+    /// drawn afterwards, so the exact selection is never ambiguous.
+    fn dim_outside_cell(
+        &self,
+        painter: &egui::Painter,
+        aff: &geo_utils::Affine,
+        rect: Rect,
+        cell: u64,
+    ) {
+        let Ok(ring) = geo_utils::cell_boundary_lonlat(cell) else {
+            return;
+        };
+        // Use the world copy nearest the viewport center, so a cell that also
+        // appears in a wrapped copy doesn't dim across the seam.
+        let center_x = rect.center().x;
+        let mut best: Option<(f32, Rect)> = None;
+        for offset in renderer::visible_world_offsets(aff, rect.width()) {
+            let mut bounds: Option<Rect> = None;
+            for &(lon, lat) in &ring {
+                let (x, y) = aff.apply(lon + offset, lat);
+                let p = Pos2::new(x, y);
+                bounds = Some(match bounds {
+                    Some(b) => b.union(Rect::from_min_max(p, p)),
+                    None => Rect::from_min_max(p, p),
+                });
+            }
+            if let Some(b) = bounds {
+                let d = (b.center().x - center_x).abs();
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, b));
+                }
+            }
+        }
+        let Some((_, focus)) = best else {
+            return;
+        };
+        for band in focus_bands(rect, focus.intersect(rect)) {
+            if band.width() > 0.0 && band.height() > 0.0 {
+                painter.rect_filled(band, 0.0, self.style.focus_dim);
+            }
+        }
     }
 
     fn draw_cell_outline(
@@ -345,6 +527,34 @@ impl MapView {
             );
         }
     }
+}
+
+/// Whether a candidate label may be drawn: fully on screen, and clear of
+/// every label already placed (plus [`LABEL_PAD_PX`] of breathing room).
+fn label_fits(placed: &[Rect], at: Rect, bounds: Rect) -> bool {
+    bounds.contains_rect(at) && {
+        let padded = at.expand(LABEL_PAD_PX);
+        !placed.iter().any(|p| p.intersects(padded))
+    }
+}
+
+/// The four rectangles of `rect` that lie outside `focus` (top, bottom, left,
+/// right). Their union is `rect \ focus` exactly — the focused region is never
+/// covered, which is the property that keeps dimming from hiding the thing the
+/// user selected.
+fn focus_bands(rect: Rect, focus: Rect) -> [Rect; 4] {
+    [
+        Rect::from_min_max(rect.min, Pos2::new(rect.max.x, focus.min.y)),
+        Rect::from_min_max(Pos2::new(rect.min.x, focus.max.y), rect.max),
+        Rect::from_min_max(
+            Pos2::new(rect.min.x, focus.min.y),
+            Pos2::new(focus.min.x, focus.max.y),
+        ),
+        Rect::from_min_max(
+            Pos2::new(focus.max.x, focus.min.y),
+            Pos2::new(rect.max.x, focus.max.y),
+        ),
+    ]
 }
 
 pub fn wrap_lon(lon: f64) -> f64 {
@@ -450,6 +660,73 @@ mod tests {
         view.fly_to(-0.1, 51.5);
         while view.advance_flight(1.0 / 60.0) {}
         assert!((view.viewport.unwrap().deg_per_px - FLY_DEG_PER_PX / 4.0).abs() < 1e-12);
+    }
+
+    /// Dimming must never touch the selection. If a band overlapped the focus
+    /// rect, turning focus mode on would darken the one region the user asked
+    /// to look at.
+    #[test]
+    fn focus_bands_cover_everything_except_the_focus() {
+        let rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 60.0));
+        let focus = Rect::from_min_max(Pos2::new(30.0, 20.0), Pos2::new(50.0, 40.0));
+        let bands = focus_bands(rect, focus);
+        for b in bands {
+            assert!(
+                !b.intersects(focus.shrink(0.01)),
+                "band {b:?} covers the focus"
+            );
+        }
+        // The bands tile the remainder: sample points outside the focus and
+        // confirm each lands in some band.
+        for (x, y) in [
+            (5.0, 5.0),
+            (40.0, 5.0),
+            (95.0, 55.0),
+            (5.0, 30.0),
+            (95.0, 30.0),
+            (40.0, 55.0),
+        ] {
+            let p = Pos2::new(x, y);
+            assert!(bands.iter().any(|b| b.contains(p)), "({x}, {y}) undimmed");
+        }
+        // Area accounting: the four bands must sum to rect minus focus.
+        let area = |r: Rect| r.width().max(0.0) * r.height().max(0.0);
+        let total: f32 = bands.iter().map(|b| area(*b)).sum();
+        assert!((total - (area(rect) - area(focus))).abs() < 1e-3, "{total}");
+    }
+
+    /// A cell filling the whole viewport dims nothing — the degenerate case
+    /// where every band collapses to zero width or height.
+    #[test]
+    fn focus_bands_are_empty_when_the_cell_fills_the_view() {
+        let rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 60.0));
+        for b in focus_bands(rect, rect) {
+            assert!(b.width() <= 0.0 || b.height() <= 0.0, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn labels_are_dropped_when_they_collide_or_leave_the_view() {
+        let bounds = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(200.0, 100.0));
+        let first = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 12.0));
+        assert!(label_fits(&[], first, bounds));
+        // Overlapping outright.
+        assert!(!label_fits(&[first], first, bounds));
+        // Adjacent but inside the padding gap.
+        let snug = Rect::from_min_size(
+            Pos2::new(first.max.x + LABEL_PAD_PX * 0.5, 10.0),
+            Vec2::new(40.0, 12.0),
+        );
+        assert!(!label_fits(&[first], snug, bounds));
+        // Clear of the padding.
+        let clear = Rect::from_min_size(
+            Pos2::new(first.max.x + LABEL_PAD_PX * 2.0 + 1.0, 10.0),
+            Vec2::new(40.0, 12.0),
+        );
+        assert!(label_fits(&[first], clear, bounds));
+        // Partly off screen: a half-drawn country name is worse than none.
+        let clipped = Rect::from_min_size(Pos2::new(180.0, 10.0), Vec2::new(40.0, 12.0));
+        assert!(!label_fits(&[], clipped, bounds));
     }
 
     #[test]

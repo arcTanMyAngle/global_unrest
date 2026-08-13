@@ -8,15 +8,21 @@
 //! Country border strokes are the one deliberate exception (thin polylines,
 //! cheap for epaint).
 
+pub mod alerts;
 pub mod basemap;
+pub mod glyph;
+pub mod graticule;
 pub mod halo;
 pub mod heatmap;
 pub mod markers;
 
+pub use alerts::{ALERT_MAX_CELLS, AlertLayer};
 pub use basemap::BasemapLayer;
+pub use glyph::MarkerGlyph;
+pub use graticule::GraticuleLayer;
 pub use halo::HaloLayer;
 pub use heatmap::HeatmapLayer;
-pub use markers::{MarkerInput, MarkerLayer};
+pub use markers::{MarkerInput, MarkerLayer, marker_half_px};
 
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Color32, Pos2};
@@ -39,7 +45,19 @@ pub struct MapStyle {
     pub land_fill: Color32,
     pub border: Color32,
     pub border_width: f32,
+    /// Border of the country under the cursor or holding the selected cell —
+    /// the top of the border hierarchy (docs/VISUALIZATION.md V3 item 9).
+    pub border_emphasis: Color32,
     pub graticule: Color32,
+    /// Equator and prime meridian, a step brighter than the rest of the grid
+    /// so the two reference lines are findable without labelling them.
+    pub graticule_major: Color32,
+    /// Country name labels drawn at low zoom.
+    pub label_color: Color32,
+    /// Wash drawn outside a selected cell so the selection reads as focus.
+    /// Deliberately translucent: it must mute the surroundings, never hide
+    /// data the user has not chosen to exclude.
+    pub focus_dim: Color32,
     pub heat_alpha: u8,
     pub marker_protest: Color32,
     pub marker_conflict: Color32,
@@ -50,6 +68,13 @@ pub struct MapStyle {
     /// system overlay ("this is anomalous"), distinct from the hued kind
     /// palette and the heat ramp.
     pub halo_color: Color32,
+    /// Fill opacity of the NOAA weather-alert overlay. Lower than
+    /// `heat_alpha`: the alert layer sits *on top* of the heatmap and must
+    /// tint it, not replace it.
+    pub alert_alpha: u8,
+    /// Dashed outline of an alert cell. Pale ice-blue — the light end of the
+    /// alert ramp, so the outline and its fill obviously belong together.
+    pub alert_outline: Color32,
 }
 
 impl Default for MapStyle {
@@ -59,7 +84,11 @@ impl Default for MapStyle {
             land_fill: Color32::from_rgb(30, 36, 46),
             border: Color32::from_rgb(58, 68, 82),
             border_width: 0.6,
-            graticule: Color32::from_rgb(24, 29, 38),
+            border_emphasis: Color32::from_rgb(150, 166, 190),
+            graticule: Color32::from_rgb(38, 45, 58),
+            graticule_major: Color32::from_rgb(58, 68, 84),
+            label_color: Color32::from_rgb(126, 137, 156),
+            focus_dim: Color32::from_rgba_unmultiplied(6, 8, 13, 130),
             heat_alpha: 110,
             marker_protest: Color32::from_rgb(255, 196, 61),
             marker_conflict: Color32::from_rgb(255, 92, 92),
@@ -67,6 +96,8 @@ impl Default for MapStyle {
             marker_other: Color32::from_rgb(158, 158, 170),
             marker_attention: Color32::from_rgb(186, 130, 255),
             halo_color: Color32::from_rgb(240, 240, 250),
+            alert_alpha: 80,
+            alert_outline: Color32::from_rgb(176, 232, 255),
         }
     }
 }
@@ -134,6 +165,37 @@ pub fn divergence_color(d: f32) -> Color32 {
         }
     }
     Color32::from_rgb(186, 130, 255)
+}
+
+/// Severity tint for a NOAA/NWS weather alert, s ∈ [0, 1]
+/// (docs/VISUALIZATION.md V3 item 8).
+///
+/// A single cool hue that only varies in lightness, anchored on the blue this
+/// app already gives `EventKind::Disruption`. Weather must not read as unrest,
+/// so it deliberately shares no part of the sequential heat ramp
+/// (indigo→amber) or the divergence ramp (teal→violet), and it changes
+/// lightness rather than hue so severity reads as intensity rather than as a
+/// different category of thing.
+pub fn alert_color(severity: f32) -> Color32 {
+    // The dark end is a saturated navy rather than a slate-blue: slate sits
+    // close enough to the divergence ramp's dark-teal shoulder to be
+    // confusable (a unit test pins the separation).
+    const STOPS: [(f32, [u8; 3]); 3] = [
+        (0.0, [28, 58, 132]), // navy — an alert carrying no severity claim
+        (0.5, [56, 130, 224]),
+        (1.0, [176, 232, 255]), // pale ice
+    ];
+    let s = severity.clamp(0.0, 1.0);
+    for pair in STOPS.windows(2) {
+        let (t0, c0) = pair[0];
+        let (t1, c1) = pair[1];
+        if s <= t1 {
+            let f = if t1 > t0 { (s - t0) / (t1 - t0) } else { 0.0 };
+            let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * f) as u8;
+            return Color32::from_rgb(lerp(c0[0], c1[0]), lerp(c0[1], c1[1]), lerp(c0[2], c1[2]));
+        }
+    }
+    Color32::from_rgb(176, 232, 255)
 }
 
 /// Fill for a cell the divergence layer has no comparison to make about (one
@@ -266,6 +328,35 @@ mod tests {
             let c = heat_color(i as f32 / 10.0);
             assert!(c.r() >= last, "red channel must not decrease");
             last = c.r();
+        }
+    }
+
+    /// Weather must not read as unrest: the alert ramp has to stay clear of
+    /// both heat ramps at every point, or a severe storm looks like a spike in
+    /// conflict reporting.
+    #[test]
+    fn alert_ramp_is_monotone_and_never_collides_with_the_heat_ramps() {
+        let dist = |a: Color32, b: Color32| {
+            (i32::from(a.r()) - i32::from(b.r())).abs()
+                + (i32::from(a.g()) - i32::from(b.g())).abs()
+                + (i32::from(a.b()) - i32::from(b.b())).abs()
+        };
+        let mut last = 0u8;
+        for i in 0..=10 {
+            let s = i as f32 / 10.0;
+            let c = alert_color(s);
+            assert!(c.b() >= last, "alert ramp must brighten monotonically");
+            last = c.b();
+            // Cool, never warm — the heat ramp's whole top half is warm.
+            assert!(c.b() > c.r(), "alert tint went warm at s={s}");
+            for j in 0..=10 {
+                let t = j as f32 / 10.0;
+                assert!(dist(c, heat_color(t)) > 60, "alert {s} ~ heat {t}");
+                assert!(
+                    dist(c, divergence_color(t * 2.0 - 1.0)) > 60,
+                    "alert {s} ~ divergence {t}"
+                );
+            }
         }
     }
 

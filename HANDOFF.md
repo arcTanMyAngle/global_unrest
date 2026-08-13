@@ -1,14 +1,168 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (**fifth** session that day). **M0–M6 complete; V1
-and now V2 visualization batches shipped; IODA, Bluesky, and Telegram live
-sources all implemented and verified live in the desktop GUI.** The LNK2005
-blocker is fixed and was committed by the user as `0a638c8 v1`. This session
-shipped the whole **V2 batch** (docs/VISUALIZATION.md items 5–7) and verified
-it in a live GUI run. Next: **V3 visualization batch**, interleaved with
-**M7 service hardening**.
+Last session: 2026-08-12 (**sixth** session that day). **M0–M6 complete; V1,
+V2 and now V3 visualization batches shipped; IODA, Bluesky, and Telegram live
+sources all implemented and verified live in the desktop GUI.** This session
+shipped the whole **V3 batch** (docs/VISUALIZATION.md items 8–10) and verified
+it in a live GUI run against all five live sources. Next: **M7 service
+hardening** — the V1–V3 visualization arc is complete.
+
+**Everything in this session is uncommitted.** Nothing was committed or
+pushed, per the standing instruction. See "What to commit" below for suggested
+PR-sized boundaries.
 
 Read this file, then [CLAUDE.md](CLAUDE.md).
+
+## V3 — what shipped this session (2026-08-12, sixth session)
+
+Design rationale is in [docs/VISUALIZATION.md](docs/VISUALIZATION.md) §
+"V3 as built"; this is the orientation summary.
+
+**8. Per-source visual identity + a real legend + the font fix.**
+- Markers gained a **second encoding channel: shape = source**, with color
+  still meaning `EventKind` alone. New `renderer::glyph::MarkerGlyph`
+  (diamond ACLED, square GDELT, triangle-up Bluesky, triangle-down Telegram).
+  The unit polygons are **equal-area**, not equal-extent, so shape cannot leak
+  into the severity-size channel; `renderer::marker_half_px` is public so the
+  legend's size ramp draws at the real sizes.
+- New `renderer::alerts::AlertLayer`: NOAA/NWS alerts as a cool navy→ice
+  severity tint inside a **dashed** outline no other layer uses. Backed by a
+  new `storage::alert_cells`, which fixes `source = 'noaa'` **in SQL** (same
+  reasoning as the ledger's attention exclusion — the layer's claim is
+  "weather, not unrest", so no caller may aim it elsewhere; IODA outages are
+  `Disruption` too and there is a test that they stay out).
+- **The font fix landed as painted swatches**, not a bundled font
+  (`apps/global-signal-desktop/src/style.rs`). Swatches draw from
+  `MarkerGlyph::unit_corners` — the same table the marker mesh uses — so the
+  legend cannot drift from the map. Every `◆`/`●`/`■`/`▲` in the app is gone.
+- The legend is now a collapsible panel documenting **every** encoding: kind
+  colors, source shapes, severity sizing, halo, alert overlay + its severity
+  ramp, the divergence palette, and the precision rules.
+
+**9. Basemap & orientation polish, offline-first.** New
+`renderer::graticule::GraticuleLayer` (spacing adapts to zoom from a fixed
+ladder; only in-viewport lines are generated; equirectangular is affine so
+each line is one screen-aligned segment). Country-border hierarchy via
+`BasemapLayer::paint(.., emphasis)` — the hovered country's rings redraw
+brighter and heavier, **after** everything else so a neighbour can't overdraw
+them. Country labels from **cached galleys**, collision-culled
+largest-country-first. Focus dimming outside a selected cell, **off by
+default** because dimming hides real data.
+
+`MapView::show` now takes a `MapInputs` struct instead of a row of positional
+bools — V3 added four and the call sites had become unreadable.
+
+**10. "How to read this map" overlay.** New
+`apps/global-signal-desktop/src/how_to_read.rs`. First-run (a versioned
+`how_to_read_seen_v1` settings key), `?` key, and a discoverable top-bar
+button. Its "What this map cannot tell you" section is a section of equal
+weight, and a test fails if it is trimmed.
+
+### Two things worth not re-deciding
+
+- **`egui::RichText` renders markdown markup literally.** The overlay's copy
+  is structured data (`Para { lead, text }`, bold lead-in + sentence) rather
+  than `**bold**` inline. A test rejects any `*` that creeps back in.
+- **The alert outline's dash length is derived from each ring's screen
+  perimeter**, giving a fixed dash *count*. A fixed dash *length* would make a
+  zoomed-in cell emit thousands of segments per frame — the per-frame growth
+  VISUALIZATION.md's perf guardrail forbids. Tested across four decades of
+  zoom. `Shape::dashed_line_many` splits a dash at each corner, so the real
+  bound is budget + ring vertices.
+
+### 🔴 Found while verifying: markers had been invisible, and it was a *filter*
+
+The map rendered **zero point markers** worldwide. This was **not** a V3
+regression and **not** a data gap — the persisted `filters_live_v1` setting
+had **`video_only = true`** (the V1 "🎥 has video" toggle), left on in an
+earlier session and reloaded on every launch since. It restricts markers to
+records carrying a classified video URL, which almost nothing has.
+
+Establishing that took most of the verification budget. **The cheap check
+that would have found it in one step is now permanent**: `rebuild_markers`
+logs `markers=… rows=…` at `info`, so "no markers" can be told from "markers
+not drawing" without a rebuild. Unchecking the filter took it from
+`markers=0` to `markers=53663` instantly.
+
+The database census that resolved it (taken with a throwaway
+`crates/storage/examples/precision_census.rs`, since deleted):
+
+```
+acled     city       51861   2025-06-01..2025-07-31
+acled     admin1     17248
+acled     country     1779
+gdelt     city        1793   2026-07-17..2026-08-13
+gdelt     country      506
+gdelt     admin1       437
+noaa      admin1      1243   2026-07-16..2026-08-14
+bluesky   country       54 / city 7
+telegram  country       16 / city 2
+ioda      country       17
+rows the marker layer can draw (city+exact): 53663
+```
+
+Note ACLED sits in a **fixed 2025-07 window** (`LES_ACLED_WINDOW` in `.env`),
+so ACLED markers only appear in windows covering July 2025 — widen to "all
+data" before concluding ACLED is missing.
+
+### GUI verification — done, with the honest split
+
+A live run from the workspace root with all five sources online (ACLED 35229,
+NOAA 375 fetched → 129 ingested, Telegram 17, IODA 5/6, Bluesky counting;
+GDELT `partial` on the DOC feed, the designed degraded state), plus a second
+offline run over the full cached extent. Screenshots in the scratchpad.
+
+**Screenshot-verified**: the reading overlay opens on first run with all five
+sections and no literal markdown; every legend swatch renders as a real
+painted shape (the missing-glyph boxes are gone) across marker colors, source
+shapes, the severity ramp, halo, alert + severity ramp, divergence ramp and
+precision rows; NOAA alert cells render as dashed blue-tinted hexes across the
+continental US and are unmistakably distinct from the unrest heat; the
+graticule and collision-culled country labels render at multiple zooms; the
+hovered country's border is visibly emphasized (Ukraine, Iran, Spain, and the
+US — whose Alaska rings light up with it, so multi-ring countries work).
+- **The V3 headline claim is now screenshot-provable**: at one zoom, a violet
+  **▲ over Lebanon/Israel** and a violet **▼ over northern Iran** — same kind
+  color, told apart by shape alone. Hovering the ▼ tooltips
+  `telegram · City`, confirming the mapping is not inverted.
+
+**Query-cross-checked, not just screenshot**: filtering markers to
+attention-only yielded exactly `markers=9`, matching the census's
+bluesky-city 7 + telegram-city 2 exactly. The all-kinds count `markers=53663`
+matches the census's city+exact total exactly.
+
+**Not verified this session**: focus dimming (`dim outside selection`) was
+never switched on in a screenshot — it is covered by
+`focus_bands_cover_everything_except_the_focus` and its degenerate-case twin,
+so the claim rests on unit tests, not pixels. Same for flight termination
+(unchanged from V2).
+
+### What to commit (V3 landed as one working tree, not three commits)
+
+VISUALIZATION.md's guardrail asks for a commit per item. Suggested split if
+you want it:
+1. **item 8** — `crates/renderer/{glyph,alerts}.rs`, `markers.rs`,
+   `lib.rs` (style + `alert_color`), `crates/storage/src/lib.rs`
+   (`AlertCell`/`alert_cells`), `apps/.../style.rs`, the legend rewrite and
+   `show_alerts` in `app.rs`/`panels.rs`.
+2. **item 9** — `crates/renderer/graticule.rs`, `basemap.rs` border
+   hierarchy, `crates/geo-utils` `iter_with_extent`, `map_view.rs`
+   (`MapInputs`, labels, focus dimming), the orientation menu.
+3. **item 10** — `apps/.../how_to_read.rs` + its wiring.
+4. docs (`CLAUDE.md`, `docs/VISUALIZATION.md`, this file).
+
+### Gates — all re-run to completion this session
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ **244 passed** (was 221; +23 new) |
+| `cargo build -p global-signal-desktop` | ✅ links |
+| 5-way live feature matrix (clippy + test) | ✅ ✅ |
+| `telegram-live` solo leg | ✅ |
+| `cargo test -p source-acled --features live` | ✅ |
+| `cargo deny check` | ✅ |
 
 ## V2 — what shipped this session (2026-08-12, fifth session)
 
@@ -316,12 +470,12 @@ parse as an int; kill by process name instead.
 | | |
 |---|---|
 | Repo | `live-earth-signals/` — the user's **public repo** `github.com/arcTanMyAngle/global_unrest`. **`origin/main` is still behind**: everything through `0a638c8 v1` is committed **locally** but not pushed. Ask before pushing *or* committing — the user does their own commits at the end of a session. |
-| Commits | **The V2 batch is committed** as **`77bf32c bluey and teley`** (the user's own commit, made from a separate terminal near the end of the session) — 13 files, +1965/−46, including the new `apps/global-signal-desktop/src/sparkline.rs`, which is now **tracked**. `0a638c8 v1` before it carried the LNK2005 fix. Only the tail of this file and `docs/ROADMAP.md` were edited after that commit and remain uncommitted. Nothing is pushed. |
-| Tests | **All green, all re-run to completion this session** — see the V2 gate table above. Headline: `cargo test --workspace` runs **35 test binaries / 221 tests** (197 before V2), `cargo build -p global-signal-desktop` links, `cargo deny check` green. |
+| Commits | HEAD is **`7b7516d handoff`**; the V2 batch is `77bf32c bluey and teley` and `0a638c8 v1` carried the LNK2005 fix. **The entire V3 batch is uncommitted** — 11 modified files plus 5 new ones (`renderer/src/{glyph,alerts,graticule}.rs`, `global-signal-desktop/src/{style,how_to_read}.rs`), all currently **untracked**. Nothing is pushed. |
+| Tests | **All green, all re-run to completion this session** — see the V3 gate table above. Headline: `cargo test --workspace` = **244 passed, 0 failed** (221 before V3), `cargo build -p global-signal-desktop` links, `cargo deny check` green. (Counting test *binaries* from the log is unreliable — `Select-String 'FAILED'` is case-insensitive and matches "0 failed" on every result line. Match `-CaseSensitive`, or check for result lines not containing " 0 failed".) |
 | Version | Workspace `0.6.0` (milestone-tied: `0.<M>.0`); not bumped for V1, IODA, Bluesky, or Telegram — versioning is milestone-tied, not batch-tied |
 | Credentials | `.env` (gitignored) holds `ACLED_EMAIL`/`ACLED_PASSWORD` and `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`/`LES_TELEGRAM_SESSION_FILE`. **`./telegram.session` exists and is authorized** (JSON format as of this session; re-created after the storage swap, user did the SMS step). `telegram.session-sqlite-backup` is the dead pre-swap SQLite file — gitignored, unreadable by the app, safe to delete. IODA and Bluesky are keyless. |
-| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1 ✅; V2 ✅; IODA/Bluesky/Telegram ✅, pulled forward from M8; M7/V3/M8-remainder next) |
-| **GUI live-visual verification** | **Done for V1 and V2** (screenshots). **IODA: log-verified.** **Bluesky and Telegram: done** (previous session) — screenshot-verified in the status panel + map, query-verified per source against a zero-row baseline. V2's verification and its screenshot-vs-reasoning split is in the V2 section at the top of this file. |
+| Brief / plan | `../prompt_1.md`; [docs/PLAN.md](docs/PLAN.md) (M0–M5 ✅); [docs/ROADMAP.md](docs/ROADMAP.md) (M6 ✅ except branch protection; V1/V2/V3 ✅ — the visualization arc is complete; IODA/Bluesky/Telegram ✅, pulled forward from M8; M7 then M8-remainder next) |
+| **GUI live-visual verification** | **Done for V1, V2 and V3** (screenshots). **IODA: log-verified.** **Bluesky and Telegram: done** — and as of V3, a screenshot *alone* now attributes a marker to Bluesky vs Telegram (▲ vs ▼), which every previous session had to establish with a database query. V3's verification and its screenshot-vs-unit-test split is in the V3 section at the top of this file. |
 | Dependency tree | `cargo deny check` **green** against the current tree (advisories, bans, licenses, sources). `libsql-ffi` is **gone** — so the `libclang`/bindgen-on-Ubuntu risk this row used to warn about no longer exists. New build-time additions are `serde_with` + `darling`, both cleared. |
 
 ## V1 — what shipped (2026-08-10, 4 PR-sized commits, see `git log`)
@@ -602,28 +756,25 @@ the rule, not just a hypothetical.
 
 ## Next session (in priority order)
 
-1. **Commit the doc tail.** The V2 code and most docs are already in
-   `77bf32c bluey and teley`; only the last edits to this file and
-   `docs/ROADMAP.md` are outstanding. Nothing is pushed — ask before
-   pushing, as always. Note V2 landed as **one** commit rather than the
-   three PR-sized ones VISUALIZATION.md's guardrails call for; worth
-   splitting future batches earlier if that granularity matters.
-2. **V3 visualization batch**
-   ([docs/VISUALIZATION.md](docs/VISUALIZATION.md) items 8–10): per-source
-   layer identity + a real legend panel (this is what would let a screenshot
-   alone attribute a marker to Telegram vs Bluesky — still the gap in every
-   GUI verification so far), basemap/orientation polish, and a "how to read
-   this map" overlay. **Fold the font-glyph fix into item 8** — the legend is
-   the right place to stop relying on glyphs egui's bundled fonts don't have
-   (see "Two small things found while verifying" above). Interleave with
-   **M7 service hardening**. Honest-visualization principles and perf
-   guardrails in VISUALIZATION.md are binding; never copy a provider's
-   dashboard.
-3. Still-open loose ends are unchanged — see "Loose ends carried forward"
+1. **Commit the V3 batch.** The whole working tree is uncommitted — see
+   "What to commit" above for the suggested item-8 / item-9 / item-10 / docs
+   split. Nothing is pushed; ask before pushing, as always.
+2. **M7 — service hardening.** With V3 done the visualization arc (V1–V3) is
+   complete, so this is the next milestone: axum middleware (timeouts,
+   concurrency cap, per-IP rate limit, CORS, compression, trace layer,
+   graceful shutdown), snapshot-version ETag, `/events` pagination, OpenAPI
+   via utoipa, Prometheus `/metrics`, snapshot-age alerting in `/health`, and
+   an integration suite over a committed fixture snapshot. **Never serve
+   ACLED-bearing snapshots publicly** (SAFETY).
+3. **Refresh the README screenshot** — it still shows the pre-V1 map, and the
+   V3 map (source-shaped markers, alert overlay, graticule, labels, legend) is
+   by far the best portfolio image this project has had. The scratchpad
+   screenshots from this session are a good starting point.
+4. Still-open loose ends are unchanged — see "Loose ends carried forward"
    below. Branch protection on `main` remains the one unfinished M6 item and
    is a manual GitHub-settings step (no authenticated `gh` on this machine).
    The **Bluesky mock-server test** is still the best-scoped `codex` task in
-   the backlog and was *not* picked up this session (V2 filled it).
+   the backlog and was *not* picked up this session (V3 filled it).
 
 Useful timing facts for any future live run (established by a real run, not
 predicted): Telegram's first sweep fires **immediately** on startup
@@ -704,6 +855,26 @@ which take priority per the user). Summary:
   actually registers signal (see Telegram section above).
 
 ## Landmines and quirks (learned the hard way)
+
+- **A persisted UI filter can look exactly like a rendering bug (V3).** The
+  map showed zero markers worldwide; the cause was `video_only = true` saved
+  in `filters_live_v1` from an earlier session. **Check the top bar's filter
+  state before debugging the renderer** — and `rebuild_markers` now logs
+  `markers=… rows=…` at `info` precisely so this is one grep, not an
+  investigation. Same class of trap as the time-window one below.
+- **ACLED lives in a fixed 2025-07 window** (`LES_ACLED_WINDOW` in `.env`),
+  so ACLED markers are invisible in any window that doesn't cover July 2025.
+  Combined with the "window opens ahead of now" trap, a fresh launch can show
+  none of the project's 51k ACLED city-precision rows.
+- **`Select-String 'FAILED'` on a cargo test log is case-insensitive** and
+  matches "0 failed" on every `test result:` line, so it reports dozens of
+  "failures" in a fully green run. Use `-CaseSensitive`, or filter result
+  lines that don't contain " 0 failed".
+- **`egui::RichText` does not parse markdown.** `**bold**` renders its
+  asterisks. Style per span instead (see `how_to_read.rs`, which keeps its
+  copy as structured data with a test guarding against regressions).
+- **egui 0.35's `Context` method is `egui_wants_keyboard_input()`**, not
+  `wants_keyboard_input()`.
 
 - **`cargo check`/`cargo clippy` do not link — they cannot catch duplicate
   native symbols.** Two crates that each vendor the same C library

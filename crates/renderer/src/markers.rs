@@ -1,15 +1,18 @@
-//! Event marker layer: batched screen-space quads (diamonds), one mesh for
+//! Event marker layer: batched screen-space convex polygons, one mesh for
 //! all points — never thousands of individual `Shape::Circle`s.
 //!
 //! Callers must only feed City/Exact-precision records (the precision
 //! rendering contract is enforced upstream in the storage query).
+//!
+//! Color encodes [`EventKind`], shape encodes the reporting source — see
+//! [`crate::MarkerGlyph`].
 
 use core_types::EventKind;
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Painter, Pos2, Shape};
 use geo_utils::Affine;
 
-use crate::{MapStyle, MeshCache, affine_key, visible_world_offsets};
+use crate::{MapStyle, MarkerGlyph, MeshCache, affine_key, visible_world_offsets};
 
 #[derive(Debug, Clone)]
 pub struct MarkerInput {
@@ -27,6 +30,9 @@ pub struct MarkerInput {
     /// full opacity, the value outside playback so pausing shows full
     /// detail).
     pub alpha: f32,
+    /// Outline shape, derived from the record's live source. The second
+    /// encoding channel alongside the kind-colored fill.
+    pub glyph: MarkerGlyph,
     /// Index back into the caller's point list (for hover/click lookups).
     pub source_index: usize,
 }
@@ -38,6 +44,13 @@ pub struct MarkerLayer {
 
 const BASE_HALF_PX: f32 = 2.5;
 const MAX_EXTRA_PX: f32 = 3.0;
+
+/// Screen half-extent for a marker whose sizing driver (severity, else
+/// weight) is `size_t`. Public so the legend can draw its severity ramp at the
+/// exact sizes the map uses instead of guessing at them.
+pub fn marker_half_px(size_t: f32) -> f32 {
+    BASE_HALF_PX + MAX_EXTRA_PX * size_t.clamp(0.0, 1.0)
+}
 
 impl MarkerLayer {
     pub fn new(points: Vec<MarkerInput>) -> Self {
@@ -98,41 +111,27 @@ impl MarkerLayer {
     }
 }
 
-/// One diamond (rotated quad) per point, batched into a single mesh.
+/// One convex glyph polygon per point, fan-triangulated from its first corner
+/// and batched into a single mesh.
 fn build_mesh(points: &[MarkerInput], aff: &Affine, lon_offset: f64, style: &MapStyle) -> Mesh {
     let mut mesh = Mesh::default();
     mesh.vertices.reserve(points.len() * 4);
     mesh.indices.reserve(points.len() * 6);
     for p in points {
         let (x, y) = aff.apply(p.lon + lon_offset, p.lat);
-        let size_t = p.severity.unwrap_or(p.weight).clamp(0.0, 1.0);
-        let half = BASE_HALF_PX + MAX_EXTRA_PX * size_t;
+        let half = marker_half_px(p.severity.unwrap_or(p.weight));
         let color = style.marker_color(p.kind).gamma_multiply(p.alpha);
+        let corners = p.glyph.unit_corners();
         let base = mesh.vertices.len() as u32;
-        mesh.vertices.extend_from_slice(&[
-            Vertex {
-                pos: Pos2::new(x, y - half),
-                uv: WHITE_UV,
-                color,
-            },
-            Vertex {
-                pos: Pos2::new(x + half, y),
-                uv: WHITE_UV,
-                color,
-            },
-            Vertex {
-                pos: Pos2::new(x, y + half),
-                uv: WHITE_UV,
-                color,
-            },
-            Vertex {
-                pos: Pos2::new(x - half, y),
-                uv: WHITE_UV,
-                color,
-            },
-        ]);
-        mesh.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        mesh.vertices.extend(corners.iter().map(|c| Vertex {
+            pos: Pos2::new(x + c[0] * half, y + c[1] * half),
+            uv: WHITE_UV,
+            color,
+        }));
+        for i in 1..corners.len() as u32 - 1 {
+            mesh.indices
+                .extend_from_slice(&[base, base + i, base + i + 1]);
+        }
     }
     mesh
 }
@@ -151,6 +150,7 @@ mod tests {
                 weight: 0.5,
                 severity: None,
                 alpha: 1.0,
+                glyph: MarkerGlyph::Diamond,
                 source_index: 0,
             },
             MarkerInput {
@@ -160,6 +160,7 @@ mod tests {
                 weight: 1.0,
                 severity: None,
                 alpha: 1.0,
+                glyph: MarkerGlyph::Diamond,
                 source_index: 1,
             },
         ])
@@ -171,6 +172,58 @@ mod tests {
         let mesh = build_mesh(&layer().points, &vp.affine(), 0.0, &MapStyle::default());
         assert_eq!(mesh.vertices.len(), 8);
         assert_eq!(mesh.indices.len(), 12);
+    }
+
+    /// A 3-corner glyph must fan into exactly one triangle — the loop bound
+    /// off by one here would either drop the glyph or index out of the mesh.
+    #[test]
+    fn triangle_glyphs_emit_one_triangle_and_stay_in_bounds() {
+        let vp = MapViewport::fit_world(1000.0, 500.0);
+        let points = vec![
+            MarkerInput {
+                glyph: MarkerGlyph::TriangleUp,
+                ..layer().points[0].clone()
+            },
+            MarkerInput {
+                glyph: MarkerGlyph::TriangleDown,
+                ..layer().points[1].clone()
+            },
+        ];
+        let mesh = build_mesh(&points, &vp.affine(), 0.0, &MapStyle::default());
+        assert_eq!(mesh.vertices.len(), 6);
+        assert_eq!(mesh.indices.len(), 6);
+        assert!(
+            mesh.indices
+                .iter()
+                .all(|&i| (i as usize) < mesh.vertices.len())
+        );
+    }
+
+    /// Two sources whose markers share a kind (both chatter feeds are
+    /// `NewsAttention`) must still differ geometrically — that difference is
+    /// the only thing a screenshot can use to tell them apart.
+    #[test]
+    fn different_glyphs_produce_different_geometry_at_the_same_point() {
+        let vp = MapViewport::fit_world(1000.0, 500.0);
+        let style = MapStyle::default();
+        let at = |glyph| {
+            vec![MarkerInput {
+                lon: 0.0,
+                lat: 0.0,
+                kind: EventKind::NewsAttention,
+                weight: 0.5,
+                severity: None,
+                alpha: 1.0,
+                glyph,
+                source_index: 0,
+            }]
+        };
+        let up = build_mesh(&at(MarkerGlyph::TriangleUp), &vp.affine(), 0.0, &style);
+        let down = build_mesh(&at(MarkerGlyph::TriangleDown), &vp.affine(), 0.0, &style);
+        let ys = |m: &Mesh| m.vertices.iter().map(|v| v.pos.y).collect::<Vec<_>>();
+        assert_ne!(ys(&up), ys(&down));
+        // ...while the color channel still says only "news attention".
+        assert_eq!(up.vertices[0].color, down.vertices[0].color);
     }
 
     #[test]
@@ -185,6 +238,7 @@ mod tests {
             weight: 0.0, // would be near-base size without severity
             severity: Some(1.0),
             alpha: 1.0,
+            glyph: MarkerGlyph::Diamond,
             source_index: 0,
         }];
         let base_size_no_severity = vec![MarkerInput {
@@ -194,6 +248,7 @@ mod tests {
             weight: 0.0,
             severity: None,
             alpha: 1.0,
+            glyph: MarkerGlyph::Diamond,
             source_index: 0,
         }];
         let big = build_mesh(&low_weight_high_severity, &aff, 0.0, &style);
@@ -219,6 +274,7 @@ mod tests {
             weight: 0.5,
             severity: None,
             alpha: 0.35,
+            glyph: MarkerGlyph::Diamond,
             source_index: 0,
         }];
         let full = vec![MarkerInput {
@@ -262,6 +318,7 @@ mod tests {
                 weight: 0.5,
                 severity: None,
                 alpha: 1.0,
+                glyph: MarkerGlyph::ALL[i % MarkerGlyph::ALL.len()],
                 source_index: i,
             })
             .collect();
@@ -269,7 +326,9 @@ mod tests {
         let start = std::time::Instant::now();
         let mesh = build_mesh(&points, &vp.affine(), 0.0, &MapStyle::default());
         let elapsed = start.elapsed();
-        assert_eq!(mesh.vertices.len(), 40_000);
+        // 2500 points per glyph; the two quads contribute 4 vertices each and
+        // the two triangles 3, so 2500 * (4 + 4 + 3 + 3).
+        assert_eq!(mesh.vertices.len(), 35_000);
         assert!(
             elapsed < std::time::Duration::from_millis(100),
             "10k-point mesh build took {elapsed:?} (budget 100ms)"

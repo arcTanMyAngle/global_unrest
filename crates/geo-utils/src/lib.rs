@@ -316,6 +316,23 @@ impl CountryIndex {
             .iter()
             .filter_map(|s| s.centroid.map(|c| (&s.info, c)))
     }
+
+    /// Same as [`Self::iter_with_centroid`], plus the country's bounding-box
+    /// extent in square degrees.
+    ///
+    /// That extent is **not an area** — a degree of longitude shrinks toward
+    /// the poles and a bounding box overstates any non-rectangular country.
+    /// It exists solely to rank countries by rough size when map labels
+    /// collide and one has to be dropped, and must never be surfaced as a
+    /// measurement.
+    pub fn iter_with_extent(&self) -> impl Iterator<Item = (&CountryInfo, (f64, f64), f64)> {
+        self.shapes.iter().filter_map(|s| {
+            s.centroid.map(|c| {
+                let extent = s.bbox.width() * s.bbox.height();
+                (&s.info, c, extent)
+            })
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
