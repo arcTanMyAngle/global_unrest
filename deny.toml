@@ -31,6 +31,13 @@ ignore = [
     # Wayland clipboard's decorative-font fallback — not on any input path
     # this app feeds untrusted data through. Revisit if winit drops it.
     "RUSTSEC-2026-0192",
+    # paste is unmaintained (author archived it as feature-complete, not
+    # insecure — no CVE, no known issue, just no further releases). Reached
+    # via utoipa-axum (M7, services/api's OpenAPI spec), which re-exports it
+    # as a macro-hygiene helper; utoipa-axum is already at its latest
+    # version (0.2.0) and has no alternative. Revisit if utoipa-axum drops
+    # the dependency upstream.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

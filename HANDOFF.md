@@ -1,9 +1,130 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (**seventh** session that day). **M0–M6 complete;
-V1–V3 visualization batches shipped and committed (`0b90e97 diag`); M7
-service hardening (all 5 roadmap items) implemented this session.** Read
-this file, then [CLAUDE.md](CLAUDE.md).
+Last session: 2026-08-12 (**eighth** session that day). Read this file, then
+[CLAUDE.md](CLAUDE.md).
+
+## Eighth session (2026-08-12): M7 verification, timeline default-view fix, custom range, drug-policy query
+
+**Orientation correction, same lesson as the seventh session's own note
+below**: this session's brief claimed "everything from the last session is
+uncommitted" (the full M7 diff, the SAFETY doc fix, the fixture generator).
+`git log`/`git status` at the start showed otherwise — the user had already
+committed all of it in `c10bde8 readme :)` and `4326199 the map is working
+so smooth` before this session began. Only three files were actually
+uncommitted: `HANDOFF.md`, `deny.toml`, `services/api/src/main.rs` — the
+tail end of M7 (the `paste`/RUSTSEC-2024-0436 `deny.toml` ignore entry and
+the `/openapi.json` info-block fix). **Always re-verify a handoff's
+committed/uncommitted claim yourself** — third time this has mattered.
+
+**1. M7's remaining verification gap, closed.** The 6-way feature-matrix
+clippy+test (`acled-live`, `noaa-live`, `ioda-live`, `bluesky-live`,
+`telegram-live` solo, plus the full union) and
+`cargo test -p source-acled --features live` had never been re-run against
+the M7 diff. Ran all of it for real this session (not just launched) — every
+leg green (acled-live: 20+1+1 tests; noaa/ioda/bluesky/telegram-live: same
+shape each; the 5-way union: same; `source-acled --features live`: 13+6
+tests). M7 is now fully verified, not just "low risk."
+
+**2. Fixed the default-view date bug** (user-reported from screenshots,
+carried over from the seventh session — see "Loose ends" below for the old
+speculation, now resolved for real). Root cause, confirmed by querying the
+actual persisted `signals.duckdb` directly (a throwaway
+`crates/storage/examples/time_extent_census.rs`, same pattern as
+`precision_census.rs`, deleted after use — do this again next time rather
+than guessing): the default window was anchored to `time_extent()`'s raw
+`max(ts_epoch_s)`, which is **not** "now" in either direction. Live right
+now: NOAA's `onset` field (not "expiry" — the seventh session's landmine
+note had the field name wrong) had a real row dated **2026-08-14 22:17
+UTC**, ~40h ahead of wall-clock now (`2026-08-13 06:06`), which would have
+put the default window entirely in the future with almost nothing else in
+it. The opposite direction (what the user actually saw — 2025-07-30) is the
+same root cause from the other side: a fresh run or a run where only ACLED
+had reported yet leaves `max(ts_epoch_s)` sitting at ACLED's fixed
+`LES_ACLED_WINDOW` tail, since GDELT/NOAA/Bluesky/Telegram hadn't landed
+anything newer yet.
+
+**Fix** (`apps/global-signal-desktop/src/app.rs`): new pure
+`now_anchored_start_bucket(extent, len_buckets, now_epoch_s)` positions the
+window's right edge at wall-clock now (bucket-aligned), clamped into the
+observed extent — falling back to the extent's tail only when "now" is
+genuinely outside the data (nothing to show either way). New
+`Timeline.auto_follow: bool` (default `true`): while on, every extent
+refresh *and* every window-length change re-anchors to now, so a live
+dashboard actually stays live; it's cleared the moment the user scrubs the
+strip, starts playback, or applies a custom range, and a new "⏵ now" button
+(shown only when off) turns it back on. 4 new unit tests, including the
+exact regression (`now_anchored_start_bucket_ignores_a_future_tail`) using
+the real NOAA-onset-ahead-of-now shape.
+
+**3. Added the typeable custom time-range input** (`timeline_panel` in
+`panels.rs` + `WindowLen::Custom(i64)` in `app.rs`). Two "YYYY-MM-DD HH:MM"
+(UTC) text fields plus an apply button (Enter also applies); pure
+`parse_custom_range` bucket-aligns both ends and clamps into the extent
+(same invariant `now_anchored_start_bucket` keeps — `start_bucket` always
+stays in `[0, total)`), returning a short error string on bad/backwards
+input shown inline rather than silently doing nothing. 4 new unit tests.
+Applying a custom range clears `auto_follow`, same as a manual scrub.
+
+**4. Drug-policy signal — scope confirmed, narrow slice shipped.** Asked
+the user to disambiguate the "drug category" request from HANDOFF's own
+open question: they confirmed **"New EventKind/theme for drug-policy
+signals"** (not the harm-reduction/dosage-info platform, which stays
+declined). Investigated the actual fit before building: `EventKind` is a
+small closed taxonomy wired into colors, the legend, the histogram stack,
+and scoring — a drug-related protest is still `Protest`, cartel violence is
+still `Conflict`, so a new *kind* would be a structural misfit, not just a
+bigger change. Separately, GDELT's own theme-tagging plumbing
+(`GdeltSource.themes`, `SourceFilters.themes`) is **effectively inert in
+production** — `self.themes` is always `Vec::new()` and `.with_query()` is
+only ever called from tests — so building a *real* filterable theme system
+was a materially bigger, separately-scoped lift than one topic warranted.
+Landed the honest narrow slice instead: widened
+`crates/source-gdelt::DEFAULT_QUERY` with drug-policy terms (`"drug
+trafficking"`, `narcotics`, `"overdose crisis"`, quoted per GDELT DOC 2.0's
+real exact-phrase syntax — verified via WebSearch, not memory, since a bare
+multi-word term is not an implicit phrase match there). This is
+`EventKind::NewsAttention` only (all DOC results are), which is the correct
+half of CLAUDE.md's attention/event-data separation for this — no discrete
+`Conflict`/`Protest` classifier exists for "drug policy" as a structural
+kind, and none should be invented for it. **If real theme filtering is
+wanted later, that's a new, larger feature — flag it explicitly, don't
+fold it into a "add drug coverage" ask.**
+
+**5. AI daily-summary feature — clarifying round mostly done, blocked on
+one real ambiguity.** Asked the four scoping questions HANDOFF's seventh
+session flagged as unresolved. Answered: separation rule = two labeled
+sections (attention vs. event data), matching the divergence layer/ledger
+precedent; schedule = one digest per calendar day — the user's own framing
+was a new **"daily events page"** (a dedicated UI surface, not a small
+panel widget, which also answers "where it renders"). **Not resolved**:
+which LLM backend and how credentialed. The user's answer — "could we make
+our own for this... or are there free ones to use?... i am fine with using
+my own subscriptions but if others want it we need something reasonable...
+so i guess for now use codex" — is genuinely ambiguous between (a) ship
+OpenAI's Codex/API as the runtime summarizer end users' installs would call,
+and (b) delegate *this session's implementation* to the `codex` CLI
+subagent while the shipped backend stays undecided. These imply very
+different work. Sent one follow-up question to disambiguate, plus an offer
+to research current free/cheap LLM API tiers via WebSearch rather than
+assert stale pricing/availability claims from memory (this project's own
+standing convention). **Do not start building the AI summary feature until
+that reply lands** — it is architecture-defining, not a detail.
+
+**Gates, all re-run to completion after every change above**: `cargo fmt
+--all --check` ✅, `cargo clippy --workspace --all-targets -- -D warnings`
+✅, `cargo test --workspace` ✅ (36 `test result:` lines, all `0 failed`),
+`cargo deny check` ✅ (advisories/bans/licenses/sources all ok).
+
+**What to commit** (nothing committed this session — standing instruction,
+user does their own commits): `apps/global-signal-desktop/src/app.rs` +
+`panels.rs` (items 2–3, default-view fix + custom range, one coherent
+change), `crates/source-gdelt/src/lib.rs` (item 4, drug-policy query),
+`deny.toml` + `services/api/src/main.rs` (carried over from the seventh
+session, unrelated to this session's work — see that section's own "what to
+commit" split), `HANDOFF.md`. No new files; the throwaway census example
+was deleted before this diff, same as `precision_census.rs` before it.
+
+## M7 — service hardening, what shipped in the seventh session (2026-08-12)
 
 **Correction to the sixth session's own handoff**: it claimed the V3 batch
 was uncommitted. It wasn't — `git log`/`git status` at the start of this
@@ -157,14 +278,27 @@ itself tell you to read before touching that crate, so it mattered.
 
 ### Not yet done / not yet verified this session
 
-- **Full workspace gate battery was launched but not confirmed finished
-  before this handoff was written** — `cargo test --workspace`,
-  `cargo deny check`, and a real `cargo build -p global-signal-desktop`
-  were chained in one background run
-  (`cargo fmt --all --check` ✅ and `cargo clippy --workspace --all-targets
-  -- -D warnings` ✅ **did** finish clean before this was written).
-  **Check the actual result before assuming green** — don't just trust
-  this paragraph.
+- **Full workspace gate battery finished after this handoff was first
+  drafted — results confirmed, not just launched:**
+  `cargo fmt --all --check` ✅, `cargo clippy --workspace --all-targets --
+  -D warnings` ✅, `cargo test --workspace` ✅ (every `test result:` line
+  `0 failed`), `cargo build -p global-signal-desktop` ✅ (real link, not
+  just check). **`cargo deny check` ❌ — one new failure**:
+  `RUSTSEC-2024-0436`, the `paste` crate flagged "no longer maintained,"
+  pulled in transitively by `utoipa-axum` (M7 item 4). **Fixed and
+  re-verified**: `utoipa-axum` is already at its latest version (0.2.0,
+  no newer release drops `paste`), so added a documented
+  `[advisories.ignore]` entry in `deny.toml` (same pattern as the two
+  existing entries there) — `cargo deny check` now passes clean, all four
+  categories.
+- **Also found and fixed while doing a live curl pass on `/openapi.json`**:
+  the spec's `info` block was `utoipa-axum`'s own crate metadata (title
+  "utoipa-axum", that crate's author as contact) — nothing had set it for
+  this project. One-line fix in `main.rs` (`openapi.info =
+  utoipa::openapi::Info::new(...)`), confirmed live: `info` now reads
+  `{"title":"Live Earth Signals API","version":"0.6.0"}`. Re-ran
+  `cargo fmt --all --check` / `cargo clippy -p api --all-targets -- -D
+  warnings` / `cargo test -p api` after — all three green.
 - **The 5-way live feature matrix, the `telegram-live` solo leg, and
   `cargo test -p source-acled --features live` were not re-run this
   session.** M7's changes don't touch any `source-*` crate or feature-gated

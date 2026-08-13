@@ -144,6 +144,10 @@ pub enum WindowLen {
     D3,
     D7,
     All,
+    /// A typed exact start/end range (`timeline_panel`'s custom-range
+    /// inputs), stored as a bucket count rather than a preset. Never a
+    /// member of `CHOICES` — it only exists once the user has typed one.
+    Custom(i64),
 }
 
 impl WindowLen {
@@ -162,6 +166,10 @@ impl WindowLen {
             WindowLen::D3 => "3 days",
             WindowLen::D7 => "7 days",
             WindowLen::All => "all data",
+            // The exact typed range is already shown next to the combo
+            // (`current_window()`'s "start → end" label), so this generic
+            // fallback never needs to carry the bucket count itself.
+            WindowLen::Custom(_) => "custom",
         }
     }
 
@@ -172,6 +180,7 @@ impl WindowLen {
             WindowLen::D3 => 12,
             WindowLen::D7 => 28,
             WindowLen::All => total,
+            WindowLen::Custom(n) => n,
         }
         .min(total.max(1))
     }
@@ -182,6 +191,21 @@ pub struct Timeline {
     pub start_bucket: i64,
     pub playing: bool,
     pub accum: f32,
+    /// While `true`, every extent refresh and window-length change
+    /// repositions the window to track wall-clock "now" (see
+    /// `now_anchored_start_bucket`). Cleared the moment the user takes
+    /// manual control (scrub, playback, or a typed custom range) so a
+    /// background ingest tick can never yank them away from where they're
+    /// looking; the timeline panel's "now" control turns it back on.
+    pub auto_follow: bool,
+    /// Typed custom-range text (`timeline_panel`'s "start"/"end" fields),
+    /// `%Y-%m-%d %H:%M` UTC. Kept across frames so the user's partial input
+    /// survives a redraw; applied on Enter, not on every keystroke.
+    pub custom_start_input: String,
+    pub custom_end_input: String,
+    /// Set when the last apply attempt failed to parse; cleared on the next
+    /// successful apply or edit. Shown next to the inputs.
+    pub custom_range_error: Option<String>,
 }
 
 /// Discrete-event kind order for the timeline histogram stack (mirrors
@@ -388,6 +412,10 @@ impl App {
                 start_bucket: 0,
                 playing: false,
                 accum: 0.0,
+                auto_follow: true,
+                custom_start_input: String::new(),
+                custom_end_input: String::new(),
+                custom_range_error: None,
             },
             last_saved_filters: filters.clone(),
             filters,
@@ -425,6 +453,40 @@ impl App {
         self.extent
             .map(|(s, e)| ((e - s) / BUCKET_SECS).max(1))
             .unwrap_or(0)
+    }
+
+    /// Reposition the window to track wall-clock "now" and mark auto-follow
+    /// on. Called at startup, after every extent refresh while still
+    /// auto-following, on a window-length change while still auto-following,
+    /// and by the explicit "now" control. No-op with no extent yet.
+    pub fn sync_window_to_now(&mut self) {
+        let Some(extent) = self.extent else { return };
+        let len = self.timeline.len.buckets(self.total_buckets());
+        self.timeline.start_bucket =
+            now_anchored_start_bucket(extent, len, chrono::Utc::now().timestamp());
+    }
+
+    /// Apply the timeline panel's typed start/end inputs as the window.
+    /// On success this takes the window off auto-follow (a typed range is
+    /// an explicit "look here", not "keep me at now") and clears any prior
+    /// error; on failure it leaves the window untouched and records the
+    /// error for display next to the inputs.
+    pub fn apply_custom_range(&mut self) {
+        let Some(extent) = self.extent else { return };
+        match parse_custom_range(
+            &self.timeline.custom_start_input,
+            &self.timeline.custom_end_input,
+            extent,
+        ) {
+            Ok((start_bucket, len_buckets)) => {
+                self.timeline.start_bucket = start_bucket;
+                self.timeline.len = WindowLen::Custom(len_buckets);
+                self.timeline.auto_follow = false;
+                self.timeline.custom_range_error = None;
+                self.mark_dirty();
+            }
+            Err(msg) => self.timeline.custom_range_error = Some(msg.to_string()),
+        }
     }
 
     pub fn current_window(&self) -> Option<EpochWindow> {
@@ -556,9 +618,14 @@ impl App {
                     let start = bucket_start_epoch(min_ts);
                     let end = bucket_start_epoch(max_ts - 1) + BUCKET_SECS;
                     self.extent = Some((start, end));
-                    let total = self.total_buckets();
-                    let len = self.timeline.len.buckets(total);
-                    self.timeline.start_bucket = (total - len).max(0);
+                    if self.timeline.auto_follow {
+                        self.sync_window_to_now();
+                    } else {
+                        let total = self.total_buckets();
+                        let len = self.timeline.len.buckets(total);
+                        self.timeline.start_bucket =
+                            self.timeline.start_bucket.clamp(0, (total - len).max(0));
+                    }
                     self.phase = Phase::Ready;
                     self.dirty = true;
                     self.rebuild_histogram();
@@ -1075,6 +1142,54 @@ fn fade_alpha(age_secs: i64, window_span_secs: i64, floor: f32) -> f32 {
     1.0 - t * (1.0 - floor)
 }
 
+/// Position `start_bucket` so the window's right edge sits at wall-clock
+/// "now" (bucket-aligned), not at the raw data extent's tail. The extent's
+/// own max timestamp is the wrong anchor for "current": it can sit behind
+/// "now" (fresh launch, before every source has reported — ACLED in
+/// particular can hold a fixed months-old `LES_ACLED_WINDOW`) or ahead of it
+/// (NOAA alerts are timestamped by `onset`, which can be future-dated for a
+/// watch/warning issued ahead of the event). Either way the extent's tail is
+/// not "now", so it is not used as the anchor here — only as the clamp range.
+fn now_anchored_start_bucket(extent: EpochWindow, len_buckets: i64, now_epoch_s: i64) -> i64 {
+    let (start, end) = extent;
+    let total = ((end - start) / BUCKET_SECS).max(1);
+    let max_start = (total - len_buckets).max(0);
+    let now_bucket = (bucket_start_epoch(now_epoch_s) - start).div_euclid(BUCKET_SECS);
+    (now_bucket + 1 - len_buckets).clamp(0, max_start)
+}
+
+/// Format expected from the timeline panel's typed custom-range inputs.
+pub const CUSTOM_RANGE_FORMAT: &str = "%Y-%m-%d %H:%M";
+
+/// Parse a typed `(start, end)` UTC pair (`CUSTOM_RANGE_FORMAT`) into a
+/// bucket-aligned `(start_bucket, len_buckets)` pair against `extent`,
+/// clamped into the extent — the rest of the app assumes `start_bucket`
+/// stays within `[0, total)`, same invariant `now_anchored_start_bucket`
+/// keeps. `Err` carries a short message for display next to the inputs.
+fn parse_custom_range(
+    start_s: &str,
+    end_s: &str,
+    extent: EpochWindow,
+) -> Result<(i64, i64), &'static str> {
+    let parse = |s: &str| {
+        chrono::NaiveDateTime::parse_from_str(s.trim(), CUSTOM_RANGE_FORMAT)
+            .map(|dt| dt.and_utc().timestamp())
+    };
+    let start_ts = parse(start_s).map_err(|_| "start: expected YYYY-MM-DD HH:MM")?;
+    let end_ts = parse(end_s).map_err(|_| "end: expected YYYY-MM-DD HH:MM")?;
+    if end_ts <= start_ts {
+        return Err("end must be after start");
+    }
+    let (ext_start, ext_end) = extent;
+    let total = ((ext_end - ext_start) / BUCKET_SECS).max(1);
+    let start_bucket = (bucket_start_epoch(start_ts) - ext_start)
+        .div_euclid(BUCKET_SECS)
+        .clamp(0, total - 1);
+    let end_bucket = ((bucket_start_epoch(end_ts - 1) - ext_start).div_euclid(BUCKET_SECS) + 1)
+        .clamp(start_bucket + 1, total);
+    Ok((start_bucket, end_bucket - start_bucket))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1100,5 +1215,74 @@ mod tests {
     #[test]
     fn fade_alpha_degenerate_window_is_full_opacity() {
         assert_eq!(fade_alpha(0, 0, FADE_FLOOR_ALPHA), 1.0);
+    }
+
+    #[test]
+    fn now_anchored_start_bucket_ends_the_window_at_nows_bucket() {
+        let extent = (0, 10 * BUCKET_SECS); // 10 buckets: [0, 10)
+        let now = 5 * BUCKET_SECS + 1_000; // inside bucket 5
+        assert_eq!(now_anchored_start_bucket(extent, 4, now), 2);
+    }
+
+    /// The regression this function exists to fix: a NOAA `onset` timestamp
+    /// (or any future-dated row) can stretch the extent's tail past "now".
+    /// The window must still anchor at "now", not at that future tail.
+    #[test]
+    fn now_anchored_start_bucket_ignores_a_future_tail() {
+        let extent = (0, 20 * BUCKET_SECS); // extent reaches 20 buckets out
+        let now = 5 * BUCKET_SECS + 1_000; // "now" is only at bucket 5
+        assert_eq!(now_anchored_start_bucket(extent, 4, now), 2);
+    }
+
+    /// The mirror case: "now" is newer than anything ingested yet (a fresh
+    /// launch, or a source that hasn't reported this cycle). There is
+    /// nothing to show for "now", so this falls back to the latest
+    /// available data rather than pointing past the end of the extent.
+    #[test]
+    fn now_anchored_start_bucket_falls_back_to_the_tail_when_now_is_beyond_the_extent() {
+        let extent = (0, 10 * BUCKET_SECS);
+        let now = 20 * BUCKET_SECS;
+        assert_eq!(now_anchored_start_bucket(extent, 4, now), 6); // total - len
+    }
+
+    #[test]
+    fn now_anchored_start_bucket_clamps_to_zero_when_now_precedes_the_extent() {
+        let extent = (10 * BUCKET_SECS, 20 * BUCKET_SECS);
+        let now = 0;
+        assert_eq!(now_anchored_start_bucket(extent, 4, now), 0);
+    }
+
+    #[test]
+    fn parse_custom_range_bucket_aligns_a_valid_typed_range() {
+        // Extent: epoch 0 .. 10 buckets. Typed range: bucket-aligned
+        // 1970-01-01 06:00 .. 1970-01-01 18:00 = buckets [1, 3).
+        let extent = (0, 10 * BUCKET_SECS);
+        let (start_bucket, len) =
+            parse_custom_range("1970-01-01 06:00", "1970-01-01 18:00", extent).unwrap();
+        assert_eq!((start_bucket, len), (1, 2));
+    }
+
+    #[test]
+    fn parse_custom_range_rejects_end_before_start() {
+        let extent = (0, 10 * BUCKET_SECS);
+        assert!(parse_custom_range("1970-01-01 18:00", "1970-01-01 06:00", extent).is_err());
+    }
+
+    #[test]
+    fn parse_custom_range_rejects_unparseable_input() {
+        let extent = (0, 10 * BUCKET_SECS);
+        assert!(parse_custom_range("not a date", "1970-01-01 18:00", extent).is_err());
+        assert!(parse_custom_range("1970-01-01 06:00", "also not a date", extent).is_err());
+    }
+
+    #[test]
+    fn parse_custom_range_clamps_into_the_extent() {
+        // Both ends fall far outside the 10-bucket extent; the result must
+        // still land inside [0, total) so start_bucket's usual invariant
+        // (see now_anchored_start_bucket) holds for a typed range too.
+        let extent = (0, 10 * BUCKET_SECS);
+        let (start_bucket, len) =
+            parse_custom_range("1969-01-01 00:00", "1975-01-01 00:00", extent).unwrap();
+        assert_eq!((start_bucket, len), (0, 10));
     }
 }

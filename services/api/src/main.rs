@@ -128,13 +128,17 @@ async fn main() -> anyhow::Result<()> {
     // purely to collect the spec, not to route (that stays the plain
     // `Router` below, which already existed pre-M7 and every other layer
     // is already wired against).
-    let openapi = OpenApiRouter::<AppState>::new()
+    let mut openapi = OpenApiRouter::<AppState>::new()
         .routes(routes!(health))
         .routes(routes!(meta))
         .routes(routes!(buckets))
         .routes(routes!(events))
         .routes(routes!(metrics_handler))
         .into_openapi();
+    // Otherwise this is utoipa-axum's own crate metadata (title
+    // "utoipa-axum", that crate author's contact) — nothing here defaults
+    // to describing this project.
+    openapi.info = utoipa::openapi::Info::new("Live Earth Signals API", env!("CARGO_PKG_VERSION"));
     let openapi_json: Arc<str> = serde_json::to_string(&openapi)
         .expect("OpenApi always serializes")
         .into();

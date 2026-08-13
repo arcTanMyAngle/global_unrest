@@ -32,9 +32,16 @@ pub const DOC_ENDPOINT: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
 pub const EVENTS_LASTUPDATE_URL: &str = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt";
 
 /// A broad civic-attention default query. Callers can override it; theme
-/// filters passed to [`SignalSource::fetch`] refine it further.
-pub const DEFAULT_QUERY: &str =
-    "(protest OR unrest OR flood OR earthquake OR wildfire OR election OR strike)";
+/// filters passed to [`SignalSource::fetch`] refine it further. Includes
+/// drug-policy unrest/trafficking/overdose-crisis coverage alongside the
+/// general civic terms — a topical widening of the query, not a new
+/// `EventKind`: DOC results are always `EventKind::NewsAttention`, so this
+/// is exactly the "media attention" half of the attention/event-data split
+/// (CLAUDE.md), never a claim about ground-truth events. Multi-word terms
+/// are quoted per the DOC 2.0 exact-phrase syntax; bare words are an
+/// implicit OR-alternative, same as the pre-existing terms.
+pub const DEFAULT_QUERY: &str = "(protest OR unrest OR flood OR earthquake OR wildfire OR \
+     election OR strike OR \"drug trafficking\" OR narcotics OR \"overdose crisis\")";
 
 /// Live GDELT adapter over the DOC 2.0 JSON API.
 ///

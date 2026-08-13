@@ -355,6 +355,12 @@ impl App {
                 if ui.button(icon).clicked() {
                     self.timeline.playing = !self.timeline.playing;
                     self.timeline.accum = 0.0;
+                    if self.timeline.playing {
+                        // Starting playback is explicit manual navigation —
+                        // an ingest tick mid-playback must not yank the
+                        // scrub position back to "now".
+                        self.timeline.auto_follow = false;
+                    }
                 }
 
                 let mut len_choice = self.timeline.len;
@@ -367,9 +373,24 @@ impl App {
                     });
                 if len_choice != self.timeline.len {
                     self.timeline.len = len_choice;
-                    let len = self.timeline.len.buckets(total);
-                    self.timeline.start_bucket =
-                        self.timeline.start_bucket.min((total - len).max(0));
+                    if self.timeline.auto_follow {
+                        self.sync_window_to_now();
+                    } else {
+                        let len = self.timeline.len.buckets(total);
+                        self.timeline.start_bucket =
+                            self.timeline.start_bucket.min((total - len).max(0));
+                    }
+                    self.mark_dirty();
+                }
+
+                if !self.timeline.auto_follow
+                    && ui
+                        .button("⏵ now")
+                        .on_hover_text("resume tracking the current moment")
+                        .clicked()
+                {
+                    self.timeline.auto_follow = true;
+                    self.sync_window_to_now();
                     self.mark_dirty();
                 }
 
@@ -378,6 +399,36 @@ impl App {
                         RichText::new(format!("{}  →  {}", fmt_ts(ws), fmt_ts(we)))
                             .color(Color32::from_rgb(210, 214, 224))
                             .monospace(),
+                    );
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("custom range (UTC):").color(TEXT_DIM).small());
+                let start_edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.timeline.custom_start_input)
+                        .hint_text("YYYY-MM-DD HH:MM")
+                        .desired_width(130.0),
+                );
+                ui.label(RichText::new("→").color(TEXT_DIM));
+                let end_edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.timeline.custom_end_input)
+                        .hint_text("YYYY-MM-DD HH:MM")
+                        .desired_width(130.0),
+                );
+                let applied_on_enter = (start_edit.lost_focus() || end_edit.lost_focus())
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if start_edit.changed() || end_edit.changed() {
+                    self.timeline.custom_range_error = None;
+                }
+                if ui.button("apply").clicked() || applied_on_enter {
+                    self.apply_custom_range();
+                }
+                if let Some(err) = &self.timeline.custom_range_error {
+                    ui.label(
+                        RichText::new(err)
+                            .color(Color32::from_rgb(255, 140, 120))
+                            .small(),
                     );
                 }
             });
@@ -393,6 +444,9 @@ impl App {
                 max_start,
             );
             if changed {
+                // A drag/click scrub is explicit manual navigation, same as
+                // starting playback or applying a typed custom range.
+                self.timeline.auto_follow = false;
                 self.mark_dirty();
             }
 
