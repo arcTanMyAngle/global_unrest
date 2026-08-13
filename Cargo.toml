@@ -5,6 +5,7 @@ members = [
     "crates/analytics",
     "crates/chatter",
     "crates/core-types",
+    "crates/daily-digest",
     "crates/geo-utils",
     "crates/renderer",
     "crates/source-acled",
@@ -36,6 +37,7 @@ publish = false
 analytics = { path = "crates/analytics" }
 chatter = { path = "crates/chatter" }
 core-types = { path = "crates/core-types" }
+daily-digest = { path = "crates/daily-digest" }
 geo-utils = { path = "crates/geo-utils" }
 renderer = { path = "crates/renderer" }
 source-acled = { path = "crates/source-acled" }

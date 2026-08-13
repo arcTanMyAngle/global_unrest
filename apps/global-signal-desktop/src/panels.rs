@@ -5,7 +5,7 @@ use chrono::DateTime;
 use core_types::EventKind;
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Vec2};
 
-use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Phase, WindowLen};
+use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Page, Phase, WindowLen};
 
 const TEXT_DIM: Color32 = Color32::from_rgb(148, 155, 168);
 
@@ -93,6 +93,20 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Live Earth Signals").strong());
 
+                // Page switcher. Live-source controls stay on both pages
+                // (ingest runs regardless of what is on screen); everything
+                // below the separator is map-specific and hidden on the
+                // Daily Events page.
+                let mut page = self.page;
+                ui.selectable_value(&mut page, Page::Map, "map");
+                ui.selectable_value(&mut page, Page::DailyEvents, "daily events")
+                    .on_hover_text(
+                        "A model-written summary of one day of stored records, with media \
+                         attention and event data kept in separate sections.",
+                    );
+                self.set_page(page);
+                ui.separator();
+
                 // Pause/resume network polling. Cached rows are always real;
                 // the desktop runtime never loads synthetic fixtures.
                 let mut online = self.online;
@@ -115,6 +129,9 @@ impl App {
                     self.fetch_now();
                 }
                 self.source_status_label(ui);
+                if matches!(self.page, Page::DailyEvents) {
+                    return;
+                }
                 ui.separator();
 
                 let mut changed = false;

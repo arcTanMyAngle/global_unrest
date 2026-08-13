@@ -39,11 +39,16 @@ jobs:
   # isn't OS-specific, only the bundled-DuckDB build in `check` needs the
   # Windows/Ubuntu split. Each feature solo plus the full union, not every
   # subset — enough to catch solo-feature and cross-feature breakage without
-  # the combinatorial blowup of all thirty-one non-empty subsets.
+  # the combinatorial blowup of all subsets.
   #
   # Note: the desktop app enables all of these by default, so `check` above
   # already compiles the union; this job is what covers each feature *alone*
   # and the worker binary, whose features stay opt-in.
+  #
+  # `anthropic-live` is package-qualified because it exists only on the
+  # desktop app — the worker has no Daily Events page. The solo entries all
+  # leave it off, which is what compiles the stub `api` module in
+  # `apps/global-signal-desktop/src/digest.rs`.
   feature-matrix:
     strategy:
       fail-fast: false
@@ -55,7 +60,8 @@ jobs:
             "ioda-live",
             "bluesky-live",
             "telegram-live",
-            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live",
+            "global-signal-desktop/anthropic-live",
+            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/anthropic-live",
           ]
     runs-on: ubuntu-latest
     steps:
@@ -86,6 +92,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: source-acled live mock suite
         run: cargo test -p source-acled --features live
+
+  # daily-digest's `live` feature carries the Anthropic mock-server suite
+  # (tests/live_mock.rs): headers, rejected-parameter absence, refusals,
+  # rate limits, and the assertion that withheld sources reach the prompt as
+  # counts but never as rows. No API key is ever needed — the tests point the
+  # client at a local socket.
+  anthropic-live-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: daily-digest live mock suite
+        run: cargo test -p daily-digest --features live
 
   # Closes the M4 verification gap: `docker compose up` was written but
   # never run locally (no docker CLI on the dev machine). Runs fixtures-only

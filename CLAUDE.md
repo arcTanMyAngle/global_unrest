@@ -21,7 +21,13 @@ GitHub-settings step (no authenticated `gh`/API access from this machine)
 — see HANDOFF.md. V3 shipped per-source marker identity (shape = source,
 color = kind), a NOAA weather-alert overlay, a full painted legend, an
 offline graticule/labels/border-hierarchy orientation pass, and the
-"how to read this map" overlay. Next: M7 service hardening. See
+"how to read this map" overlay. **M7 service hardening complete 2026-08-12;
+the Daily Events AI digest shipped 2026-08-13** — `crates/daily-digest` plus
+a dedicated desktop page, one model-written summary per UTC calendar day,
+cached locally, credential-gated on `ANTHROPIC_API_KEY`. It is the project's
+only *interpretive* surface and its only outbound flow of stored records;
+read docs/SAFETY_AND_PRIVACY.md's hard rule 7 and its misuse-review entry
+before changing anything there. See
 [HANDOFF.md](HANDOFF.md) for status and the next task list,
 and [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
@@ -42,6 +48,7 @@ cargo run -p global-signal-desktop                     # ACLED + NOAA + IODA + B
 cargo run -p workers --features acled-live,noaa-live,ioda-live,bluesky-live,telegram-live  # worker with all live sources
 cargo run -p source-bluesky --features live --example live_probe -- 60  # manual live firehose check (aggregate output only)
 cargo run -p source-telegram --features live --example login_setup      # one-time interactive Telegram login
+cargo test -p daily-digest --features live             # Daily Events Anthropic mock-server tests
 cargo deny check                                       # M6 gate: advisories + license allowlist
 ```
 
@@ -52,6 +59,15 @@ Live sources are cargo features on both binaries: `acled-live` (needs
 interactive `login_setup` run — see `crates/source-telegram`). All five are
 desktop default features; the worker keeps them opt-in. Clippy the feature
 matrix when touching ingest loops.
+
+`anthropic-live` (needs `ANTHROPIC_API_KEY`) is a **desktop-only** feature
+and does not follow that shape: `daily-digest` is not optional, because the
+page, the cache table, and the day picker are built from its types either
+way — the feature gates only the network half, so a build without it still
+reads every cached digest. In CI's feature matrix it is therefore
+package-qualified (`global-signal-desktop/anthropic-live`); the other
+entries leave it off, which is what compiles the stub `api` module in
+`apps/global-signal-desktop/src/digest.rs`.
 
 M4 services env: worker reads `LES_WORKER_DATA_DIR` (its own DuckDB),
 `LES_PUBLISH_DIR` (snapshot root), `LES_FIXTURES_DIR`, `LES_RETENTION_DAYS`,
@@ -140,7 +156,13 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   guide; its copy is structured data because `RichText` renders markdown
   markup literally). `MapView::show` takes a `MapInputs` struct, not a row of
   positional bools. `ingest.rs`
-  is a long-lived, live-only GDELT/ACLED/NOAA worker. Startup purges legacy
+  is a long-lived, live-only GDELT/ACLED/NOAA worker. `App.page` (`Page::Map`
+  / `Page::DailyEvents`) switches whole pages rather than adding a panel:
+  `daily_events.rs` draws the digest page (day picker + the two headed
+  sections), `digest.rs` is its worker — same stub-module pattern as the
+  live sources, but with **no cadence of its own**, since generating costs a
+  paid API call and only an explicit click fires one. The worker never
+  touches storage; the UI thread owns it, as everywhere else. Startup purges legacy
   `source=fixtures` rows and treats an empty database as valid.
   UI thread never blocks on storage; it ingests worker batches (dedup makes
   re-fetch idempotent). `MapView::fly_to` is the only thing in the map that
@@ -194,6 +216,27 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   that saves a local JSON session file; the real source only ever opens
   that file, never logs in itself — a missing/unauthorized session surfaces
   as a `fetch` error naming the setup command. Reuses `chatter` unchanged.
+- `crates/daily-digest` — the Daily Events digest (added 2026-08-13).
+  Deliberately **not** named `source-*`: that prefix means "implements
+  `SignalSource`, yields `GeoTemporalEvent`s", and this crate ingests
+  nothing — it reads what storage already holds and writes prose about it.
+  Everything except `live.rs` (feature `live`) is pure and offline-tested:
+  `DigestFacts` (what storage fills in), `render_facts`, `request_body`,
+  `parse_response`, `DayKey` (UTC calendar day ↔ storage key ↔ epoch
+  window). Three rules are structural, not prompt-dependent:
+  `output_schema()` has exactly two properties with
+  `additionalProperties: false` so attention and event data cannot blend;
+  `row_level_permitted(SourceId)` withholds ACLED and chatter row text from
+  the request (they contribute counts only — applied in `crates/storage`,
+  the single place row content is selected); and `DigestFacts` has no field
+  that could carry an author, handle, or message text. `tests/live_mock.rs`
+  runs the whole live path against a local socket — no key needed.
+  **Opus 5 rejects `temperature`, `top_p`, `top_k`, and
+  `thinking.budget_tokens` with a 400**, so `request_body` sends none of
+  them and a unit test pins their absence; thinking is on by default, so
+  `parse_response` filters `content` to `type == "text"`, and a refusal
+  arrives as **HTTP 200** with empty/partial content (detect from
+  `stop_reason` before indexing `content[0]`).
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).
@@ -239,6 +282,12 @@ markers; Country/Admin1 shade regions (enforced in the storage query).
   `jiff` when this was researched, one release ahead of what crates.io
   actually serves. Caught by the compiler, not by re-reading source — a live
   reminder for the next bullet.
+- reqwest is pinned `default-features = false, features = ["rustls-tls"]`
+  workspace-wide, which **excludes the `json` feature** — `RequestBuilder::
+  json()` and `Response::json()` do not exist here. `daily-digest::live`
+  therefore builds bodies with `serde_json::to_vec` + `.body(...)` and reads
+  them with `.text()` + `serde_json::from_str`. Adding the `json` feature to
+  get one convenience method would pull it into every source crate; don't.
 - When an API surprises you, read the crate source in
   `~/.cargo/registry/src/index.crates.io-*/<crate>/` before guessing — and
   prefer it over a repo's `master` branch, which can be ahead of what Cargo

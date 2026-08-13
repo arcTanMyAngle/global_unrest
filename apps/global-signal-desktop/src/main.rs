@@ -7,6 +7,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod daily_events;
+mod digest;
 mod how_to_read;
 mod ingest;
 mod map_view;

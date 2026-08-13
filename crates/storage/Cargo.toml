@@ -10,6 +10,10 @@ publish.workspace = true
 analytics.workspace = true
 chrono.workspace = true
 core-types.workspace = true
+# Types + the licence policy for the Daily Events digest cache. The `live`
+# feature stays off here: storage builds the facts and caches the result, it
+# never calls the API.
+daily-digest.workspace = true
 duckdb.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

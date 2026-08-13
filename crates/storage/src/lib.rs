@@ -18,6 +18,11 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use chrono::Utc;
+use daily_digest::{
+    AttentionFacts, DayDigest, DayKey, DigestFacts, EventFact, EventFacts, HeadlineFact,
+    MAX_HEADLINES, MAX_NOTABLE, MAX_PLACES, PlaceCount, row_level_permitted,
+};
+
 use core_types::{
     EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, RegionBucket, SourceId,
     bucket_start_epoch,
@@ -27,12 +32,19 @@ use duckdb::{Connection, params};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_scores.sql")),
+    (3, include_str!("../migrations/0003_daily_digest.sql")),
 ];
 
 /// Cap on rows returned to the UI in one query, as a memory safety valve.
 const MAX_POINT_ROWS: usize = 100_000;
 /// Rows examined for a region detail; plenty for one cell and one window.
 const MAX_DETAIL_ROWS: usize = 5_000;
+/// Attention rows scanned when counting a day's distinct outlet domains.
+/// The domains live inside a JSON array column, so the set is built in Rust
+/// rather than SQL; this caps the memory that costs. Well above a real day's
+/// attention volume — `distinct_outlets` is documented as "over the rows
+/// scanned" precisely because this cap exists.
+const MAX_DIGEST_OUTLET_ROWS: usize = 50_000;
 /// Source-link groups retained for one inspector query. Each row can contain
 /// more than one URL, while global URL dedup prevents repeated actions.
 const MAX_SOURCE_LINK_ROWS: usize = 40;
@@ -324,7 +336,35 @@ enum Cmd {
         keep_last: Option<usize>,
         reply: mpsc::Sender<Result<PublishReport, StorageError>>,
     },
+    DigestDays {
+        limit: usize,
+        reply: mpsc::Sender<Result<Vec<DigestDay>, StorageError>>,
+    },
+    DigestFactsFor {
+        day: DayKey,
+        reply: mpsc::Sender<Result<DigestFacts, StorageError>>,
+    },
+    LoadDigest {
+        day: DayKey,
+        reply: mpsc::Sender<Result<Option<DayDigest>, StorageError>>,
+    },
+    StoreDigest {
+        digest: Box<DayDigest>,
+        reply: mpsc::Sender<Result<(), StorageError>>,
+    },
     Shutdown,
+}
+
+/// One UTC day that has data, for the Daily Events day picker. The two counts
+/// stay separate here too — a day can be busy in one half and empty in the
+/// other, and collapsing them would hide exactly that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DigestDay {
+    pub day: DayKey,
+    pub attention_records: u64,
+    pub event_records: u64,
+    /// Whether a generated digest is already cached for this day.
+    pub cached: bool,
 }
 
 /// Non-blocking reply handle. Poll `try_take` from the UI; `wait` in tests.
@@ -594,6 +634,45 @@ impl StorageHandle {
         });
         Reply(rx)
     }
+
+    /// The most recent UTC days that have any data, newest first, each tagged
+    /// with whether a digest is already cached. Drives the Daily Events day
+    /// picker.
+    pub fn digest_days(&self, limit: usize) -> Reply<Vec<DigestDay>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::DigestDays { limit, reply });
+        Reply(rx)
+    }
+
+    /// Everything one day's digest may be generated from.
+    ///
+    /// This is the only place row-level content is selected for a third-party
+    /// API, so the licence filter lives here rather than at the call site:
+    /// sources `daily_digest::row_level_permitted` rejects contribute counts
+    /// and nothing else. ACLED rows in particular are counted, never
+    /// forwarded (CLAUDE.md's no-redistribution rule).
+    pub fn digest_facts(&self, day: DayKey) -> Reply<DigestFacts> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::DigestFactsFor { day, reply });
+        Reply(rx)
+    }
+
+    /// The cached digest for a day, if one was generated.
+    pub fn load_digest(&self, day: DayKey) -> Reply<Option<DayDigest>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::LoadDigest { day, reply });
+        Reply(rx)
+    }
+
+    /// Cache a generated digest, replacing any existing row for that day.
+    pub fn store_digest(&self, digest: DayDigest) -> Reply<()> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::StoreDigest {
+            digest: Box::new(digest),
+            reply,
+        });
+        Reply(rx)
+    }
 }
 
 impl Drop for StorageHandle {
@@ -699,6 +778,18 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
                 reply,
             } => {
                 let _ = reply.send(do_publish_snapshot(&conn, root, keep_last));
+            }
+            Cmd::DigestDays { limit, reply } => {
+                let _ = reply.send(do_digest_days(&conn, limit));
+            }
+            Cmd::DigestFactsFor { day, reply } => {
+                let _ = reply.send(do_digest_facts(&conn, day));
+            }
+            Cmd::LoadDigest { day, reply } => {
+                let _ = reply.send(do_load_digest(&conn, day));
+            }
+            Cmd::StoreDigest { digest, reply } => {
+                let _ = reply.send(do_store_digest(&conn, &digest));
             }
             Cmd::Shutdown => break,
         }
@@ -1664,6 +1755,332 @@ fn prune_old_snapshots(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Daily Events digest
+//
+// `kind = 'news_attention'` splits every query below into its attention half
+// and its event half. That predicate is the hard separation rule in SQL: a
+// coverage observation cannot reach the event totals and an event cannot
+// reach the coverage totals, whatever a caller or a prompt asks for.
+// ---------------------------------------------------------------------------
+
+/// Days with data, newest first, tagged with whether a digest is cached.
+fn do_digest_days(conn: &Connection, limit: usize) -> Result<Vec<DigestDay>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT strftime(to_timestamp(ts_epoch_s), '%Y-%m-%d') AS day,
+                count(*) FILTER (WHERE kind = 'news_attention'),
+                count(*) FILTER (WHERE kind <> 'news_attention')
+         FROM events
+         GROUP BY day
+         ORDER BY day DESC
+         LIMIT ?",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+
+    let cached: HashSet<String> = {
+        let mut stmt = conn.prepare("SELECT day_utc FROM daily_digest")?;
+        let days = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        days.collect::<Result<_, _>>()?
+    };
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (day_s, attention, events) = row?;
+        let Some(day) = DayKey::parse(&day_s) else {
+            return Err(StorageError::Corrupt(format!("unparseable day `{day_s}`")));
+        };
+        out.push(DigestDay {
+            day,
+            attention_records: attention.max(0) as u64,
+            event_records: events.max(0) as u64,
+            cached: cached.contains(&day_s),
+        });
+    }
+    Ok(out)
+}
+
+fn do_digest_facts(conn: &Connection, day: DayKey) -> Result<DigestFacts, StorageError> {
+    let (from, to) = day.window();
+    Ok(DigestFacts {
+        day_utc: day,
+        attention: digest_attention(conn, (from, to))?,
+        events: digest_events(conn, (from, to))?,
+    })
+}
+
+fn digest_attention(
+    conn: &Connection,
+    window: EpochWindow,
+) -> Result<AttentionFacts, StorageError> {
+    const WHERE: &str = "WHERE ts_epoch_s >= ? AND ts_epoch_s < ? AND kind = 'news_attention'";
+
+    let (records, articles): (i64, i64) = conn.query_row(
+        &format!("SELECT count(*), coalesce(sum(article_count), 0) FROM events {WHERE}"),
+        params![window.0, window.1],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let mut top_places = Vec::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT coalesce(country_iso, '???'), count(*), coalesce(sum(article_count), 0)
+             FROM events {WHERE}
+             GROUP BY 1
+             ORDER BY 3 DESC, 2 DESC, 1
+             LIMIT ?"
+        ))?;
+        let rows = stmt.query_map(params![window.0, window.1, MAX_PLACES as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (country_iso, records, articles) = row?;
+            top_places.push(PlaceCount {
+                country_iso,
+                records: records.max(0) as u64,
+                articles: articles.max(0) as u64,
+            });
+        }
+    }
+
+    // Outlet domains live inside a JSON array column, so the distinct set is
+    // built here rather than in SQL. Capped; see MAX_DIGEST_OUTLET_ROWS.
+    let mut outlets: HashSet<String> = HashSet::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT outlet_domains FROM events {WHERE} LIMIT ?"
+        ))?;
+        let rows = stmt.query_map(
+            params![window.0, window.1, MAX_DIGEST_OUTLET_ROWS as i64],
+            |r| r.get::<_, String>(0),
+        )?;
+        for row in rows {
+            let domains: Vec<String> = serde_json::from_str(&row?).unwrap_or_default();
+            outlets.extend(domains);
+        }
+    }
+
+    // Headline metadata, from permitted sources only. Highest article counts
+    // first: those are the stories the day's coverage actually concentrated on.
+    let mut headlines = Vec::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT coalesce(country_iso, '???'), source, headline, outlet_domains
+             FROM events {WHERE} AND headline IS NOT NULL
+             ORDER BY article_count DESC, ts_epoch_s DESC
+             LIMIT ?"
+        ))?;
+        // Over-fetch: the licence filter below is applied in Rust (it is a
+        // per-source policy, not a SQL predicate), so some rows are dropped.
+        let rows = stmt.query_map(
+            params![window.0, window.1, (MAX_HEADLINES * 4) as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            if headlines.len() >= MAX_HEADLINES {
+                break;
+            }
+            let (country_iso, source_s, headline, domains_s) = row?;
+            if !row_level_permitted(parse_source(&source_s)?) {
+                continue;
+            }
+            let Some(headline) = headline else { continue };
+            let domains: Vec<String> = serde_json::from_str(&domains_s).unwrap_or_default();
+            headlines.push(HeadlineFact {
+                country_iso,
+                outlet_domain: domains.into_iter().next().unwrap_or_default(),
+                headline,
+            });
+        }
+    }
+
+    Ok(AttentionFacts {
+        records: records.max(0) as u64,
+        articles: articles.max(0) as u64,
+        distinct_outlets: outlets.len() as u32,
+        top_places,
+        headlines,
+    })
+}
+
+fn digest_events(conn: &Connection, window: EpochWindow) -> Result<EventFacts, StorageError> {
+    const WHERE: &str = "WHERE ts_epoch_s >= ? AND ts_epoch_s < ? AND kind <> 'news_attention'";
+
+    let records: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM events {WHERE}"),
+        params![window.0, window.1],
+        |r| r.get(0),
+    )?;
+
+    let group_by = |column: &str| -> Result<Vec<(String, u64)>, StorageError> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {column}, count(*) FROM events {WHERE} GROUP BY 1 ORDER BY 2 DESC, 1"
+        ))?;
+        let rows = stmt.query_map(params![window.0, window.1], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, n) = row?;
+            out.push((key, n.max(0) as u64));
+        }
+        Ok(out)
+    };
+    let by_kind = group_by("kind")?;
+    let by_source = group_by("source")?;
+
+    // Every source whose rows are withheld is named with its count, so the
+    // digest can say the events happened without describing them.
+    let mut counts_only_sources = Vec::new();
+    for (source_s, n) in &by_source {
+        if !row_level_permitted(parse_source(source_s)?) {
+            counts_only_sources.push((source_s.clone(), *n));
+        }
+    }
+
+    let mut top_places = Vec::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT coalesce(country_iso, '???'), count(*)
+             FROM events {WHERE}
+             GROUP BY 1
+             ORDER BY 2 DESC, 1
+             LIMIT ?"
+        ))?;
+        let rows = stmt.query_map(params![window.0, window.1, MAX_PLACES as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (country_iso, n) = row?;
+            top_places.push(PlaceCount {
+                country_iso,
+                records: n.max(0) as u64,
+                // Event records carry no article count, and a fabricated one
+                // here would be the exact blend this project forbids.
+                articles: 0,
+            });
+        }
+    }
+
+    // Most severe first: an unranked sample of a busy day tells the model
+    // nothing about which events mattered.
+    let mut notable = Vec::new();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT coalesce(country_iso, '???'), kind, source, headline, severity
+             FROM events {WHERE}
+             ORDER BY severity DESC NULLS LAST, ts_epoch_s DESC
+             LIMIT ?"
+        ))?;
+        let rows = stmt.query_map(params![window.0, window.1, (MAX_NOTABLE * 4) as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<f32>>(4)?,
+            ))
+        })?;
+        for row in rows {
+            if notable.len() >= MAX_NOTABLE {
+                break;
+            }
+            let (country_iso, kind, source, headline, severity) = row?;
+            if !row_level_permitted(parse_source(&source)?) {
+                continue;
+            }
+            notable.push(EventFact {
+                country_iso,
+                kind,
+                source,
+                label: headline,
+                severity,
+            });
+        }
+    }
+
+    Ok(EventFacts {
+        records: records.max(0) as u64,
+        by_kind,
+        by_source,
+        top_places,
+        notable,
+        counts_only_sources,
+    })
+}
+
+fn do_load_digest(conn: &Connection, day: DayKey) -> Result<Option<DayDigest>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT model, generated_at_epoch_s, media_attention, event_data,
+                attention_records, event_records
+         FROM daily_digest WHERE day_utc = ?",
+    )?;
+    let mut rows = stmt.query_map(params![day.key()], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+        ))
+    })?;
+    let Some(row) = rows.next() else {
+        return Ok(None);
+    };
+    let (model, generated_at_epoch_s, media_attention, event_data, attention, events) = row?;
+    Ok(Some(DayDigest {
+        day_utc: day,
+        model,
+        generated_at_epoch_s,
+        media_attention,
+        event_data,
+        attention_records: attention.max(0) as u64,
+        event_records: events.max(0) as u64,
+    }))
+}
+
+fn do_store_digest(conn: &Connection, digest: &DayDigest) -> Result<(), StorageError> {
+    // Delete-then-insert: DuckDB has no upsert on a plain PRIMARY KEY, and
+    // regenerating a day must replace it rather than fail.
+    conn.execute(
+        "DELETE FROM daily_digest WHERE day_utc = ?",
+        params![digest.day_utc.key()],
+    )?;
+    conn.execute(
+        "INSERT INTO daily_digest
+            (day_utc, model, generated_at_epoch_s, media_attention, event_data,
+             attention_records, event_records)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![
+            digest.day_utc.key(),
+            digest.model,
+            digest.generated_at_epoch_s,
+            digest.media_attention,
+            digest.event_data,
+            digest.attention_records as i64,
+            digest.event_records as i64,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Convenience used by the ingest pipeline: normalize a batch of raw records
 /// with a source, partitioning successes and failures.
 pub fn partition_normalized<S: core_types::SignalSource>(
@@ -2448,5 +2865,157 @@ mod tests {
         let store = StorageHandle::open(Some(path), Box::new(|| {})).unwrap();
         let extent = store.time_extent().wait().unwrap();
         assert!(extent.is_some());
+    }
+
+    /// Retag a sample event onto a real source so the digest's licence filter
+    /// has something to filter.
+    fn from_source(mut e: GeoTemporalEvent, source: SourceId, seq: u32) -> GeoTemporalEvent {
+        let sid = format!("{}-{seq}", source.as_str());
+        e.id = event_id(source, &sid);
+        e.source = source;
+        e.source_event_id = sid;
+        e
+    }
+
+    /// A day's worth of both halves: GDELT attention, ACLED protests (rows
+    /// withheld), IODA disruptions (rows permitted).
+    fn digest_day_fixture() -> StorageHandle {
+        let store = open_mem();
+        let mut events = vec![
+            from_source(
+                sample_event(1, EventKind::NewsAttention, 2, 100),
+                SourceId::Gdelt,
+                1,
+            ),
+            from_source(
+                sample_event(2, EventKind::NewsAttention, 4, 100),
+                SourceId::Gdelt,
+                2,
+            ),
+            from_source(
+                sample_event(3, EventKind::Protest, 6, 100),
+                SourceId::Acled,
+                3,
+            ),
+            from_source(
+                sample_event(4, EventKind::Protest, 7, 100),
+                SourceId::Acled,
+                4,
+            ),
+            from_source(
+                sample_event(5, EventKind::Disruption, 8, 100),
+                SourceId::Ioda,
+                5,
+            ),
+        ];
+        // Distinguishable text so the row-level assertions cannot pass by
+        // accident.
+        events[2].headline = Some("[synthetic] acled row text".into());
+        events[3].headline = Some("[synthetic] acled row text".into());
+        events[4].headline = Some("[synthetic] ioda outage label".into());
+        events[4].severity = Some(0.8);
+        store.ingest(events, vec![]).wait().unwrap();
+        store
+    }
+
+    const DIGEST_DAY: &str = "2026-06-01";
+
+    #[test]
+    fn digest_facts_split_attention_from_events() {
+        let store = digest_day_fixture();
+        let facts = store
+            .digest_facts(DayKey::parse(DIGEST_DAY).unwrap())
+            .wait()
+            .unwrap();
+
+        assert_eq!(facts.attention.records, 2);
+        assert_eq!(facts.attention.articles, 20);
+        assert_eq!(facts.events.records, 3);
+        // Neither half leaks into the other's totals or place lists.
+        assert_eq!(facts.attention.top_places[0].records, 2);
+        assert_eq!(facts.events.top_places[0].records, 3);
+        assert!(facts.events.top_places.iter().all(|p| p.articles == 0));
+        assert!(!facts.is_empty());
+    }
+
+    #[test]
+    fn digest_facts_count_acled_but_never_carry_its_rows() {
+        let store = digest_day_fixture();
+        let facts = store
+            .digest_facts(DayKey::parse(DIGEST_DAY).unwrap())
+            .wait()
+            .unwrap();
+
+        // Counted…
+        assert!(facts.events.by_source.contains(&("acled".into(), 2)));
+        assert_eq!(facts.events.counts_only_sources, vec![("acled".into(), 2)]);
+        // …but no ACLED row survives into anything that gets sent.
+        assert!(facts.events.notable.iter().all(|e| e.source != "acled"));
+        assert_eq!(facts.events.notable.len(), 1);
+        assert_eq!(facts.events.notable[0].source, "ioda");
+        let rendered = daily_digest::render_facts(&facts);
+        assert!(!rendered.contains("acled row text"), "{rendered}");
+        assert!(rendered.contains("acled=2"), "{rendered}");
+    }
+
+    #[test]
+    fn digest_facts_for_an_empty_day_are_empty() {
+        let store = digest_day_fixture();
+        let facts = store
+            .digest_facts(DayKey::parse("2026-06-02").unwrap())
+            .wait()
+            .unwrap();
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn digest_cache_round_trips_and_regenerating_replaces_the_day() {
+        let store = digest_day_fixture();
+        let day = DayKey::parse(DIGEST_DAY).unwrap();
+        assert!(store.load_digest(day).wait().unwrap().is_none());
+
+        let mut digest = DayDigest {
+            day_utc: day,
+            model: "claude-opus-5".into(),
+            generated_at_epoch_s: 1_786_500_000,
+            media_attention: "first attention text".into(),
+            event_data: "first event text".into(),
+            attention_records: 2,
+            event_records: 3,
+        };
+        store.store_digest(digest.clone()).wait().unwrap();
+        let loaded = store.load_digest(day).wait().unwrap().unwrap();
+        assert_eq!(loaded, digest);
+
+        digest.media_attention = "second attention text".into();
+        store.store_digest(digest.clone()).wait().unwrap();
+        assert_eq!(store.load_digest(day).wait().unwrap().unwrap(), digest);
+    }
+
+    #[test]
+    fn digest_days_lists_days_with_their_two_counts_and_cache_state() {
+        let store = digest_day_fixture();
+        let day = DayKey::parse(DIGEST_DAY).unwrap();
+
+        let days = store.digest_days(10).wait().unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].day, day);
+        assert_eq!(days[0].attention_records, 2);
+        assert_eq!(days[0].event_records, 3);
+        assert!(!days[0].cached);
+
+        store
+            .store_digest(DayDigest {
+                day_utc: day,
+                model: "claude-opus-5".into(),
+                generated_at_epoch_s: 0,
+                media_attention: "a".into(),
+                event_data: "b".into(),
+                attention_records: 2,
+                event_records: 3,
+            })
+            .wait()
+            .unwrap();
+        assert!(store.digest_days(10).wait().unwrap()[0].cached);
     }
 }

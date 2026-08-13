@@ -9,7 +9,14 @@ publish.workspace = true
 # The user-facing desktop is live-only, so its authorized/keyless live source
 # adapters are included by default. Credentials remain runtime env vars.
 [features]
-default = ["acled-live", "noaa-live", "ioda-live", "bluesky-live", "telegram-live"]
+default = [
+    "acled-live",
+    "noaa-live",
+    "ioda-live",
+    "bluesky-live",
+    "telegram-live",
+    "anthropic-live",
+]
 acled-live = ["dep:source-acled", "source-acled/live"]
 # NOAA/NWS active alerts (M5 optional layer): keyless, US coverage.
 noaa-live = ["dep:source-noaa", "source-noaa/live"]
@@ -24,12 +31,19 @@ bluesky-live = ["dep:source-bluesky", "source-bluesky/live"]
 # before it activates; without that it stays gracefully "off", same as ACLED
 # without credentials.
 telegram-live = ["dep:source-telegram", "source-telegram/live"]
+# Anthropic-written "Daily Events" digests (needs ANTHROPIC_API_KEY). Unlike
+# the source features this one cannot make `daily-digest` optional: the page,
+# the storage cache, and the day picker are built from its types either way.
+# The feature only adds the network half, so a build without it still shows
+# every previously cached digest.
+anthropic-live = ["daily-digest/live"]
 
 [dependencies]
 analytics.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 core-types.workspace = true
+daily-digest.workspace = true
 directories.workspace = true
 dotenvy.workspace = true
 eframe.workspace = true

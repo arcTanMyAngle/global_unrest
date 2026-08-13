@@ -1,7 +1,135 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (**eighth** session that day). Read this file, then
+Last session: 2026-08-13 (**ninth** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
+
+## Ninth session (2026-08-13): the AI Daily Events digest — built, gated, safety-reviewed
+
+The eighth session's item 5 ("design fully settled, not yet built") is now
+built. Nothing was re-litigated: two labeled sections, one digest per UTC
+calendar day, Anthropic Claude API via `ANTHROPIC_API_KEY`, dedicated page.
+
+**Orientation check first** (the fourth time this has mattered): HEAD was
+`ac8b979 m7` and `git status` showed exactly one dirty file, `HANDOFF.md` —
+so the eighth session's own edit to this file had *not* been committed, and
+everything else from it had. No stray `cargo`/`rustc` processes.
+
+**1. New crate `crates/daily-digest`.** Deliberately **not** named
+`source-*` — it is not a `SignalSource` and ingests nothing; it reads what
+storage already holds and asks a model to describe it. Pure/offline half
+(facts types, prompt construction, `DayKey`, response parsing) is always
+compiled; only the network half sits behind feature `live`. Three rules are
+structural, not stylistic:
+- The output schema has exactly two prose properties
+  (`media_attention`, `event_data`) with `additionalProperties: false`, so
+  there is **no field a blended single number could be written into**. The
+  hard rule is enforced by the schema, not by prompt wording.
+- `row_level_permitted` withholds ACLED and chatter (Bluesky/Telegram) rows
+  from the request. Those sources still reach the prompt as **counts**;
+  their rows never do — ACLED non-redistribution and the chatter
+  aggregate-only rule both survive the new layer.
+- `MAX_PLACES` / `MAX_HEADLINES` / `MAX_NOTABLE` cap what a single request
+  can carry, so the call cannot grow into a bulk export.
+
+**2. Mock-server test suite** (`crates/daily-digest/tests/live_mock.rs`,
+behind `--features live`, same precedent as `source-acled`): headers,
+absence of the rejected parameters, refusal handling, rate limits, the
+credential error, and
+`withheld_sources_reach_the_prompt_as_counts_but_never_as_rows`. No API key
+is ever needed — the tests point the client at a local socket. 13 unit + 8
+mock tests, all green.
+
+**3. Storage**: new migration `crates/storage/migrations/0003_daily_digest.sql`
+(one row per UTC day, overwritten on regenerate) plus actor-thread methods
+for the day list, the per-day facts query, and read/write of the cached
+digest — the existing `Reply<T>` pattern, no new threading model.
+
+**4. UI**: `Page::{Map, DailyEvents}` on `App`, the `map | daily events`
+switcher in `panels.rs`, the page itself in `daily_events.rs`, and the
+worker in `digest.rs`. The digest worker has **no cadence of its own** —
+only an explicit click fires a request, and it never touches storage (the
+UI thread owns that, as everywhere else). The two sections are rendered by
+a free `fn section(...)` holding no app state, which makes it structurally
+impossible for one section to paint the other's records.
+
+**5. `docs/SAFETY_AND_PRIVACY.md` misuse-review pass** (the reason this was
+milestone-sized rather than a UI patch): new **hard rule 7** ("Generated
+text is labelled, bounded, and never the record"), a "Third-party
+processing (Anthropic API)" section covering what is and is not sent, a
+Known-biases bullet ("a quiet section means quiet *data*, not a quiet
+day"), a retention bullet, and a dated misuse-review entry recording the
+judgment call: the digest may describe **what the sources recorded**, not
+assess importance, attribute cause, or forecast. **The two-field schema is
+the wall — widening the schema is the thing to catch in review.**
+
+**Gates** — all three re-run to completion, exit codes checked via
+`$LASTEXITCODE`, never by grepping output (`Select-String 'FAILED'` is
+case-insensitive and false-positives): `cargo fmt --all --check` ✅ (failed
+first with 12 rustfmt line-wraps across 5 files; `cargo fmt --all` fixed
+them, re-checked clean), `cargo clippy --workspace --all-targets -- -D
+warnings` ✅, `cargo test --workspace` ✅ (39 `test result:` lines, all
+`0 failed`). Beyond the three: `cargo clippy -p daily-digest --features
+live --all-targets -- -D warnings` ✅ and `cargo test -p daily-digest
+--features live` ✅ (the workspace test run does **not** cover the live
+path — same blind spot `source-acled` has), and an actual `cargo build -p
+global-signal-desktop` ✅ because **`cargo check`/`clippy` never link**, so
+only a real build rules out the duplicate-symbol class of bug that bit the
+grammers/libsql-ffi work.
+
+**CI** (`.github/workflows/ci.yml`): `anthropic-live` added to the feature
+matrix **package-qualified** as `global-signal-desktop/anthropic-live` —
+with `-p a -p b`, a feature belonging to only one package must be qualified
+or cargo errors. The worker has no Daily Events page, so it has no such
+feature. Every matrix entry was compiled locally before being written into
+the file. New `anthropic-live-mock` job runs the mock suite.
+
+**Live app run** (this project's "UI-visible changes need a live app run"
+rule): ran the real binary against the persisted DB, all six sources
+online. The day list populated from real data (2026-07-29 → 2026-08-16,
+each row showing its own attention/event counts, e.g. 2026-08-13 =
+`attention 90 · events 1199`), the selected-day header keeps the two counts
+separate, and with no key configured the page reads "Set ANTHROPIC_API_KEY
+(in the environment or a .env file) to write new digests. Days already
+generated stay readable without it." / "No digest written for this day
+yet."
+
+**⚠️ Honest limit on that verification: the generation path has never been
+run.** There is no `ANTHROPIC_API_KEY` on this machine (not in `.env`,
+which holds only the ACLED/Telegram vars, and not in the process env), so
+only the unavailable-credential path was exercised live. The request/parse
+path is covered by the mock suite, not by a real API call — clicking
+"generate" spends real money, so it was left for the user. **First thing to
+check when a key exists: one real generation end to end.**
+
+**Landmine, cost me several rounds — GUI automation coordinates.** The
+screenshot helper and `SetCursorPos` do **not** share a coordinate space on
+this machine. The display is 2560×1600 at 150% scaling; a DPI-unaware
+PowerShell gets `SetCursorPos` coordinates virtualized (÷1.5), while
+`CopyFromScreen` sized from `Screen.PrimaryScreen.Bounds` (1707×1067) copies
+the **top-left 1707×1067 physical pixels** — a crop of the real screen, not
+a downscale of it. So **screenshot pixel ÷ 1.5 = click coordinate**, and the
+right side of the screen is simply absent from every capture. Also:
+`FindWindowW` failed on the exact title while `Get-Process | MainWindowHandle`
+worked, and the app must be explicitly foregrounded first (each new
+PowerShell invocation steals focus, so a click issued in a fresh invocation
+is eaten activating the window). Calibrate by parking the cursor and
+screenshotting the **hover highlight** before trusting any click.
+
+**What to commit** (nothing committed — standing instruction, user does
+their own commits). Two separable pieces:
+1. *The feature*: `crates/daily-digest/` (new), `crates/storage/migrations/
+   0003_daily_digest.sql` (new), `crates/storage/src/lib.rs` +
+   `crates/storage/Cargo.toml`, `apps/global-signal-desktop/src/
+   {daily_events.rs,digest.rs}` (new) + `{app.rs,main.rs,panels.rs}` +
+   `Cargo.toml`, root `Cargo.toml` + `Cargo.lock`, `.github/workflows/ci.yml`.
+2. *The docs*: `docs/SAFETY_AND_PRIVACY.md`, `CLAUDE.md`, `HANDOFF.md`.
+
+**Loose ends carried forward, none touched this session** (all still open,
+none urgent): branch protection on `main` (manual GitHub Settings step —
+still no authenticated `gh`/API access from this machine), release workflow
+never exercised (no tag ever pushed), `docker compose` smoke test still only
+verified in CI, Dependabot PRs open and unreviewed on origin, no Bluesky
+mock-server test, README screenshot predates the V1 visualization work.
 
 ## Eighth session (2026-08-12): M7 verification, timeline default-view fix, custom range, drug-policy query
 
@@ -65,6 +193,22 @@ stays in `[0, total)`), returning a short error string on bad/backwards
 input shown inline rather than silently doing nothing. 4 new unit tests.
 Applying a custom range clears `auto_follow`, same as a manual scrub.
 
+**Both items 2–3 screenshot-verified live**, not just unit-tested (the
+`verify` skill's own "UI-visible changes need a live app run" rule) — ran
+the real binary against the persisted DB (35229 ACLED / 75 NOAA / 17
+Telegram records this cycle, all sources online). Default view opened on
+`2026-08-12 12:00 UTC → 2026-08-13 12:00 UTC` while NOAA's own status line
+showed a fetch at `2026-08-13 06:37 UTC` — the window's right edge is
+exactly the end of *now's* 6-hour bucket, not a stale/future date. Typed
+`2026-08-12 18:00` / `2026-08-13 02:00` into the new fields and clicked
+apply: combo switched to "custom", the "⏵ now" button appeared, and the
+label read `2026-08-12 18:00 UTC → 2026-08-13 06:00 UTC` — bucket-rounded
+exactly as `parse_custom_range`'s unit tests predict (end rounds up to the
+next bucket boundary after the typed instant). Clicked "now": window
+snapped to `2026-08-13 00:00 UTC → 2026-08-13 12:00 UTC` and the button
+disappeared again. Screenshots in the scratchpad
+(`shot2_default_full.png`, `shot4_applied_crop.png`, `shot8_after_now_click.png`).
+
 **4. Drug-policy signal — scope confirmed, narrow slice shipped.** Asked
 the user to disambiguate the "drug category" request from HANDOFF's own
 open question: they confirmed **"New EventKind/theme for drug-policy
@@ -90,25 +234,39 @@ kind, and none should be invented for it. **If real theme filtering is
 wanted later, that's a new, larger feature — flag it explicitly, don't
 fold it into a "add drug coverage" ask.**
 
-**5. AI daily-summary feature — clarifying round mostly done, blocked on
-one real ambiguity.** Asked the four scoping questions HANDOFF's seventh
-session flagged as unresolved. Answered: separation rule = two labeled
-sections (attention vs. event data), matching the divergence layer/ledger
-precedent; schedule = one digest per calendar day — the user's own framing
-was a new **"daily events page"** (a dedicated UI surface, not a small
-panel widget, which also answers "where it renders"). **Not resolved**:
-which LLM backend and how credentialed. The user's answer — "could we make
-our own for this... or are there free ones to use?... i am fine with using
-my own subscriptions but if others want it we need something reasonable...
-so i guess for now use codex" — is genuinely ambiguous between (a) ship
-OpenAI's Codex/API as the runtime summarizer end users' installs would call,
-and (b) delegate *this session's implementation* to the `codex` CLI
-subagent while the shipped backend stays undecided. These imply very
-different work. Sent one follow-up question to disambiguate, plus an offer
-to research current free/cheap LLM API tiers via WebSearch rather than
-assert stale pricing/availability claims from memory (this project's own
-standing convention). **Do not start building the AI summary feature until
-that reply lands** — it is architecture-defining, not a detail.
+**5. AI daily-summary feature — design fully settled, not yet built.** All
+four scoping questions are now answered:
+- **Separation rule**: two labeled sections (attention vs. event data),
+  matching the divergence layer/ledger precedent.
+- **Schedule/rendering**: one digest per UTC calendar day, on a new
+  dedicated **"Daily Events" page** (the user's own framing) — not a small
+  panel widget.
+- **LLM backend, the one that took two rounds to pin down**: the user's
+  first answer ("use codex") was genuinely ambiguous between shipping
+  OpenAI's API as the runtime summarizer vs. delegating *this session's
+  coding* to the `codex` CLI subagent. Asked a direct follow-up; the user's
+  actual answer was **"no you decide for now, use anthropic or whatever
+  don't waste tokens whatever it is"** — i.e., stop deliberating, pick
+  something reasonable, move on. **Decision: Anthropic Claude API,
+  credentialed via a new `ANTHROPIC_API_KEY` env var**, same
+  credentials-in-env-vars pattern as every other keyed source (ACLED,
+  Telegram). The user also asked (separately) to research free/cheap
+  alternatives first — that request came *before* the "don't waste tokens"
+  message in the same reply, and the explicit "don't waste tokens" text is
+  the higher-priority, more specific instruction, so no external research
+  was spent chasing provider pricing tables this session. Worth knowing
+  before building: Anthropic's *API* (unlike the claude.ai web app) has no
+  ongoing free tier — it's metered per token, same model every other keyed
+  source in this project already normalized users to expect for credentials.
+- **Why this isn't built yet**: sizing it against the four items above puts
+  it at the scale of its own milestone (new crate, a live API integration
+  with its own mock-server test suite per this project's own precedent for
+  every other live source, a new cached-per-day storage table, a whole new
+  UI page, a SAFETY_AND_PRIVACY.md misuse-review pass since it's a new
+  *interpretive* layer over the data) — comparable to IODA/Bluesky/Telegram,
+  each of which got its own dedicated session. CLAUDE.md's own hard rule is
+  "one milestone at a time." **Next session: this is ready to build with
+  zero further scoping — start straight into implementation.**
 
 **Gates, all re-run to completion after every change above**: `cargo fmt
 --all --check` ✅, `cargo clippy --workspace --all-targets -- -D warnings`

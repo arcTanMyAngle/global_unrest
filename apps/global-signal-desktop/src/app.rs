@@ -10,14 +10,16 @@ use core_types::{
     BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, RegionBucket, SourceId,
     bucket_start_epoch,
 };
+use daily_digest::{DayDigest, DayKey, DigestFacts};
 use geo_utils::CountryIndex;
 use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
-    EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail,
+    DigestDay, EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail,
     RegionEventsPage, RegionHistoryPoint, Reply, SettingsDb, StorageHandle, TimelineHistogramPoint,
 };
 
+use crate::digest::{DigestHandle, DigestMsg};
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
 use crate::map_view::MapView;
 
@@ -29,6 +31,16 @@ pub enum Phase {
     Loading(String),
     Ready,
     Error(String),
+}
+
+/// Which top-level view is on screen. The map and the digest are separate
+/// pages rather than a panel inside the map: one paints stored records, the
+/// other shows generated prose about them, and putting them side by side
+/// would invite reading the second as a caption for the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Map,
+    DailyEvents,
 }
 
 /// One normalized batch awaiting ingest (events + normalization failures).
@@ -234,6 +246,8 @@ pub struct App {
     pub countries: CountryIndex,
     data_dir: std::path::PathBuf,
 
+    pub page: Page,
+
     pending_export: Option<Reply<ExportReport>>,
     /// Human-readable outcome of the last Parquet export, for the status UI.
     pub export_status: Option<String>,
@@ -317,6 +331,32 @@ pub struct App {
     /// selection or the window changes — a page number means nothing against
     /// a different result set.
     pub ledger_offset: usize,
+
+    // --- Daily Events page (crate::daily_events) ---
+    digest_rx: Option<mpsc::Receiver<DigestMsg>>,
+    pub digest_handle: DigestHandle,
+    pending_digest_days: Option<Reply<Vec<DigestDay>>>,
+    /// Days with data, newest first, each tagged with whether a digest is
+    /// cached. Empty until the page is first opened — the query is not worth
+    /// running for a session that never leaves the map.
+    pub digest_days: Vec<DigestDay>,
+    /// Whether the day list has been fetched at least once, so an empty
+    /// database is not mistaken for "not loaded yet" and re-queried forever.
+    digest_days_loaded: bool,
+    /// The day the page is showing.
+    pub digest_day: Option<DayKey>,
+    pending_digest_load: Option<Reply<Option<DayDigest>>>,
+    /// The digest on screen. Always belongs to `digest_day` — cleared on
+    /// every day change so a slow load can never leave one day's prose under
+    /// another day's heading.
+    pub digest: Option<DayDigest>,
+    pending_digest_facts: Option<Reply<DigestFacts>>,
+    pending_digest_store: Option<Reply<()>>,
+    /// The day a paid API call is currently in flight for, if any. A day
+    /// rather than a bool so switching days mid-generation shows the spinner
+    /// on the day it belongs to.
+    pub digest_generating: Option<DayKey>,
+    pub digest_error: Option<String>,
 }
 
 impl App {
@@ -377,6 +417,8 @@ impl App {
 
         let ctx = cc.egui_ctx.clone();
         let (ingest_rx, ingest_handle) = ingest::spawn(move || ctx.request_repaint());
+        let ctx = cc.egui_ctx.clone();
+        let (digest_rx, digest_handle) = crate::digest::spawn(move || ctx.request_repaint());
         let phase = Phase::Loading("loading live data…".into());
 
         let mut app = Self {
@@ -385,6 +427,7 @@ impl App {
             map: MapView::new(basemap, style),
             countries,
             data_dir,
+            page: Page::Map,
             pending_export: None,
             export_status: None,
             phase,
@@ -438,6 +481,18 @@ impl App {
             ledger_offset: 0,
             pending_detail: None,
             detail: None,
+            digest_rx: Some(digest_rx),
+            digest_handle,
+            pending_digest_days: None,
+            digest_days: Vec::new(),
+            digest_days_loaded: false,
+            digest_day: None,
+            pending_digest_load: None,
+            digest: None,
+            pending_digest_facts: None,
+            pending_digest_store: None,
+            digest_generating: None,
+            digest_error: None,
         };
 
         // Live updates are the desktop default. LES_ONLINE=0 remains a useful
@@ -754,6 +809,91 @@ impl App {
                 Err(e) => tracing::error!("region events query: {e}"),
             }
         }
+
+        // 4. Daily Events: worker results, then the page's storage replies.
+        self.poll_digest();
+    }
+
+    /// Drain the digest worker and its storage replies. Split out of
+    /// `poll_async` only for length; it runs on the same per-frame schedule
+    /// and blocks on nothing.
+    fn poll_digest(&mut self) {
+        if let Some(rx) = &self.digest_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(DigestMsg::Written(digest)) => {
+                        self.digest_generating = None;
+                        // Cache first, unconditionally: a paid call must never
+                        // be lost just because the user has moved to another
+                        // day while it was in flight.
+                        self.pending_digest_store =
+                            Some(self.store.store_digest((*digest).clone()));
+                        // The day list carries the "already written" mark, so
+                        // it is now one row out of date.
+                        self.pending_digest_days =
+                            Some(self.store.digest_days(crate::daily_events::DAY_LIMIT));
+                        if self.digest_day == Some(digest.day_utc) {
+                            self.digest = Some(*digest);
+                        }
+                    }
+                    Ok(DigestMsg::Failed { day, message }) => {
+                        self.digest_generating = None;
+                        if self.digest_day == Some(day) {
+                            self.digest_error = Some(message);
+                        } else {
+                            tracing::warn!(day = %day.key(), "digest generation failed: {message}");
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.digest_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(reply) = &self.pending_digest_days
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_digest_days = None;
+            match result {
+                Ok(days) => {
+                    self.digest_days = days;
+                    self.digest_days_loaded = true;
+                }
+                Err(e) => tracing::error!("digest day list: {e}"),
+            }
+        }
+        if let Some(reply) = &self.pending_digest_load
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_digest_load = None;
+            match result {
+                Ok(cached) => self.digest = cached,
+                Err(e) => self.digest_error = Some(format!("reading the cached digest: {e}")),
+            }
+        }
+        if let Some(reply) = &self.pending_digest_facts
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_digest_facts = None;
+            match result {
+                Ok(facts) => {
+                    self.digest_generating = Some(facts.day_utc);
+                    self.digest_handle.generate(facts);
+                }
+                Err(e) => self.digest_error = Some(format!("reading the day's records: {e}")),
+            }
+        }
+        if let Some(reply) = &self.pending_digest_store
+            && let Some(result) = reply.try_take()
+        {
+            self.pending_digest_store = None;
+            if let Err(e) = result {
+                tracing::error!("caching the digest: {e}");
+            }
+        }
     }
 
     /// Fire the two cell-scoped inspector queries (docs/VISUALIZATION.md V2
@@ -792,6 +932,61 @@ impl App {
                         .region_events(cell, window, self.ledger_offset, LEDGER_PAGE_SIZE),
                 );
         }
+    }
+
+    /// Switch top-level pages. The Daily Events day list is queried on first
+    /// entry rather than at startup: a session that never leaves the map
+    /// should not pay for a full-table day rollup.
+    pub fn set_page(&mut self, page: Page) {
+        if self.page == page {
+            return;
+        }
+        self.page = page;
+        if matches!(page, Page::DailyEvents)
+            && !self.digest_days_loaded
+            && self.pending_digest_days.is_none()
+        {
+            self.pending_digest_days = Some(self.store.digest_days(crate::daily_events::DAY_LIMIT));
+        }
+    }
+
+    /// Show a day: clear whatever the previous day left on screen, then load
+    /// its cached digest (if any). Cheap — a cache read, never an API call.
+    pub fn select_digest_day(&mut self, day: DayKey) {
+        if self.digest_day == Some(day) {
+            return;
+        }
+        self.digest_day = Some(day);
+        self.digest = None;
+        self.digest_error = None;
+        // Drops any in-flight load for the previous day, so a slow reply can
+        // never land under the new day's heading.
+        self.pending_digest_load = Some(self.store.load_digest(day));
+        // A facts query for the old day is likewise abandoned; a *generation*
+        // already handed to the worker is not — it still gets cached, it just
+        // isn't displayed until the user comes back to that day.
+        self.pending_digest_facts = None;
+    }
+
+    /// A generation is in flight, or its facts query is. The page uses this
+    /// to keep one paid call in flight at a time.
+    pub fn digest_busy(&self) -> bool {
+        self.digest_generating.is_some() || self.pending_digest_facts.is_some()
+    }
+
+    /// The cache read for the selected day has not landed yet.
+    pub fn digest_loading(&self) -> bool {
+        self.pending_digest_load.is_some()
+    }
+
+    /// Begin writing a day: read its facts from storage, then hand them to
+    /// the digest worker. Guarded so a double-click cannot spend two calls.
+    pub fn start_digest(&mut self, day: DayKey) {
+        if self.digest_generating.is_some() || self.pending_digest_facts.is_some() {
+            return;
+        }
+        self.digest_error = None;
+        self.pending_digest_facts = Some(self.store.digest_facts(day));
     }
 
     fn fire_queries(&mut self) {
@@ -1093,9 +1288,14 @@ impl eframe::App for App {
 
         // Panel order matters in egui 0.35: sides first, central last.
         self.top_bar(ui);
-        self.timeline_panel(ui);
-        self.inspector_panel(ui);
-        self.central_map(ui);
+        match self.page {
+            Page::Map => {
+                self.timeline_panel(ui);
+                self.inspector_panel(ui);
+                self.central_map(ui);
+            }
+            Page::DailyEvents => self.daily_events_page(ui),
+        }
         self.log_window(&ctx);
         self.how_to_read_window(&ctx);
 
