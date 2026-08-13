@@ -28,6 +28,10 @@ bluesky-live = ["dep:source-bluesky", "source-bluesky/live"]
 telegram-live = ["dep:source-telegram", "source-telegram/live"]
 
 [dependencies]
+# Only used by examples/gen_api_test_fixture.rs, to compute a real H3 cell
+# for its hand-crafted test events (geo_utils::cell_for_latlon) — not used
+# by the worker binary itself.
+geo-utils.workspace = true
 source-acled = { workspace = true, optional = true }
 source-bluesky = { workspace = true, optional = true }
 source-ioda = { workspace = true, optional = true }

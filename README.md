@@ -1,38 +1,46 @@
 # Live Earth Signals
 
+### See the signal. Question the story. Stay connected to the world.
+
 [![CI](https://github.com/arcTanMyAngle/global_unrest/actions/workflows/ci.yml/badge.svg)](https://github.com/arcTanMyAngle/global_unrest/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
 
-A desktop-first geospatial dashboard for seeing where public-interest events
-are being reported, how coverage changes over time, and which claims are
-supported by event-data providers. It is intended to grow into a place where
-journalists and other people on the scene can publish opt-in, real-time field
-channels that viewers can follow much like a live broadcast.
+The world changes faster than any single newsroom, dashboard, or feed can
+explain. Live Earth Signals is a desktop-first map for finding meaningful
+patterns in that motion: where public-interest events are being reported, how
+attention shifts over time, and where independent signal sources agree—or do
+not.
+
+It is being built for people who need to look outward with care: journalists
+following a developing story, communities seeking context during disruption,
+researchers tracing patterns, and future field contributors sharing what they
+have witnessed on their own terms. The long-term aim is a place for opt-in,
+real-time field channels that can be followed like a live broadcast, without
+turning people or places into targets.
 
 The application uses only live, public, or properly authorized sources at
-runtime. It preserves source provenance and keeps media attention, provider-
-verified events, and future firsthand field reports visibly separate. It does
-not call any source "guaranteed ground truth": even sincere eyewitnesses can
-be mistaken, delayed, coerced, or impersonated. Instead, the product direction
-is **traceable evidence**—identity and consent signals, timestamps, source
+runtime. It preserves provenance and keeps media attention, provider events,
+official alerts, and future firsthand reports visibly separate. No glowing
+dot is presented as guaranteed ground truth: even sincere eyewitnesses can be
+mistaken, delayed, coerced, or impersonated. The product direction is
+**traceable evidence**—identity and consent signals, timestamps, source
 history, corroboration, corrections, and a clear confidence state.
 
-**Milestones 1–6 complete** (M6 = repo hygiene/CI/releases; see
-[CHANGELOG.md](CHANGELOG.md)), plus the V1 visualization batch and an IODA
-internet-outage layer. The desktop runtime is **live-data-only**: **GDELT**
-(keyless), **ACLED** (authorized myACLED account), **NOAA/NWS active
-alerts** (keyless), **IODA internet-outage events** (keyless), and
-fixtures remain test assets but are never loaded into or displayed by the
-desktop app.
+**Milestones 1–6 and visualization batches V1–V3 are complete** (see
+[CHANGELOG.md](CHANGELOG.md)). The desktop is live-data-only: **GDELT**
+(keyless), **ACLED** (authorized myACLED account), **NOAA/NWS active alerts**
+(keyless), **IODA internet-outage events** (keyless), **Bluesky aggregate
+chatter** (keyless), and credential-gated **Telegram aggregate chatter**.
+Fixtures remain test assets; the desktop never displays them as live data.
 
-## Who this is for
+## Built for attentive people
 
-- **Journalists and newsrooms** monitoring developing stories, comparing
+- **Journalists and newsrooms** following developing stories, comparing
   coverage with structured event reports, and eventually publishing or
   following consent-based field channels.
 - **People in affected areas** seeking a provenance-rich view of nearby
-  reports and official alerts without treating a viral post as confirmed.
+  reports and official alerts without mistaking a viral post for confirmation.
 - **Humanitarian, civic, conflict, and OSINT researchers** studying aggregate
   patterns, coverage gaps, and changes over time.
 - **Emergency and weather analysts** viewing US NOAA/NWS polygon alerts
@@ -41,8 +49,10 @@ desktop app.
   Parquet geospatial pipeline.
 
 This is a situational-awareness aid, not a substitute for official emergency
-instructions or a promise that an area is safe. The current build does not
-provide person-level tracking or live video channels.
+instructions or a promise that an area is safe. It does not provide
+person-level tracking or live video channels. Its job is humbler and, we
+think, more useful: make the evidence easier to inspect before people decide
+what they believe or do.
 
 ## What is available today
 
@@ -128,6 +138,8 @@ Full crate-by-crate map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quickstart
 
+Bring up a living map of the signals shaping the day:
+
 ```sh
 # Copy .env.example to .env and add authorized ACLED credentials if available.
 # The first build compiles bundled DuckDB and can take several minutes.
@@ -139,10 +151,11 @@ You get a dark world map with:
 - **Heatmap** — H3 cells shaded by media attention, event count, or source
   diversity (log scale; toggle in the top bar). Cells roll up to coarser H3
   parents at world zoom.
-- **Event markers** — protests/conflicts/disruptions as colored diamonds.
-  Only city/exact-precision records render as points; country/admin
-  centroids shade regions instead of faking hotspots.
-- **Time slider** — replay the retained live-data extent in 6-hour buckets.
+- **Event markers** — protests, conflicts, and disruptions colored by kind and
+  shaped by source. Only city/exact-precision records render as points;
+  country/admin centroids shade regions instead of faking hotspots.
+- **Timeline and replay** — follow the rhythm of the retained live-data extent
+  in six-hour buckets, then move through it at your own pace.
 - **Region inspector** — click anywhere: counts by kind, attention vs.
   events (always separate), **score components as separate bars**
   (attention / unrest / spike-vs-baseline / combined, per

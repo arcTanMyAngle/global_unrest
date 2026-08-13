@@ -15,11 +15,24 @@ anyhow.workspace = true
 axum.workspace = true
 core-types.workspace = true
 duckdb.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tower.workspace = true
+tower-http.workspace = true
+tower_governor.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+# Unifies with [dependencies]' tokio for `cargo test` only — the shipped
+# binary doesn't need the `macros` feature `#[tokio::test]` requires.
+tokio = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true

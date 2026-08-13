@@ -50,7 +50,7 @@ storage = { path = "crates/storage" }
 # External crates — pinned at the workspace level; do not re-declare versions
 # in member crates. eframe 0.35 rides wgpu 29; do not bump wgpu independently.
 anyhow = "1"
-# M4 services/api only.
+# M4/M7 services/api only.
 axum = "0.8"
 chrono = { version = "0.4.45", features = ["serde"] }
 criterion = "0.7"
@@ -120,6 +120,38 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# M7 services/api hardening. tower supplies ServiceBuilder ("util") and the
+# concurrency cap ("limit"); tower-http supplies request tracing, CORS,
+# response compression, and a timeout layer that needs no extra crypto/TLS
+# stack (pure middleware, unlike reqwest/tokio-tungstenite's TLS deps above).
+tower = { version = "0.5", features = ["util", "limit"] }
+tower-http = { version = "0.7", features = [
+    "trace",
+    "cors",
+    "compression-gzip",
+    "timeout",
+] }
+# Per-IP token-bucket rate limiting. Registry package name is `tower_governor`
+# (underscore) despite the project's own docs/crates.io listing it as
+# "tower-governor" — `cargo add`/the registry index reject the hyphenated
+# form. `default-features = false` drops the `tonic` (gRPC) feature this
+# crate defaults on — the api is HTTP-only, no gRPC in this tree. Reuses the
+# `governor` crate already pinned above for source-gdelt's fetch-rate
+# limiter.
+tower_governor = { version = "0.8", default-features = false, features = [
+    "axum",
+] }
+# OpenAPI spec generation for the api (M7 item 4).
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+# Prometheus /metrics (M7 item 3). `default-features = false` drops
+# `http-listener`/`push-gateway` — the exporter renders text that our own
+# axum `/metrics` route returns, so we don't need this crate's built-in
+# hyper server, and `push-gateway`'s `hyper-rustls/aws-lc-rs` would pull in
+# the cmake/NASM-requiring TLS backend the `rustls` pin above deliberately
+# avoids for the whole workspace.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

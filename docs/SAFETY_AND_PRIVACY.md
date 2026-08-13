@@ -9,7 +9,7 @@ covert surveillance, involuntary tracking, or targeting tool.
 ## Hard rules
 
 1. **Aggregate by default; publishing requires consent.** Existing source
-   signals are keyed to regions (H3 cells, countries) and times, people.
+   signals are keyed to regions (H3 cells, countries) and times, not people.
    A future field channel represents a publisher's explicit choice to share;
    it does not authorize face recognition, involuntary identity search,
    profiling, or persistent location tracking.
@@ -18,8 +18,8 @@ covert surveillance, involuntary tracking, or targeting tool.
    it. Future channel media is stored or relayed only under an explicit
    publisher agreement. Exact capture coordinates are stripped or withheld by
    default, and the publisher controls precision, delay, retention, and access.
-3. **Public or authorized sources only.** scraping of restricted sources;
-   bypassing paywalls, authentication, rate limits, or anti-bot systems.
+3. **Public or authorized sources only.** No scraping of restricted sources;
+   no bypassing paywalls, authentication, rate limits, or anti-bot systems.
    Rate limits are enforced client-side per adapter.
 4. **No guaranteed-ground-truth label.** Media attention is an imperfect,
    biased proxy, provider records may be corrected, and authenticated
@@ -37,18 +37,20 @@ covert surveillance, involuntary tracking, or targeting tool.
    being identified can be dangerous — and a tool that geolocates
    individuals against unrest data is the shape of thing historically used
    to find exactly those people. So for Bluesky, Telegram (and any future
-   social source): ** store an individual post or message**, its
-   author handle/DID/user id, its text, or its URL. — in the database,
-    in a log,  transiently. Text is matched as it streams or is
+   social source): **never store an individual post or message**, its
+   author handle/DID/user id, its text, or its URL — not in the database,
+   not in a log, not transiently. Text is matched as it streams or is
    polled past, an in-memory counter is incremented, and the text is
    dropped inside the same call. Only a `(place, topic, time window) ->
    count` rollup is ever persisted. Place attribution is crude keyword
-   matching against a real gazetteer,  NLP location inference from
+   matching against a real gazetteer, never NLP location inference from
    content; a post that matches nothing contributes to no aggregate rather
    than being placed somewhere plausible. The `chatter` crate is the
    enforcement point: its `observe` takes only text and a timestamp, so
    author identity cannot be passed in even by mistake, and its only output
-   type is a count. 
+   type is a count. This constraint is not a default to revisit when
+   convenient — it is the condition under which these sources are allowed
+   to exist here at all.
    For Telegram specifically, this also shapes *which* channels are
    readable at all: reading a public channel's history via a real account
    (MTProto) is the only mechanism that works without that channel owner's
