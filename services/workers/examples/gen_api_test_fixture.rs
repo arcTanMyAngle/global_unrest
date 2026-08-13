@@ -15,13 +15,18 @@
 //! `cargo run -p workers --example gen_api_test_fixture`
 
 use chrono::{TimeZone, Utc};
-use core_types::{EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, SourceId, event_id};
+use core_types::{
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, SourceId, event_id,
+};
 use storage::StorageHandle;
 
 fn h3(lat: f64, lon: f64) -> u64 {
     geo_utils::cell_for_latlon(lat, lon, H3_RESOLUTION).expect("known-good test coordinates")
 }
 
+// A builder would be more ceremony than this seven-call-site, run-once
+// generator script is worth.
+#[allow(clippy::too_many_arguments)]
 fn event(
     source: SourceId,
     source_event_id: &str,

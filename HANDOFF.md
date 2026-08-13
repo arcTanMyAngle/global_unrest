@@ -1,19 +1,239 @@
 # Session handoff — Live Earth Signals
 
-Last session: 2026-08-12 (**sixth** session that day). **M0–M6 complete; V1,
-V2 and now V3 visualization batches shipped; IODA, Bluesky, and Telegram live
-sources all implemented and verified live in the desktop GUI.** This session
-shipped the whole **V3 batch** (docs/VISUALIZATION.md items 8–10) and verified
-it in a live GUI run against all five live sources. Next: **M7 service
-hardening** — the V1–V3 visualization arc is complete.
+Last session: 2026-08-12 (**seventh** session that day). **M0–M6 complete;
+V1–V3 visualization batches shipped and committed (`0b90e97 diag`); M7
+service hardening (all 5 roadmap items) implemented this session.** Read
+this file, then [CLAUDE.md](CLAUDE.md).
 
-**Everything in this session is uncommitted.** Nothing was committed or
-pushed, per the standing instruction. See "What to commit" below for suggested
-PR-sized boundaries.
+**Correction to the sixth session's own handoff**: it claimed the V3 batch
+was uncommitted. It wasn't — `git log`/`git status` at the start of this
+session showed HEAD at `0b90e97 diag`, one commit ahead of what that
+handoff described, with the entire V3 batch (plus docs) already committed
+in `0b90e97`. **Always re-check `git log`/`git status` yourself before
+trusting a prior handoff's claim about what is or isn't committed** — this
+is now the second time that's mattered.
 
-Read this file, then [CLAUDE.md](CLAUDE.md).
+## M7 — service hardening, what shipped this session (2026-08-12, seventh session)
 
-## V3 — what shipped this session (2026-08-12, sixth session)
+All 5 `docs/ROADMAP.md` M7 items landed in `services/api`, in the order
+the roadmap lists them, each verified with a real `cargo build`/`clippy`
+pass and (for items 2–5) a real running-binary check — not just
+`cargo check`. **Nothing is committed** — this is one large uncommitted
+diff; see "What to commit" below for the split.
+
+**0. ACLED exclusion (not a roadmap item, but flagged and decided before
+building anything else).** `services/api` had no code-level guard against
+serving ACLED-sourced rows — it just trusted "the public worker never runs
+`acled-live`." Asked the user first (per the task's explicit instruction to
+flag anything that makes the ACLED rule easier to get wrong); they picked
+the SQL-level guard. `/events` now excludes `source = 'acled'` by default
+in SQL (`ACLED_EXCLUSION_CLAUSE`), with `LES_API_ALLOW_ACLED=1` as an
+explicit, logged opt-out for a private deployment. **`/buckets`/`/meta`
+can't be filtered this way** — `region_buckets` aggregates every source's
+contribution into one score per cell/window with no per-source column, so
+keeping ACLED out of *those* figures stays a worker-side policy (never run
+the public-facing worker with `acled-live`), documented plainly in
+docs/API.md rather than silently assumed.
+
+**1. Middleware stack**: `tower`'s `ConcurrencyLimitLayer`
+(`MAX_CONCURRENT_REQUESTS=64`), `tower-http`'s `TimeoutLayer` (`408`,
+`REQUEST_TIMEOUT_SECS=30` — the `tower_http` version, not `tower::timeout`,
+specifically because it returns a plain `Response` on timeout instead of
+changing the service's error type, so no `HandleErrorLayer` glue is
+needed), `tower_governor`'s per-IP token bucket (`RATE_LIMIT_PER_SECOND=10`,
+`RATE_LIMIT_BURST=20`, keyed on peer IP — needs
+`app.into_make_service_with_connect_info::<SocketAddr>()`, easy to forget),
+`CorsLayer` (GET-only, any origin — safe, nothing here is credentialed),
+`CompressionLayer` (gzip), `TraceLayer`, and `axum::serve(...)
+.with_graceful_shutdown(...)` draining on Ctrl+C/`SIGTERM`. **Registry
+gotcha**: the crate is published as `tower_governor` (underscore) — the
+crates.io *website*/API silently normalizes the hyphenated form, but the
+actual registry index rejects `tower-governor` as a Cargo.toml key with "no
+matching package," so a `curl` against the JSON API alone would have given
+a wrong answer here.
+
+**2. Snapshot-version `ETag` + `/events` pagination.** A new
+`etag_middleware` (`axum::middleware::from_fn_with_state`) resolves the
+current snapshot version once per request, short-circuits to `304` on a
+matching `If-None-Match` before any handler/DuckDB call runs, and stamps
+the version onto every other response. `/events` gained `offset`/`limit`
+and now returns `{total, offset, limit, rows}` instead of a bare array —
+`kinds`/`themes` still filter in Rust (unchanged from pre-M7), so pagination
+sorts the *filtered* Rust `Vec` by `(ts_epoch_s DESC, id DESC)` — mirroring
+`storage::do_region_events`'s tiebreak, computed in Rust instead of SQL
+`ORDER BY` since the filter that has to run first is already in Rust. The
+underlying SQL fetch keeps `MAX_POINT_ROWS` as its cap either way, now with
+an explicit `ORDER BY ts_epoch_s, id` before that `LIMIT`, so which 100k
+rows get fetched is deterministic even though the SQL order isn't the
+final response order.
+
+**3. `/health` staleness + `/metrics`.** `snapshot_staleness(now, published)`
+is a small pure function (extracted specifically to be unit-testable
+without wall-clock time or a real snapshot — 3 unit tests in
+`main.rs`'s `#[cfg(test)] mod tests`) computing `snapshot_age_s`/`stale`
+(`HEALTH_STALE_THRESHOLD_SECS=3600`, a judgment call like
+`SPIKE_HALO_THRESHOLD`, not a tuned SLA). `/health` stays `200` even when
+stale — staleness is surfaced as data, not folded into the status code, so
+it stays distinguishable from `503` (no snapshot at all). `/metrics` uses
+`metrics` + `metrics-exporter-prometheus`'s `install_recorder()` (not
+`install()` — the latter spawns the crate's *own* hyper listener, which
+isn't wanted here; `install_recorder()` just gives back a `PrometheusHandle`
+to render from our own route) with `default-features = false` on the
+exporter crate specifically to avoid its default `push-gateway` feature
+pulling in `hyper-rustls/aws-lc-rs` — the cmake/NASM-requiring TLS backend
+the workspace's `rustls` pin already deliberately avoids everywhere else.
+
+**4. OpenAPI via `utoipa`, served at `/openapi.json`.** Every handler got
+a `#[utoipa::path(...)]` annotation; `OpenApiRouter` (from `utoipa-axum`)
+is used *only* to collect the spec at startup
+(`.routes(routes!(handler)).into_openapi()`) — actual routing stayed on
+the plain `axum::Router` the middleware stack above is already wired
+against, serialized once to an `Arc<str>` in `AppState` and served
+verbatim. **Deliberately did not add `ToSchema` to `core_types::RegionBucket`**
+— `/buckets`' response schema is loose/undocumented-in-detail in the spec
+(points to docs/DATA_MODEL.md instead) specifically to avoid adding an
+OpenAPI-only dependency to `core-types`, which CLAUDE.md is explicit
+about being a pure, I/O-free domain-types crate. `EventPointDto`'s `kind`/
+`precision` fields use `#[schema(value_type = String)]` for the same
+reason (both are `core_types` enums without `ToSchema`) — confirmed both
+serialize as plain snake_case strings before assuming that override was
+safe.
+
+**5. Integration suite over a committed fixture snapshot.** New
+`services/api/tests/fixtures/` (30 KB, 7 events / 6 buckets / 16
+baselines) generated by new **permanent** (not throwaway — kept
+deliberately, same reasoning as `source-fixtures`'s own
+`generate-fixtures`) `services/workers/examples/gen_api_test_fixture.rs`.
+**That generator hand-crafts `GeoTemporalEvent`s directly rather than
+going through `FixtureSource`**: `FixtureSource::normalize_*` always tags
+rows `SourceId::Fixtures` regardless of which real source's shape a
+record mimics (by design — fixtures never claim to *be* a live source),
+so it structurally cannot produce a `source = 'acled'` row, and the whole
+point of this suite is to exercise the ACLED-exclusion filter end to end.
+Discovered this the hard way after already writing the `FixtureSource`-based
+version and generating a snapshot from it — had to redo the generator once
+this became clear, so the first `fixtures/` commit-worthy snapshot was
+already thrown away before landing. Added `geo-utils` as a real
+(non-dev) dependency of `services/workers` for this — the example needs
+`geo_utils::cell_for_latlon` for a real H3 cell, and CLAUDE.md's own
+Version-gotchas precedent (`geo-utils` range-validates before `h3o`) made
+a fabricated `h3_cell` int seem risky to trust instead.
+
+`services/api/tests/integration.rs` spawns the **real compiled binary**
+(`env!("CARGO_BIN_EXE_api")`) as a subprocess against that fixture and
+hits it with `reqwest` — not an in-process `Router` test — matching this
+project's standing "verify against a running api" discipline in a form CI
+can run unattended. Two `#[tokio::test]`s (different ports, so they can
+run in parallel without colliding): the default-policy surface (`/health`,
+`/meta`, `/buckets` incl. `400`, `/events` incl. pagination ordering and
+`400`, `/metrics`, `/openapi.json`, `ETag`/`304`, and a best-effort
+40-request-burst-vs-`RATE_LIMIT_BURST=20` check for `429`) and a second
+one asserting `LES_API_ALLOW_ACLED=1` actually changes `/events`' count
+(3 → 5). **All 5 tests (3 unit + 2 integration) passed on the first real
+run** — no iteration needed once the fixture design was right.
+
+### A live-in-committed-history bug found and fixed while reading the safety doc for the ACLED question
+
+`docs/SAFETY_AND_PRIVACY.md` currently had **five real corruptions**, not
+just the stale-narrative kind: hard rule 1's "and times, **not** people"
+had lost its "not" (→ the literal opposite claim), hard rule 3's "**No**
+scraping of restricted sources" had lost its "No", and hard rule 6 (the
+streaming/social-source privacy rule) had lost **three** negations plus a
+whole closing sentence — "**never** store an individual post" and "not in
+the database, not in a log, not transiently" both went missing, leaving
+grammatically broken fragments, and "Place attribution is ... **never**
+NLP location inference" lost its "never" too. Traced with `git diff`
+across `4a920b6`/`25549d5` (the two "overhaul" doc-rewrite commits): one
+of these (face-recognition, a *different* sentence) really was caught and
+fixed **within the same commit**, but the other four were left broken and
+have been sitting in every commit since, including the current HEAD —
+**the earlier session's HANDOFF.md entry claiming this was "caught and
+restored" was wrong**; whatever got fixed in that session's live buffer
+never actually landed in a commit. Restored all five spots this session
+(diff is in the working tree, uncommitted, verified by re-reading the
+file). This doesn't affect `crates/chatter`'s actual code — only the
+document was wrong — but it's the file `CLAUDE.md` and `docs/SAFETY_AND_PRIVACY.md`
+itself tell you to read before touching that crate, so it mattered.
+
+### Not yet done / not yet verified this session
+
+- **Full workspace gate battery was launched but not confirmed finished
+  before this handoff was written** — `cargo test --workspace`,
+  `cargo deny check`, and a real `cargo build -p global-signal-desktop`
+  were chained in one background run
+  (`cargo fmt --all --check` ✅ and `cargo clippy --workspace --all-targets
+  -- -D warnings` ✅ **did** finish clean before this was written).
+  **Check the actual result before assuming green** — don't just trust
+  this paragraph.
+- **The 5-way live feature matrix, the `telegram-live` solo leg, and
+  `cargo test -p source-acled --features live` were not re-run this
+  session.** M7's changes don't touch any `source-*` crate or feature-gated
+  code, so risk is low, but "low risk" isn't "verified" — run them before
+  committing, per the standing gate checklist.
+- **`docker compose up` / the M4 stack were not exercised** — the new
+  middleware/env vars (`LES_API_ALLOW_ACLED`, the rate-limit/timeout
+  constants) have only been checked via a directly-spawned binary, not
+  through Compose.
+
+### User-reported issue this session, not investigated (desktop app, not touched this session)
+
+While M7 was in progress the user ran the desktop app independently and
+reported two things from screenshots — **neither was investigated**, this
+session's whole focus was `services/api`:
+1. **The map's default/current view was showing 2025-07-30** data, not
+   today. Almost certainly related to already-documented behavior (ACLED's
+   account-tier restriction to events older than 12 months, `LES_ACLED_WINDOW`,
+   and the separately-documented "default window opens ahead of/behind
+   'now'" issue in this file's Landmines section) rather than a new
+   regression — but that's an inference from old notes, not a re-verified
+   claim. **Next session: confirm whether the default view should
+   prioritize "now" over whatever the data extent computes to, and fix if
+   so.**
+2. **User wants a typeable custom time-range input**, not just preset
+   duration buttons (currently e.g. "6 hours ▾"). A real feature request,
+   not a bug — scope it as a `timeline_strip.rs` change next session.
+3. **User wants an AI-generated daily summary of current events the
+   system found** — surfaced emphatically ("an ai should summrize the
+   current events of each day that it found!", "dont dismiss this!") so
+   flagging it prominently rather than burying it. **Not scoped at all
+   yet** — this is a real design task for next session, not a quick
+   add-on: needs a decision on what feeds the summary (which buckets/
+   events, what window — "each day" implies a rolling per-day digest, not
+   a static one), which LLM/API it calls and how that's credentialed (a
+   new external dependency this project hasn't had before — every existing
+   source is either keyless or the user's own registered account; an LLM
+   summarizer means either a new API key env var or reusing
+   Claude/Anthropic's API), where it renders in the UI, retention/caching
+   (regenerate every load or cache per day-window), and how it interacts
+   with the "media attention ≠ event data" separation this project treats
+   as a hard rule (SAFETY_AND_PRIVACY.md misuse-review process should
+   probably see this feature explicitly before it ships, given it's a new
+   *interpretive* layer over the data rather than a direct display of it).
+   Start next session by asking the user clarifying questions on scope
+   before writing code, don't guess.
+4. Positive signal, worth keeping: **"I love how the map works though it
+   is fucking beautiful great job!!!"** — V1–V3's visual work is landing
+   well with the user.
+
+### What to commit (three separable pieces, don't bundle them)
+
+1. **`docs/SAFETY_AND_PRIVACY.md`** — the 5-spot corruption fix. Small,
+   self-contained, unrelated to M7; commit it alone first.
+2. **M7 / `services/api`** — everything else touched this session:
+   `services/api/src/main.rs`, `services/api/Cargo.toml`, root `Cargo.toml`
+   (new deps: `tower`, `tower-http`, `tower_governor`, `utoipa`,
+   `utoipa-axum`, `metrics`, `metrics-exporter-prometheus`),
+   `services/api/tests/integration.rs`, `docs/API.md`. The roadmap suggests
+   a commit per item (5 items + the ACLED-guard addition = up to 6 small
+   commits) if you want that granularity instead of one.
+3. **The fixture generator + its output** —
+   `services/workers/examples/gen_api_test_fixture.rs`,
+   `services/workers/Cargo.toml` (+`geo-utils` dep),
+   `services/api/tests/fixtures/**` (30 KB, binary Parquet — check
+   `git status` shows it before assuming it's staged; no `.parquet`
+   gitignore rule exists so it should track normally).
+
+## V3 — what shipped (2026-08-12, sixth session, committed as `0b90e97 diag`)
 
 Design rationale is in [docs/VISUALIZATION.md](docs/VISUALIZATION.md) §
 "V3 as built"; this is the orientation summary.

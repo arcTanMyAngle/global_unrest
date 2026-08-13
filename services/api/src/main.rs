@@ -166,7 +166,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/events", get(events))
         .route("/metrics", get(metrics_handler))
         .route("/openapi.json", get(openapi_handler))
-        .layer(middleware::from_fn_with_state(state.clone(), etag_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            etag_middleware,
+        ))
         .layer(middleware::from_fn(record_request_metrics))
         .layer(cors)
         .layer(CompressionLayer::new())
@@ -224,7 +227,12 @@ async fn shutdown_signal() {
 /// handler to report it) so `/health`'s `503` (no snapshot yet) still gets a
 /// pass-through response with no `ETag`, instead of every handler
 /// duplicating this lookup.
-async fn etag_middleware(State(state): State<AppState>, headers: HeaderMap, request: Request, next: Next) -> Response {
+async fn etag_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
     let version = tokio::task::spawn_blocking({
         let root = state.publish_root.clone();
         move || resolve_snapshot(&root).ok().map(|(version, _)| version)
@@ -235,7 +243,11 @@ async fn etag_middleware(State(state): State<AppState>, headers: HeaderMap, requ
 
     if let Some(version) = &version {
         let expected = format!("\"{version}\"");
-        if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(expected.as_str()) {
+        if headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            == Some(expected.as_str())
+        {
             return StatusCode::NOT_MODIFIED.into_response();
         }
     }
@@ -367,7 +379,8 @@ async fn health(State(state): State<AppState>) -> Result<Json<serde_json::Value>
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(manifest.published_at_epoch_s);
-        let (snapshot_age_s, stale) = snapshot_staleness(now_epoch_s, manifest.published_at_epoch_s);
+        let (snapshot_age_s, stale) =
+            snapshot_staleness(now_epoch_s, manifest.published_at_epoch_s);
         Ok(Json(serde_json::json!({
             "status": "ok",
             "snapshot": manifest,
@@ -650,10 +663,17 @@ async fn events(
         // DESC)` mirrors the region-events ledger's tiebreak
         // (storage::do_region_events): without the `id`, rows sharing a
         // timestamp can repeat or vanish across pages.
-        out.sort_by(|a, b| b.ts_epoch_s.cmp(&a.ts_epoch_s).then_with(|| b.id.cmp(&a.id)));
+        out.sort_by(|a, b| {
+            b.ts_epoch_s
+                .cmp(&a.ts_epoch_s)
+                .then_with(|| b.id.cmp(&a.id))
+        });
         let total = out.len();
         let offset = q.offset.unwrap_or(0).clamp(0, i64::MAX) as usize;
-        let limit = q.limit.unwrap_or(DEFAULT_EVENTS_PAGE_SIZE).clamp(1, MAX_POINT_ROWS) as usize;
+        let limit = q
+            .limit
+            .unwrap_or(DEFAULT_EVENTS_PAGE_SIZE)
+            .clamp(1, MAX_POINT_ROWS) as usize;
         let rows = out.into_iter().skip(offset).take(limit).collect();
         Ok(Json(EventsPage {
             total,
@@ -684,7 +704,8 @@ mod tests {
         assert_eq!(age_s, HEALTH_STALE_THRESHOLD_SECS);
         assert!(!stale, "exactly at the threshold is not yet stale");
 
-        let (age_s, stale) = snapshot_staleness(published + HEALTH_STALE_THRESHOLD_SECS + 1, published);
+        let (age_s, stale) =
+            snapshot_staleness(published + HEALTH_STALE_THRESHOLD_SECS + 1, published);
         assert_eq!(age_s, HEALTH_STALE_THRESHOLD_SECS + 1);
         assert!(stale);
     }

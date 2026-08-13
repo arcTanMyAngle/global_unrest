@@ -149,8 +149,18 @@ async fn full_api_surface_over_the_fixture_snapshot() {
     let page1_rows = page1["rows"].as_array().unwrap();
     assert_eq!(page1["total"], 3);
     assert_eq!(page1_rows.len(), 2);
-    assert!(page1_rows[0]["headline"].as_str().unwrap().contains("Jakarta"));
-    assert!(page1_rows[1]["headline"].as_str().unwrap().contains("Nairobi"));
+    assert!(
+        page1_rows[0]["headline"]
+            .as_str()
+            .unwrap()
+            .contains("Jakarta")
+    );
+    assert!(
+        page1_rows[1]["headline"]
+            .as_str()
+            .unwrap()
+            .contains("Nairobi")
+    );
 
     let page2 = json_body(
         client
@@ -165,7 +175,12 @@ async fn full_api_surface_over_the_fixture_snapshot() {
     let page2_rows = page2["rows"].as_array().unwrap();
     assert_eq!(page2["total"], 3);
     assert_eq!(page2_rows.len(), 1);
-    assert!(page2_rows[0]["headline"].as_str().unwrap().contains("Paris"));
+    assert!(
+        page2_rows[0]["headline"]
+            .as_str()
+            .unwrap()
+            .contains("Paris")
+    );
 
     let bad_events_window = client
         .get(format!("{BASE}/events?start=100&end=100"))
@@ -187,7 +202,14 @@ async fn full_api_surface_over_the_fixture_snapshot() {
     assert!(metrics_text.contains("http_request_duration_seconds"));
 
     // /openapi.json: valid JSON, describes the real routes.
-    let openapi = json_body(client.get(format!("{BASE}/openapi.json")).send().await.unwrap()).await;
+    let openapi = json_body(
+        client
+            .get(format!("{BASE}/openapi.json"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
     assert!(openapi["paths"]["/events"].is_object());
     assert!(openapi["paths"]["/health"].is_object());
 
@@ -214,9 +236,13 @@ async fn full_api_surface_over_the_fixture_snapshot() {
     let mut handles = Vec::new();
     for _ in 0..40 {
         let client = client.clone();
-        handles.push(tokio::spawn(
-            async move { client.get(format!("{BASE}/meta")).send().await.map(|r| r.status()) },
-        ));
+        handles.push(tokio::spawn(async move {
+            client
+                .get(format!("{BASE}/meta"))
+                .send()
+                .await
+                .map(|r| r.status())
+        }));
     }
     let mut saw_429 = false;
     for h in handles {
@@ -226,7 +252,10 @@ async fn full_api_surface_over_the_fixture_snapshot() {
             saw_429 = true;
         }
     }
-    assert!(saw_429, "expected at least one 429 from a 40-request burst against a burst-20 limiter");
+    assert!(
+        saw_429,
+        "expected at least one 429 from a 40-request burst against a burst-20 limiter"
+    );
 }
 
 /// `LES_API_ALLOW_ACLED=1` is the private-deployment escape hatch
