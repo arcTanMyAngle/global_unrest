@@ -179,15 +179,16 @@ pub fn embed_for(raw: &str) -> Option<Embed> {
         }
         return None;
     }
-    if host_matches(&host, "bsky.app") {
-        // https://bsky.app/profile/<actor>/post/<rkey>
-        if let ["profile", actor, "post", rkey, ..] = segments.as_slice() {
-            return Some(Embed::Page(format!(
-                "https://embed.bsky.app/embed/{actor}/app.bsky.feed.post/{rkey}"
-            )));
-        }
-        return None;
-    }
+    // Bluesky post pages are deliberately absent: `embed.bsky.app` is a post
+    // *card*, not a player. It renders the poster frame and a play triangle,
+    // but that triangle is a link — clicking it navigates to
+    // `bsky.app/…?ref_src=embed` rather than starting the video (live-verified
+    // 2026-08-14 in Firefox, on the same iframe wrapper the desktop player
+    // uses, so this is the widget's own behaviour and not an embedding
+    // problem). Inside the webview the navigation simply goes nowhere, which
+    // looks like a broken video. The native stream is HLS, which Chromium/
+    // WebView2 cannot decode either, and resolving one would be scraping — so
+    // the honest answer is the browser, where bsky.app plays it properly.
 
     None
 }
@@ -268,10 +269,6 @@ mod tests {
             page("https://t.me/liveuamap/12345"),
             "https://t.me/liveuamap/12345?embed=1&mute=0"
         );
-        assert_eq!(
-            page("https://bsky.app/profile/did:plc:xyz/post/3kabc"),
-            "https://embed.bsky.app/embed/did:plc:xyz/app.bsky.feed.post/3kabc"
-        );
     }
 
     #[test]
@@ -297,6 +294,13 @@ mod tests {
         assert_eq!(embed_for("https://rumble.com/v1abcd-some-title.html"), None);
         // Channel previews and profile pages are not posts.
         assert_eq!(embed_for("https://t.me/s/liveuamap"), None);
+        // A Bluesky post page, unlike a Telegram one: `embed.bsky.app` renders
+        // a card whose play triangle is a *link* to bsky.app, so it can never
+        // play here. See the note in `embed_for`.
+        assert_eq!(
+            embed_for("https://bsky.app/profile/did:plc:xyz/post/3kabc"),
+            None
+        );
         assert_eq!(embed_for("https://bsky.app/profile/did:plc:xyz"), None);
         // Ordinary news articles stay ordinary news articles.
         assert_eq!(embed_for("https://news.example.org/story"), None);

@@ -8,11 +8,13 @@
 //!
 //! **The hit URL is never an extracted stream.** A native Bluesky video lives
 //! behind an HLS playlist that Chromium/WebView2 cannot decode anyway, so the
-//! hit is the post's own page and `embed.bsky.app` — Bluesky's published
-//! player, which [`core_types::embed_for`] maps a post URL onto — does the
-//! playing. A post that is instead a *link card* to a video host already names
-//! that host's own page, and that page is the hit: sending someone to the post
-//! widget would just show them the card they would have to click again.
+//! hit is the post's own page, and that page opens in the OS browser —
+//! Bluesky publishes no embeddable *player*, only a post card whose play
+//! button links back to bsky.app (see [`core_types::embed_for`]). A post that
+//! is instead a *link card* to a video host already names that host's own
+//! page, and that page is the hit — it plays inline, and sending someone to
+//! the post widget would just show them the card they would have to click
+//! again.
 //!
 //! Pure: [`request_url`] builds the call and [`hits`] parses a response. The
 //! network round trip is in `crate::live`.
@@ -157,12 +159,9 @@ pub fn hits(body: &str) -> Result<Vec<MediaHit>, SourceError> {
             .unwrap_or_default();
         out.push(MediaHit {
             url: match playable {
-                // Keyed by DID, not by handle. `bsky.app` accepts either, but
-                // `embed.bsky.app` accepts only a DID — a handle there answers
-                // "Invalid DID: DID syntax didn't validate via regex" and the
-                // player shows that instead of the video (live-verified
-                // 2026-08-14, which is the only way this surfaces: a fixture
-                // handle looks fine to `embed_for`).
+                // Keyed by DID, not by handle: `bsky.app` accepts either, but
+                // a DID is the stable identifier and is what the AppView
+                // returns, so a later handle change cannot break the link.
                 Playable::Native => format!("https://bsky.app/profile/{did}/post/{rkey}"),
                 Playable::External { uri, .. } => uri.to_string(),
             },
@@ -371,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hit_url_is_the_post_page_that_embed_for_can_play() {
+    fn a_native_video_hit_is_the_post_page_the_browser_can_play() {
         let body = r#"{"posts":[
             {"uri":"at://did:plc:aaa/app.bsky.feed.post/rk1",
              "author":{"handle":"reporter.example"},
@@ -380,19 +379,13 @@ mod tests {
              "embed":{"$type":"app.bsky.embed.video#view","playlist":"https://video.bsky.app/watch/d/c/playlist.m3u8"}}
         ]}"#;
         let hits = hits(body).unwrap();
-        // The whole point of returning the post URL: it maps to Bluesky's own
-        // published player. The HLS playlist would not — WebView2 cannot
-        // decode HLS natively.
-        //
-        // Asserted as the exact embed URL, not merely `is_some()`: a handle in
-        // the actor slot also maps to *an* embed URL, and that weaker
-        // assertion is what let a live "Invalid DID" error through once.
-        assert_eq!(
-            core_types::embed_for(&hits[0].url),
-            Some(core_types::Embed::Page(
-                "https://embed.bsky.app/embed/did:plc:aaa/app.bsky.feed.post/rk1".to_string()
-            ))
-        );
+        // The post page, never the HLS playlist: WebView2 cannot decode HLS,
+        // and resolving a post to its stream would be scraping. Bluesky has no
+        // embeddable player, so this URL is expected to have no in-app embed —
+        // the desktop's "open in browser" path is the one that plays it, and
+        // bsky.app does play it there.
+        assert_eq!(hits[0].url, "https://bsky.app/profile/did:plc:aaa/post/rk1");
+        assert_eq!(core_types::embed_for(&hits[0].url), None);
     }
 
     #[test]

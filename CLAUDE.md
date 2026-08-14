@@ -135,7 +135,13 @@ worker and supports LES_API_BIND plus private-only LES_API_ALLOW_ACLED.
   re-enable it without testing a real desktop link.
 - The Windows player uses wry/WebView2 only for a provider's published embed
   or direct public media file. Non-Windows and unsupported URLs must keep an
-  honest browser fallback.
+  honest browser fallback. Two facts here were paid for in live debugging and
+  must not be undone: the player page is served through a wry custom protocol
+  so it has a real `http://lesplay.localhost` origin (navigating the webview
+  straight at an embed gives it an opaque origin and YouTube refuses with
+  "Error 153"), and Bluesky post pages get no embed at all, because
+  `embed.bsky.app` is a post card whose play button links back to bsky.app
+  rather than playing.
 - Keep renderer work cached. Do not add per-frame geometry tessellation,
   unbounded overlay loops, or UI queries that block a frame.
 
