@@ -12,21 +12,23 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::{
-    ANTHROPIC_VERSION, API_KEY_ENV, API_URL, DayDigest, DigestError, DigestFacts, MODEL,
-    parse_response, request_body,
+    API_BASE, API_KEY_ENV, DayDigest, DigestError, DigestFacts, MODEL, api_url, parse_response,
+    request_body,
 };
 
-/// Overrides [`API_URL`]. Used by the mock-server tests; there is no reason to
-/// set it in normal operation.
-pub const ENDPOINT_ENV: &str = "LES_ANTHROPIC_ENDPOINT";
+/// Overrides [`API_BASE`]. Used by the mock-server tests; there is no reason
+/// to set it in normal operation. It is a *base* — the model id and method are
+/// appended by [`api_url`], so the mock exercises the same path the real API
+/// sees.
+pub const ENDPOINT_ENV: &str = "LES_GEMINI_ENDPOINT";
 
-pub struct AnthropicDigester {
+pub struct GeminiDigester {
     http: reqwest::Client,
-    endpoint: String,
+    url: String,
     api_key: String,
 }
 
-impl AnthropicDigester {
+impl GeminiDigester {
     /// Reads the API key from the environment. Returns `Ok(None)` when the key
     /// is absent so the caller can treat the whole feature as simply
     /// unconfigured — the same contract the other credential-gated sources
@@ -39,14 +41,14 @@ impl AnthropicDigester {
         if key.is_empty() {
             return Ok(None);
         }
-        let endpoint = std::env::var(ENDPOINT_ENV)
+        let base = std::env::var(ENDPOINT_ENV)
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| API_URL.to_owned());
-        Ok(Some(Self::new(key, endpoint)?))
+            .unwrap_or_else(|| API_BASE.to_owned());
+        Ok(Some(Self::new(key, base)?))
     }
 
-    pub fn new(api_key: String, endpoint: String) -> Result<Self, DigestError> {
+    pub fn new(api_key: String, base: String) -> Result<Self, DigestError> {
         let http = reqwest::Client::builder()
             .user_agent(concat!(
                 "live-earth-signals/",
@@ -54,21 +56,22 @@ impl AnthropicDigester {
                 " (civic-data research dashboard)"
             ))
             .connect_timeout(Duration::from_secs(10))
-            // Generous: adaptive thinking on a 1M-context model can take a
-            // while, and this runs once per UTC day, not per frame.
+            // Generous: thinking on a large-context model can take a while,
+            // and this runs once per UTC day, not per frame.
             .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| DigestError::Http(e.to_string()))?;
         Ok(Self {
             http,
-            endpoint,
+            url: api_url(&base),
             api_key,
         })
     }
 
-    /// Point at a local server. Tests only.
-    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.endpoint = endpoint.into();
+    /// Point at a local server. Tests only. Takes the API *base*, same as
+    /// [`Self::new`].
+    pub fn with_endpoint(mut self, base: impl AsRef<str>) -> Self {
+        self.url = api_url(base.as_ref());
         self
     }
 
@@ -90,12 +93,12 @@ impl AnthropicDigester {
         // rustls TLS feature, so the `json` helper is not compiled in.
         let resp = self
             .http
-            .post(&self.endpoint)
+            .post(&self.url)
             .header("content-type", "application/json")
-            // API key in a header, never a query string: query strings are
-            // the part of a URL that ends up in logs and error messages.
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
+            // API key in a header, never the `?key=` query parameter this API
+            // also accepts: query strings are the part of a URL that ends up
+            // in logs, proxies, and error messages.
+            .header("x-goog-api-key", &self.api_key)
             .body(body)
             .send()
             .await
@@ -103,19 +106,35 @@ impl AnthropicDigester {
 
         let status = resp.status();
         if status.as_u16() == 429 {
-            let retry_after_secs = resp
+            let header_secs = resp
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok());
+            // This API usually omits `Retry-After` and puts the delay in a
+            // `RetryInfo` detail instead, as a duration string ("41s").
+            let text = resp.text().await.unwrap_or_default();
+            let retry_after_secs = header_secs.or_else(|| {
+                serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .as_ref()
+                    .and_then(error_details)
+                    .and_then(|details| {
+                        details
+                            .iter()
+                            .filter_map(|d| d.get("retryDelay").and_then(Value::as_str))
+                            .find_map(parse_retry_delay)
+                    })
+            });
             return Err(DigestError::RateLimited { retry_after_secs });
         }
         if !status.is_success() {
             // The response body can echo request content; surface only the
             // API's own `error.message`, and never the key we just sent.
             let text = resp.text().await.unwrap_or_default();
-            let detail = serde_json::from_str::<Value>(&text)
-                .ok()
+            let value = serde_json::from_str::<Value>(&text).ok();
+            let detail = value
+                .as_ref()
                 .and_then(|v| {
                     v.get("error")
                         .and_then(|e| e.get("message"))
@@ -123,11 +142,29 @@ impl AnthropicDigester {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| "no error message returned".to_owned());
-            return Err(match status.as_u16() {
-                401 | 403 => DigestError::Api(format!(
+            // A bad key on this API is an ordinary 400 `INVALID_ARGUMENT`, not
+            // a 401/403 — status alone cannot tell it apart from a malformed
+            // request, so the credential hint has to come from the structured
+            // `reason`. 401/403 stay mapped as well; they are what a disabled
+            // or unauthorized project returns.
+            let bad_credentials = matches!(status.as_u16(), 401 | 403)
+                || value
+                    .as_ref()
+                    .and_then(error_details)
+                    .is_some_and(|details| {
+                        details.iter().any(|d| {
+                            matches!(
+                                d.get("reason").and_then(Value::as_str),
+                                Some("API_KEY_INVALID" | "API_KEY_SERVICE_BLOCKED")
+                            )
+                        })
+                    });
+            return Err(if bad_credentials {
+                DigestError::Api(format!(
                     "{status}: {detail} — check the {API_KEY_ENV} environment variable"
-                )),
-                _ => DigestError::Api(format!("{status}: {detail}")),
+                ))
+            } else {
+                DigestError::Api(format!("{status}: {detail}"))
             });
         }
 
@@ -153,5 +190,39 @@ impl AnthropicDigester {
             attention_records: facts.attention.records,
             event_records: facts.events.records,
         })
+    }
+}
+
+/// `error.details[]` — the google.rpc status details array, where this API
+/// puts the machine-readable half of a failure.
+fn error_details(body: &Value) -> Option<&Vec<Value>> {
+    body.get("error")
+        .and_then(|e| e.get("details"))
+        .and_then(Value::as_array)
+}
+
+/// Whole seconds out of a protobuf duration string (`"41s"`, `"7.5s"`).
+///
+/// Rounds down and refuses anything unexpected: this only feeds a "try again
+/// later" hint, so a wrong number is worse than no number.
+fn parse_retry_delay(raw: &str) -> Option<u64> {
+    let secs = raw.trim().strip_suffix('s')?;
+    secs.parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map(|v| v as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_delay_parses_the_protobuf_duration_shape() {
+        assert_eq!(parse_retry_delay("41s"), Some(41));
+        assert_eq!(parse_retry_delay(" 7.5s "), Some(7));
+        assert_eq!(parse_retry_delay("41"), None);
+        assert_eq!(parse_retry_delay("soon"), None);
+        assert_eq!(parse_retry_delay("-1s"), None);
     }
 }

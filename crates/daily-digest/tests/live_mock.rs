@@ -1,14 +1,14 @@
-//! `live`-feature integration tests against a local mock Anthropic Messages
-//! server: request shape, header auth, thinking-block filtering, refusal
-//! handling, and 429/401 mapping. No real network, no API key — run with
-//! `cargo test -p daily-digest --features live`.
+//! `live`-feature integration tests against a local mock Gemini
+//! `generateContent` server: request shape, header auth, thought-part
+//! filtering, refusal handling, and 429/bad-key mapping. No real network, no
+//! API key — run with `cargo test -p daily-digest --features live`.
 #![cfg(feature = "live")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use daily_digest::{
-    AnthropicDigester, AttentionFacts, DayKey, DigestError, DigestFacts, EventFact, EventFacts,
+    AttentionFacts, DayKey, DigestError, DigestFacts, EventFact, EventFacts, GeminiDigester,
     HeadlineFact, MODEL, PlaceCount,
 };
 use serde_json::{Value, json};
@@ -86,10 +86,10 @@ fn request_json(raw: &str) -> Value {
     serde_json::from_str(body).expect("request body is JSON")
 }
 
-const TEST_KEY: &str = "sk-ant-test-DO-NOT-LEAK";
+const TEST_KEY: &str = "AIzaSy-test-DO-NOT-LEAK";
 
-fn digester(base: &str) -> AnthropicDigester {
-    AnthropicDigester::new(TEST_KEY.to_owned(), base.to_owned()).expect("build client")
+fn digester(base: &str) -> GeminiDigester {
+    GeminiDigester::new(TEST_KEY.to_owned(), base.to_owned()).expect("build client")
 }
 
 fn facts() -> DigestFacts {
@@ -131,8 +131,11 @@ fn facts() -> DigestFacts {
     }
 }
 
-/// The two-section structured output, as the API returns it: a text block
-/// whose content is JSON matching `output_config.format.schema`.
+/// The two-section structured output as the API returns it: a candidate whose
+/// single answer part is JSON matching `generationConfig.responseJsonSchema`.
+/// The `thoughtSignature` is copied from a real response — it rides on the
+/// *answer* part, which is why the parser filters on `thought`, not on the
+/// presence of a thinking-shaped field.
 fn ok_response() -> String {
     let text = json!({
         "media_attention": "Coverage concentrated on Kenya across 61 outlets.",
@@ -143,12 +146,15 @@ fn ok_response() -> String {
         "200 OK",
         "",
         &json!({
-            "id": "msg_test",
-            "type": "message",
-            "role": "assistant",
-            "model": MODEL,
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": text}],
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": text, "thoughtSignature": "opaque"}],
+                },
+                "finishReason": "STOP",
+            }],
+            "modelVersion": MODEL,
+            "usageMetadata": {"thoughtsTokenCount": 0},
         })
         .to_string(),
     )
@@ -174,7 +180,7 @@ async fn happy_path_returns_both_sections_separately() {
 }
 
 #[tokio::test]
-async fn request_carries_the_documented_headers_and_no_rejected_parameters() {
+async fn request_carries_the_documented_auth_and_the_enforcing_schema_field() {
     let seen = Arc::new(std::sync::Mutex::new(String::new()));
     let sink = Arc::clone(&seen);
     let base = serve(move |target, req| {
@@ -186,25 +192,51 @@ async fn request_carries_the_documented_headers_and_no_rejected_parameters() {
 
     let captured = seen.lock().unwrap().clone();
     let lower = captured.to_ascii_lowercase();
-    assert!(captured.starts_with("POST /"), "posts: {captured}");
-    assert!(lower.contains(&format!("x-api-key: {}", TEST_KEY.to_ascii_lowercase())));
-    assert!(lower.contains("anthropic-version: 2023-06-01"));
+    // Model id and method live in the path on this API, not in the body.
+    assert!(
+        captured.starts_with(&format!("POST /models/{MODEL}:generateContent")),
+        "posts: {captured}"
+    );
+    assert!(lower.contains(&format!(
+        "x-goog-api-key: {}",
+        TEST_KEY.to_ascii_lowercase()
+    )));
+    // The key must never travel in the query string, where it would be logged.
+    assert!(!captured.contains("key="), "key in URL: {captured}");
 
     let body = request_json(&captured);
-    assert_eq!(body["model"], MODEL);
-    // These are 400-triggers on this model family; a regression here would
-    // fail every real request while the mock tests stayed green if we only
-    // asserted on the happy-path response.
-    for banned in ["temperature", "top_p", "top_k", "thinking"] {
-        assert!(body.get(banned).is_none(), "`{banned}` was sent");
-    }
-    assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-    let required = body["output_config"]["format"]["schema"]["required"]
-        .as_array()
-        .expect("required list");
+    assert!(
+        body.get("model").is_none(),
+        "`model` is an unknown body key"
+    );
+    let cfg = &body["generationConfig"];
+    // `responseSchema` is the OpenAPI-3.0 subset and silently ignores
+    // `additionalProperties`. Sending the schema there would leave the
+    // separation rule unenforced while every test on the *response* stayed
+    // green, because the mock is the one writing the response.
+    assert!(
+        cfg.get("responseSchema").is_none(),
+        "schema must go through responseJsonSchema"
+    );
+    assert_eq!(cfg["responseMimeType"], "application/json");
+    let schema = &cfg["responseJsonSchema"];
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(schema["properties"].as_object().unwrap().len(), 2);
+    let required = schema["required"].as_array().expect("required list");
     assert_eq!(required.len(), 2);
     assert!(required.iter().any(|v| v == "media_attention"));
     assert!(required.iter().any(|v| v == "event_data"));
+    // Unknown `generationConfig` keys are a 400 on this API, so anything we
+    // send here must be a field it actually knows. A regression that
+    // reintroduced a foreign sampling parameter would fail every real request
+    // while the mock stayed green.
+    let known = ["responseMimeType", "responseJsonSchema", "maxOutputTokens"];
+    for key in cfg.as_object().unwrap().keys() {
+        assert!(
+            known.contains(&key.as_str()) || key == "thinkingConfig",
+            "unexpected generationConfig key `{key}`"
+        );
+    }
 }
 
 #[tokio::test]
@@ -219,7 +251,9 @@ async fn withheld_sources_reach_the_prompt_as_counts_but_never_as_rows() {
     digester(&base).generate(&facts(), 0).await.expect("digest");
 
     let body = request_json(&seen.lock().unwrap());
-    let prompt = body["messages"][0]["content"].as_str().expect("prompt");
+    let prompt = body["contents"][0]["parts"][0]["text"]
+        .as_str()
+        .expect("prompt");
     // ACLED's count is present…
     assert!(prompt.contains("acled=16"));
     // …but the only row-level entry is the permitted IODA one.
@@ -235,18 +269,20 @@ async fn withheld_sources_reach_the_prompt_as_counts_but_never_as_rows() {
 }
 
 #[tokio::test]
-async fn thinking_blocks_are_skipped_rather_than_parsed() {
+async fn thought_parts_are_skipped_rather_than_parsed() {
     let base = serve(|_t, _r| {
         let text = json!({"media_attention": "A.", "event_data": "B."}).to_string();
         http_json(
             "200 OK",
             "",
             &json!({
-                "stop_reason": "end_turn",
-                "content": [
-                    {"type": "thinking", "thinking": "{\"media_attention\": \"not this\"}"},
-                    {"type": "text", "text": text},
-                ],
+                "candidates": [{
+                    "finishReason": "STOP",
+                    "content": {"parts": [
+                        {"text": "{\"media_attention\": \"not this\"}", "thought": true},
+                        {"text": text},
+                    ]},
+                }],
             })
             .to_string(),
         )
@@ -259,18 +295,31 @@ async fn thinking_blocks_are_skipped_rather_than_parsed() {
 
 #[tokio::test]
 async fn a_refusal_is_reported_as_a_refusal_not_a_parse_error() {
-    // Refusals arrive as HTTP 200 with empty content; reading `content[0]`
-    // first would misreport this as malformed output.
+    // Blocked completions arrive as HTTP 200 with an empty parts list; reading
+    // `parts[0]` first would misreport this as malformed output.
     let base = serve(|_t, _r| {
         http_json(
             "200 OK",
             "",
             &json!({
-                "stop_reason": "refusal",
-                "stop_details": {"category": "policy"},
-                "content": [],
+                "candidates": [{"finishReason": "SAFETY", "content": {"parts": []}}],
             })
             .to_string(),
+        )
+    })
+    .await;
+    let err = digester(&base).generate(&facts(), 0).await.unwrap_err();
+    assert!(matches!(err, DigestError::Refused(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn a_blocked_prompt_is_reported_as_a_refusal_too() {
+    // The other shape: HTTP 200 with no candidates at all.
+    let base = serve(|_t, _r| {
+        http_json(
+            "200 OK",
+            "",
+            &json!({"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}).to_string(),
         )
     })
     .await;
@@ -284,7 +333,7 @@ async fn rate_limit_surfaces_the_retry_after_header() {
         http_json(
             "429 Too Many Requests",
             "retry-after: 42\r\n",
-            &json!({"type": "error", "error": {"message": "rate_limit_error"}}).to_string(),
+            &json!({"error": {"code": 429, "message": "Quota exceeded"}}).to_string(),
         )
     })
     .await;
@@ -301,18 +350,64 @@ async fn rate_limit_surfaces_the_retry_after_header() {
 }
 
 #[tokio::test]
-async fn bad_credentials_name_the_env_var_without_echoing_the_key() {
+async fn rate_limit_falls_back_to_the_retry_info_detail() {
+    // The free tier's 429s carry no `Retry-After`; the delay is a RetryInfo
+    // detail in the body, as a protobuf duration string.
     let base = serve(|_t, _r| {
         http_json(
-            "401 Unauthorized",
+            "429 Too Many Requests",
             "",
-            &json!({"type": "error", "error": {"message": "invalid x-api-key"}}).to_string(),
+            &json!({"error": {
+                "code": 429,
+                "message": "You exceeded your current quota",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.QuotaFailure"},
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"},
+                ],
+            }})
+            .to_string(),
+        )
+    })
+    .await;
+    let err = digester(&base).generate(&facts(), 0).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DigestError::RateLimited {
+                retry_after_secs: Some(41)
+            }
+        ),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn bad_credentials_name_the_env_var_without_echoing_the_key() {
+    // This API rejects a bad key with an ordinary 400 INVALID_ARGUMENT, not a
+    // 401/403 — the credential hint has to come from the structured `reason`,
+    // or a mistyped key looks like a malformed request.
+    let base = serve(|_t, _r| {
+        http_json(
+            "400 Bad Request",
+            "",
+            &json!({"error": {
+                "code": 400,
+                "message": "API key not valid. Please pass a valid API key.",
+                "status": "INVALID_ARGUMENT",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "API_KEY_INVALID",
+                    "domain": "googleapis.com",
+                }],
+            }})
+            .to_string(),
         )
     })
     .await;
     let err = digester(&base).generate(&facts(), 0).await.unwrap_err();
     let text = err.to_string();
-    assert!(text.contains("ANTHROPIC_API_KEY"), "{text}");
+    assert!(text.contains("GEMINI_API_KEY"), "{text}");
     assert!(
         !text.contains(TEST_KEY),
         "the key must never be echoed: {text}"

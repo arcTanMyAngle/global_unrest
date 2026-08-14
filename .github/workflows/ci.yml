@@ -45,7 +45,7 @@ jobs:
   # already compiles the union; this job is what covers each feature *alone*
   # and the worker binary, whose features stay opt-in.
   #
-  # `anthropic-live` is package-qualified because it exists only on the
+  # `gemini-live` is package-qualified because it exists only on the
   # desktop app — the worker has no Daily Events page. The solo entries all
   # leave it off, which is what compiles the stub `api` module in
   # `apps/global-signal-desktop/src/digest.rs`.
@@ -60,8 +60,8 @@ jobs:
             "ioda-live",
             "bluesky-live",
             "telegram-live",
-            "global-signal-desktop/anthropic-live",
-            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/anthropic-live",
+            "global-signal-desktop/gemini-live",
+            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live",
           ]
     runs-on: ubuntu-latest
     steps:
@@ -93,12 +93,12 @@ jobs:
       - name: source-acled live mock suite
         run: cargo test -p source-acled --features live
 
-  # daily-digest's `live` feature carries the Anthropic mock-server suite
-  # (tests/live_mock.rs): headers, rejected-parameter absence, refusals,
-  # rate limits, and the assertion that withheld sources reach the prompt as
-  # counts but never as rows. No API key is ever needed — the tests point the
-  # client at a local socket.
-  anthropic-live-mock:
+  # daily-digest's `live` feature carries the Gemini mock-server suite
+  # (tests/live_mock.rs): header auth, the schema travelling through the field
+  # that actually enforces it, refusals, rate limits, and the assertion that
+  # withheld sources reach the prompt as counts but never as rows. No API key
+  # is ever needed — the tests point the client at a local socket.
+  gemini-live-mock:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

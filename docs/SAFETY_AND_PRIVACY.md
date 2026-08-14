@@ -71,7 +71,13 @@ covert surveillance, involuntary tracking, or targeting tool.
    response schema has exactly two properties — `media_attention` and
    `event_data` — with `additionalProperties: false`, so a blended
    significance judgement is not a shape the answer can take (hard rule 4,
-   at the schema level). (b) Row-level text is forwarded only for sources
+   at the schema level). The provider enforces it server-side by constrained
+   decoding, and it must be sent in the request field that actually does so
+   (`generationConfig.responseJsonSchema`, **not** `responseSchema`, whose
+   OpenAPI-3.0 subset has no `additionalProperties` and would drop the
+   keyword silently); verified against the live API with a prompt explicitly
+   ordering a third, blended field — the answer still came back with exactly
+   two. (b) Row-level text is forwarded only for sources
    whose terms allow it (`row_level_permitted`); ACLED and the chatter
    sources reach the model as counts only. (c) Each section is displayed
    under its own heading with the number of records it was written from, above
@@ -80,10 +86,24 @@ covert surveillance, involuntary tracking, or targeting tool.
    not a news report. A digest is regenerable and disposable; the stored
    records are the artifact.
 
-## Third-party processing (Anthropic API)
+## Third-party processing (Google Gemini API)
 
 The daily digest is the only feature that sends stored signals *out* of the
 machine, so it is worth being exact about what leaves and what does not.
+
+**The free tier may train on what is sent.** Google's terms for the unpaid
+tier of the Gemini API state that submitted prompts and generated responses
+are used to improve their products, and that human reviewers may read them.
+This is not a footnote to skim past — it is the reason the "what is sent"
+list below is exhaustive and capped, and the reason nothing person-level can
+reach it. Everything in that list is public metadata this project is already
+permitted to republish (GDELT/NOAA/IODA fields and our own derived counts),
+so training on it discloses nothing that is not already public. If that ever
+stops being true of a field, the fix is to withhold the field, not to hope
+the provider does not read it. Anyone who needs the data not to be trained on
+should use a paid tier (where Google states it is not used for training) or
+turn the feature off — with no key, the page reads the local cache and makes
+no requests.
 
 - **What is sent**: one request per generated day, containing the day's
   aggregate counts (records, articles, distinct outlet domains, per-country
@@ -100,12 +120,14 @@ machine, so it is worth being exact about what leaves and what does not.
   counts and never as rows.
 - **When**: only on an explicit click, once per UTC day, cached locally in
   DuckDB afterwards. Nothing is generated in the background, on startup, or
-  on a timer. With no `ANTHROPIC_API_KEY` (or with the `anthropic-live`
+  on a timer. With no `GEMINI_API_KEY` (or with the `gemini-live`
   feature off) the page still reads every previously generated digest and
   makes no requests at all.
-- **Credential**: `ANTHROPIC_API_KEY`, env var only, like every other keyed
-  source here (hard rule 5). Error messages name the variable and never echo
-  its value — also a test.
+- **Credential**: `GEMINI_API_KEY`, env var only, like every other keyed
+  source here (hard rule 5). It travels in the `x-goog-api-key` header, never
+  in the `?key=` query parameter this API also accepts — query strings are the
+  part of a URL that ends up in logs and proxies. Error messages name the
+  variable and never echo its value — also a test.
 
 ## Source licensing
 

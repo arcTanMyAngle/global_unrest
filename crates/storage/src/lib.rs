@@ -2976,7 +2976,7 @@ mod tests {
 
         let mut digest = DayDigest {
             day_utc: day,
-            model: "claude-opus-5".into(),
+            model: "gemini-3.7-flash".into(),
             generated_at_epoch_s: 1_786_500_000,
             media_attention: "first attention text".into(),
             event_data: "first event text".into(),
@@ -3007,7 +3007,7 @@ mod tests {
         store
             .store_digest(DayDigest {
                 day_utc: day,
-                model: "claude-opus-5".into(),
+                model: "gemini-3.7-flash".into(),
                 generated_at_epoch_s: 0,
                 media_attention: "a".into(),
                 event_data: "b".into(),

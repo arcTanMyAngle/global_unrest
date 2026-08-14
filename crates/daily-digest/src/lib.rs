@@ -31,24 +31,39 @@ use serde_json::{Value, json};
 pub mod live;
 
 #[cfg(feature = "live")]
-pub use live::AnthropicDigester;
+pub use live::GeminiDigester;
 
-/// Anthropic Messages API endpoint. `LES_ANTHROPIC_ENDPOINT` overrides it
+/// Google Generative Language API base. `LES_GEMINI_ENDPOINT` overrides it
 /// (the mock-server tests point this at a local server).
-pub const API_URL: &str = "https://api.anthropic.com/v1/messages";
-/// Required on every request; this is an API version, not a model version.
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 /// The only credential this feature needs, env-var only like every other
 /// keyed source in this workspace.
-pub const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
-pub const MODEL: &str = "claude-opus-5";
-/// Caps thinking *and* response text together on this model family. A digest
-/// is two short sections, so the headroom here is mostly for thinking.
-pub const MAX_TOKENS: u32 = 8_192;
-/// A daily digest over pre-aggregated counts is not a hard reasoning task,
-/// and this runs unattended once per day per user — `medium` rather than the
-/// API default (`high`) is a deliberate cost choice, not an oversight.
-pub const EFFORT: &str = "medium";
+pub const API_KEY_ENV: &str = "GEMINI_API_KEY";
+/// Chosen off the free tier. Deliberately a current model rather than the
+/// long-familiar `gemini-2.5-flash`, which now returns 404 "no longer
+/// available to new users" — a model id here has a shelf life, and a 404 on
+/// generate is the symptom to look for first.
+pub const MODEL: &str = "gemini-3.7-flash";
+/// Caps thinking *and* response text together. A digest is two short
+/// sections; the headroom is for thinking.
+pub const MAX_TOKENS: u32 = 4_096;
+/// Writing two short paragraphs from pre-aggregated counts is not a reasoning
+/// task. `low` measurably zeroes `thoughtsTokenCount` on this model, which
+/// matters when the whole point of this provider is staying inside a free
+/// quota.
+pub const THINKING_LEVEL: &str = "low";
+
+/// Full `generateContent` URL for [`MODEL`] under `base`.
+///
+/// Split from the base so the mock-server tests can point at a local socket
+/// and still exercise the real path (the model id travels in the URL on this
+/// API, not in the body).
+pub fn api_url(base: &str) -> String {
+    format!(
+        "{}/models/{MODEL}:generateContent",
+        base.trim_end_matches('/')
+    )
+}
 
 /// Places carried into the prompt per section. Beyond this the tail is noise
 /// the model would have to weigh anyway.
@@ -81,18 +96,18 @@ pub fn row_level_permitted(source: SourceId) -> bool {
 #[derive(Debug, thiserror::Error)]
 pub enum DigestError {
     #[error(
-        "{API_KEY_ENV} is not set — the Daily Events digest needs an Anthropic API key (env var only)"
+        "{API_KEY_ENV} is not set — the Daily Events digest needs a Gemini API key (env var only)"
     )]
     MissingKey,
-    #[error("anthropic http: {0}")]
+    #[error("gemini http: {0}")]
     Http(String),
-    #[error("anthropic api: {0}")]
+    #[error("gemini api: {0}")]
     Api(String),
-    #[error("anthropic rate limited (retry after {retry_after_secs:?}s)")]
+    #[error("gemini rate limited (retry after {retry_after_secs:?}s)")]
     RateLimited { retry_after_secs: Option<u64> },
     /// The model declined to answer. Returned as HTTP 200 with an empty or
-    /// partial `content`, so it must be detected from `stop_reason` before
-    /// anything reads `content[0]`.
+    /// truncated `candidates`, so it must be detected from `finishReason`
+    /// (or `promptFeedback.blockReason`) before anything reads `parts[0]`.
     #[error("the model declined to produce a digest ({0})")]
     Refused(String),
     #[error("unparseable model response: {0}")]
@@ -391,64 +406,85 @@ fn pairs(v: &[(String, u64)]) -> String {
         .join(", ")
 }
 
-/// The exact JSON body sent to `POST /v1/messages`.
+/// The exact JSON body sent to `POST …:generateContent`.
 ///
-/// Deliberately absent, because this model family rejects them with a 400:
-/// `temperature`, `top_p`, `top_k`, `thinking.budget_tokens`, and a trailing
-/// assistant turn for prefill. Thinking is left unset, which runs the model's
-/// adaptive default.
+/// `responseJsonSchema` — **not** `responseSchema`. They are different fields:
+/// `responseSchema` takes the OpenAPI-3.0 subset, which has no
+/// `additionalProperties`, so routing this schema through it would drop the
+/// one keyword the separation rule depends on and fail open, silently.
+/// `responseJsonSchema` takes real JSON Schema and enforces it by constrained
+/// decoding — verified against the live API with a prompt explicitly ordering
+/// the model to add a third, blended field: the response still came back with
+/// exactly the two properties.
+///
+/// This API rejects unknown `generationConfig` keys with a 400 naming the
+/// field, so a typo here fails loudly rather than being ignored.
 pub fn request_body(facts: &DigestFacts) -> Value {
     json!({
-        "model": MODEL,
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "messages": [{
+        "systemInstruction": {
+            "parts": [{"text": SYSTEM_PROMPT}],
+        },
+        "contents": [{
             "role": "user",
-            "content": render_facts(facts),
+            "parts": [{"text": render_facts(facts)}],
         }],
-        "output_config": {
-            "effort": EFFORT,
-            "format": {
-                "type": "json_schema",
-                "schema": output_schema(),
-            }
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": output_schema(),
+            "maxOutputTokens": MAX_TOKENS,
+            "thinkingConfig": {"thinkingLevel": THINKING_LEVEL},
         }
     })
 }
 
-/// Pull the two sections out of a Messages API response.
+/// Pull the two sections out of a `generateContent` response.
 ///
-/// `stop_reason` is checked before `content` is touched: a refusal arrives as
-/// HTTP 200 with empty or partial content, and reading `content[0]` first
-/// would report it as a parse failure.
+/// Both block signals are checked before any `parts` are touched: a blocked
+/// prompt comes back as HTTP 200 with `promptFeedback.blockReason` and *no*
+/// candidates at all, and a blocked completion as a candidate whose
+/// `finishReason` is not `STOP`. Indexing `parts[0]` first would report either
+/// as malformed output and hide why it actually failed.
+///
+/// Any non-`STOP` reason other than `MAX_TOKENS` is treated as a refusal
+/// rather than matched against a fixed list — the enum grows (`SAFETY`,
+/// `RECITATION`, `PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `OTHER`, …), and
+/// an unrecognised stop reason is never a reason to trust the payload.
 pub fn parse_response(body: &Value) -> Result<DigestSections, DigestError> {
-    match body.get("stop_reason").and_then(Value::as_str) {
-        Some("refusal") => {
-            let detail = body
-                .get("stop_details")
-                .and_then(|d| d.get("category"))
-                .and_then(Value::as_str)
-                .unwrap_or("no category given");
-            return Err(DigestError::Refused(detail.to_owned()));
-        }
-        Some("max_tokens") => {
-            return Err(DigestError::Parse(
-                "response hit max_tokens before the digest was complete".into(),
-            ));
-        }
-        _ => {}
+    if let Some(reason) = body
+        .get("promptFeedback")
+        .and_then(|f| f.get("blockReason"))
+        .and_then(Value::as_str)
+    {
+        return Err(DigestError::Refused(format!("prompt blocked: {reason}")));
     }
 
-    // Thinking blocks share the content array with text blocks; only text
-    // carries the answer.
-    let text: String = body
-        .get("content")
+    let candidate = body
+        .get("candidates")
         .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
+        .and_then(|c| c.first())
+        .ok_or_else(|| DigestError::Parse("response carried no candidates".into()))?;
+
+    match candidate.get("finishReason").and_then(Value::as_str) {
+        None | Some("STOP") => {}
+        Some("MAX_TOKENS") => {
+            return Err(DigestError::Parse(
+                "response hit maxOutputTokens before the digest was complete".into(),
+            ));
+        }
+        Some(other) => return Err(DigestError::Refused(other.to_owned())),
+    }
+
+    // Thought parts share the array with answer parts and are flagged
+    // `thought: true`; only the unflagged text carries the answer.
+    let text: String = candidate
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
                 .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .filter(|p| p.get("thought").and_then(Value::as_bool) != Some(true))
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("")
         })
@@ -574,23 +610,36 @@ mod tests {
     }
 
     #[test]
-    fn request_body_omits_every_parameter_this_model_rejects() {
+    fn request_body_routes_the_schema_through_the_field_that_enforces_it() {
         let body = request_body(&facts());
-        for banned in ["temperature", "top_p", "top_k", "thinking"] {
-            assert!(
-                body.get(banned).is_none(),
-                "`{banned}` must not be sent to {MODEL}"
-            );
-        }
-        // Prefill (a trailing assistant turn) is rejected too.
-        let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["role"], "user");
-        assert_eq!(body["model"], MODEL);
-        // Effort and format are nested under output_config, not top-level.
-        assert!(body.get("effort").is_none());
-        assert_eq!(body["output_config"]["effort"], EFFORT);
-        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        let cfg = &body["generationConfig"];
+        // `responseSchema` takes the OpenAPI-3.0 subset, which has no
+        // `additionalProperties` — sending the schema there would drop the
+        // separation wall silently. It must never appear.
+        assert!(
+            cfg.get("responseSchema").is_none(),
+            "the schema must travel in responseJsonSchema, not responseSchema"
+        );
+        assert_eq!(cfg["responseJsonSchema"], output_schema());
+        // Constrained decoding only engages when JSON output is requested.
+        assert_eq!(cfg["responseMimeType"], "application/json");
+        assert_eq!(cfg["maxOutputTokens"], MAX_TOKENS);
+        assert_eq!(cfg["thinkingConfig"]["thinkingLevel"], THINKING_LEVEL);
+        // The model id travels in the URL on this API; a `model` key in the
+        // body is an unknown field and 400s.
+        assert!(body.get("model").is_none());
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
+        // The instructions are a separate top-level field, not a pseudo-turn.
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn api_url_carries_the_model_and_tolerates_a_trailing_slash() {
+        let expected = format!("http://127.0.0.1:1/models/{MODEL}:generateContent");
+        assert_eq!(api_url("http://127.0.0.1:1"), expected);
+        assert_eq!(api_url("http://127.0.0.1:1/"), expected);
     }
 
     #[test]
@@ -604,13 +653,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_skips_thinking_blocks() {
+    fn parse_response_skips_thought_parts() {
+        // The real API attaches a `thoughtSignature` to the *answer* part, so
+        // the filter keys on the `thought` flag, not on the presence of some
+        // thinking-related field.
         let body = json!({
-            "stop_reason": "end_turn",
-            "content": [
-                {"type": "thinking", "thinking": "weighing the counts"},
-                {"type": "text", "text": r#"{"media_attention":"Coverage clustered.","event_data":"Twelve protests."}"#},
-            ]
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {"parts": [
+                    {"text": "weighing the counts", "thought": true},
+                    {
+                        "text": r#"{"media_attention":"Coverage clustered.","event_data":"Twelve protests."}"#,
+                        "thoughtSignature": "opaque",
+                    },
+                ]}
+            }]
         });
         let out = parse_response(&body).unwrap();
         assert_eq!(out.media_attention, "Coverage clustered.");
@@ -619,14 +676,25 @@ mod tests {
 
     #[test]
     fn parse_response_reports_a_refusal_rather_than_a_parse_failure() {
+        // Completion-side block: a candidate exists but stopped for a reason
+        // that is not STOP.
         let body = json!({
-            "stop_reason": "refusal",
-            "stop_details": {"category": "policy"},
-            "content": []
+            "candidates": [{"finishReason": "SAFETY", "content": {"parts": []}}]
         });
         let err = parse_response(&body).unwrap_err();
         assert!(
-            matches!(&err, DigestError::Refused(c) if c == "policy"),
+            matches!(&err, DigestError::Refused(c) if c == "SAFETY"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_response_reports_a_blocked_prompt_before_looking_for_candidates() {
+        // Prompt-side block: HTTP 200 with no candidates at all.
+        let body = json!({"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}});
+        let err = parse_response(&body).unwrap_err();
+        assert!(
+            matches!(&err, DigestError::Refused(c) if c.contains("PROHIBITED_CONTENT")),
             "got {err:?}"
         );
     }
@@ -634,8 +702,10 @@ mod tests {
     #[test]
     fn parse_response_rejects_a_truncated_response() {
         let body = json!({
-            "stop_reason": "max_tokens",
-            "content": [{"type": "text", "text": "{\"media_attention\":\"half"}]
+            "candidates": [{
+                "finishReason": "MAX_TOKENS",
+                "content": {"parts": [{"text": "{\"media_attention\":\"half"}]}
+            }]
         });
         assert!(matches!(
             parse_response(&body).unwrap_err(),
@@ -646,8 +716,12 @@ mod tests {
     #[test]
     fn parse_response_rejects_an_empty_section() {
         let body = json!({
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": r#"{"media_attention":"   ","event_data":"x"}"#}]
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {"parts": [
+                    {"text": r#"{"media_attention":"   ","event_data":"x"}"#}
+                ]}
+            }]
         });
         let err = parse_response(&body).unwrap_err();
         assert!(err.to_string().contains("media_attention"), "{err}");

@@ -1,6 +1,7 @@
 -- Cache for the "Daily Events" page: one generated digest per UTC calendar
--- day. Cached because generating one costs a paid API call — the page reads
--- this table and only calls out when a day has no row.
+-- day. Cached because generating one spends a metered API call and sends
+-- stored records to a third party — the page reads this table and only calls
+-- out when a day has no row.
 --
 -- `media_attention` and `event_data` are two columns, never one. That is the
 -- project's attention/event separation expressed in the schema: there is no

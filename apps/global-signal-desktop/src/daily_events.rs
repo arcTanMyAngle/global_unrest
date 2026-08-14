@@ -185,8 +185,8 @@ impl App {
             let button = ui
                 .add_enabled(!busy, egui::Button::new(label))
                 .on_hover_text(
-                    "Sends this day's aggregate counts and record fields to the Anthropic API \
-                 and caches the result. One paid call per click.",
+                    "Sends this day's aggregate counts and record fields to Google's Gemini API \
+                 and caches the result. One call per click.",
                 );
             if button.clicked() {
                 self.start_digest(day);

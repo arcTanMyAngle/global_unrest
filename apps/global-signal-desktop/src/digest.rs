@@ -1,12 +1,12 @@
 //! Daily Events worker: a long-lived thread with a current-thread tokio
-//! runtime that turns a day's facts into a written digest via the Anthropic
-//! Messages API.
+//! runtime that turns a day's facts into a written digest via the Gemini
+//! `generateContent` API.
 //!
 //! Unlike [`crate::ingest`] this worker has no cadence of its own — it only
-//! acts when the user asks for a day. Generating costs a paid API call, so
-//! nothing here is automatic: the page reads the cache, and a request only
-//! leaves the machine when the user clicks generate for a day with no cached
-//! row.
+//! acts when the user asks for a day. Every generation sends stored records to
+//! a third party and draws on a metered quota, so nothing here is automatic:
+//! the page reads the cache, and a request only leaves the machine when the
+//! user clicks generate for a day with no cached row.
 //!
 //! The worker never touches storage (the UI thread owns it, as everywhere
 //! else): it receives the facts, returns the written digest, and the app
@@ -17,36 +17,36 @@ use std::sync::mpsc;
 use daily_digest::{DayKey, DigestError, DigestFacts};
 use tokio::sync::mpsc as tokio_mpsc;
 
-/// Feature-gated Anthropic handle — the same stub-module pattern the live
+/// Feature-gated Gemini handle — the same stub-module pattern the live
 /// sources use, so the worker body stays free of `cfg` arms. With the feature
 /// off `make()` is always `Ok(None)`, which the page reports exactly like a
 /// missing API key: the cache still reads, generation is unavailable.
-#[cfg(feature = "anthropic-live")]
+#[cfg(feature = "gemini-live")]
 mod api {
-    pub use daily_digest::AnthropicDigester;
+    pub use daily_digest::GeminiDigester;
 
     /// Built with the network half; a missing digester means a missing key.
     pub const BUILT: bool = true;
 
-    pub fn make() -> Result<Option<AnthropicDigester>, daily_digest::DigestError> {
-        AnthropicDigester::from_env()
+    pub fn make() -> Result<Option<GeminiDigester>, daily_digest::DigestError> {
+        GeminiDigester::from_env()
     }
 }
-#[cfg(not(feature = "anthropic-live"))]
+#[cfg(not(feature = "gemini-live"))]
 mod api {
     use daily_digest::{DayDigest, DigestError, DigestFacts};
 
-    pub struct AnthropicDigester;
+    pub struct GeminiDigester;
 
     pub const BUILT: bool = false;
 
-    pub fn make() -> Result<Option<AnthropicDigester>, DigestError> {
+    pub fn make() -> Result<Option<GeminiDigester>, DigestError> {
         Ok(None)
     }
 
-    impl AnthropicDigester {
+    impl GeminiDigester {
         pub async fn generate(&self, _: &DigestFacts, _: i64) -> Result<DayDigest, DigestError> {
-            unreachable!("built without the anthropic-live feature")
+            unreachable!("built without the gemini-live feature")
         }
     }
 }
@@ -54,10 +54,10 @@ mod api {
 /// Why generation is unavailable, in the words the page shows.
 pub fn unavailable_reason() -> &'static str {
     if api::BUILT {
-        "Set ANTHROPIC_API_KEY (in the environment or a .env file) to write new \
+        "Set GEMINI_API_KEY (in the environment or a .env file) to write new \
          digests. Days already generated stay readable without it."
     } else {
-        "This build has the `anthropic-live` feature off, so it can only read \
+        "This build has the `gemini-live` feature off, so it can only read \
          previously generated digests."
     }
 }
@@ -148,7 +148,7 @@ pub fn spawn(wake: impl Fn() + Send + 'static) -> (mpsc::Receiver<DigestMsg>, Di
 }
 
 async fn worker(
-    digester: api::AnthropicDigester,
+    digester: api::GeminiDigester,
     tx: mpsc::Sender<DigestMsg>,
     mut rx_ctl: tokio_mpsc::UnboundedReceiver<Ctl>,
     wake: impl Fn(),
@@ -156,7 +156,7 @@ async fn worker(
     while let Some(Ctl::Generate(facts)) = rx_ctl.recv().await {
         let day = facts.day_utc;
         // One request at a time, in arrival order: this is a user-initiated,
-        // paid, once-per-day call, so there is nothing to gain from
+        // once-per-day call against a quota, so there is nothing to gain from
         // concurrency and a rate limit to lose by it.
         let msg = match digester
             .generate(&facts, chrono::Utc::now().timestamp())

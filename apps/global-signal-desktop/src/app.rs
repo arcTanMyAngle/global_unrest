@@ -352,7 +352,7 @@ pub struct App {
     pub digest: Option<DayDigest>,
     pending_digest_facts: Option<Reply<DigestFacts>>,
     pending_digest_store: Option<Reply<()>>,
-    /// The day a paid API call is currently in flight for, if any. A day
+    /// The day an API call is currently in flight for, if any. A day
     /// rather than a bool so switching days mid-generation shows the spinner
     /// on the day it belongs to.
     pub digest_generating: Option<DayKey>,

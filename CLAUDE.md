@@ -24,10 +24,13 @@ offline graticule/labels/border-hierarchy orientation pass, and the
 "how to read this map" overlay. **M7 service hardening complete 2026-08-12;
 the Daily Events AI digest shipped 2026-08-13** — `crates/daily-digest` plus
 a dedicated desktop page, one model-written summary per UTC calendar day,
-cached locally, credential-gated on `ANTHROPIC_API_KEY`. It is the project's
-only *interpretive* surface and its only outbound flow of stored records;
-read docs/SAFETY_AND_PRIVACY.md's hard rule 7 and its misuse-review entry
-before changing anything there. See
+cached locally, credential-gated on `GEMINI_API_KEY` (moved off the paid
+Anthropic API to Google Gemini's free tier 2026-08-13 — a provider swap only;
+the two-section separation, cadence, caching, and page are unchanged). It is
+the project's only *interpretive* surface and its only outbound flow of stored
+records — and the free tier **may train on what is sent**, so read
+docs/SAFETY_AND_PRIVACY.md's hard rule 7 and its "Third-party processing"
+section before changing anything there. See
 [HANDOFF.md](HANDOFF.md) for status and the next task list,
 and [docs/PLAN.md](docs/PLAN.md) for the approved plan.
 
@@ -48,7 +51,7 @@ cargo run -p global-signal-desktop                     # ACLED + NOAA + IODA + B
 cargo run -p workers --features acled-live,noaa-live,ioda-live,bluesky-live,telegram-live  # worker with all live sources
 cargo run -p source-bluesky --features live --example live_probe -- 60  # manual live firehose check (aggregate output only)
 cargo run -p source-telegram --features live --example login_setup      # one-time interactive Telegram login
-cargo test -p daily-digest --features live             # Daily Events Anthropic mock-server tests
+cargo test -p daily-digest --features live             # Daily Events Gemini mock-server tests
 cargo deny check                                       # M6 gate: advisories + license allowlist
 ```
 
@@ -60,12 +63,12 @@ interactive `login_setup` run — see `crates/source-telegram`). All five are
 desktop default features; the worker keeps them opt-in. Clippy the feature
 matrix when touching ingest loops.
 
-`anthropic-live` (needs `ANTHROPIC_API_KEY`) is a **desktop-only** feature
+`gemini-live` (needs `GEMINI_API_KEY`) is a **desktop-only** feature
 and does not follow that shape: `daily-digest` is not optional, because the
 page, the cache table, and the day picker are built from its types either
 way — the feature gates only the network half, so a build without it still
 reads every cached digest. In CI's feature matrix it is therefore
-package-qualified (`global-signal-desktop/anthropic-live`); the other
+package-qualified (`global-signal-desktop/gemini-live`); the other
 entries leave it off, which is what compiles the stub `api` module in
 `apps/global-signal-desktop/src/digest.rs`.
 
@@ -160,8 +163,9 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   / `Page::DailyEvents`) switches whole pages rather than adding a panel:
   `daily_events.rs` draws the digest page (day picker + the two headed
   sections), `digest.rs` is its worker — same stub-module pattern as the
-  live sources, but with **no cadence of its own**, since generating costs a
-  paid API call and only an explicit click fires one. The worker never
+  live sources, but with **no cadence of its own**, since generating spends a
+  metered API call and ships stored records to a third party — only an
+  explicit click fires one. The worker never
   touches storage; the UI thread owns it, as everywhere else. Startup purges legacy
   `source=fixtures` rows and treats an empty database as valid.
   UI thread never blocks on storage; it ingests worker batches (dedup makes
@@ -231,12 +235,24 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   the single place row content is selected); and `DigestFacts` has no field
   that could carry an author, handle, or message text. `tests/live_mock.rs`
   runs the whole live path against a local socket — no key needed.
-  **Opus 5 rejects `temperature`, `top_p`, `top_k`, and
-  `thinking.budget_tokens` with a 400**, so `request_body` sends none of
-  them and a unit test pins their absence; thinking is on by default, so
-  `parse_response` filters `content` to `type == "text"`, and a refusal
-  arrives as **HTTP 200** with empty/partial content (detect from
-  `stop_reason` before indexing `content[0]`).
+  Gemini gotchas (provider swapped 2026-08-13): the schema must be sent as
+  `generationConfig.responseJsonSchema` — **not** `responseSchema`, which
+  takes the OpenAPI-3.0 subset, has no `additionalProperties`, and would drop
+  the separation wall silently; `responseMimeType: "application/json"` is what
+  engages constrained decoding. The model id travels in the **URL**
+  (`…/models/{MODEL}:generateContent`), never the body; unknown
+  `generationConfig` keys are a 400 naming the field, so typos fail loudly. A
+  bad key is an ordinary **400 `INVALID_ARGUMENT`**, not a 401/403 — the
+  credential hint comes from `error.details[].reason == "API_KEY_INVALID"`.
+  429s usually carry no `Retry-After`; the delay is a `RetryInfo` detail
+  (`"41s"`). Thinking is on by default and `thinkingLevel: "low"` measurably
+  zeroes `thoughtsTokenCount`; thought parts are flagged `thought: true` while
+  the *answer* part carries a `thoughtSignature`, so `parse_response` filters
+  on the flag, not on some thinking-shaped field. Blocks arrive as **HTTP
+  200** in two shapes: `promptFeedback.blockReason` with no candidates, or a
+  candidate whose `finishReason` is not `STOP` — check both before indexing
+  `parts[0]`. Model ids expire: `gemini-2.5-flash` now 404s with "no longer
+  available to new users", so a 404 on generate is the first thing to suspect.
 
 Precision rendering contract: only City/Exact records render as point
 markers; Country/Admin1 shade regions (enforced in the storage query).
