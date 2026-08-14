@@ -413,7 +413,14 @@ pub enum SourceError {
     Io(#[from] std::io::Error),
     #[error("http error: {0}")]
     Http(String),
-    #[error("rate limited; retry after {retry_after_secs:?}s")]
+    // Most APIs omit `Retry-After` on a 429, so the `None` arm is the common
+    // one, not the exceptional one — and it is shown to a person on the Media
+    // page. The `{:?}` this used to use rendered that arm as the literal
+    // "retry after Nones".
+    #[error("rate limited{}", match .retry_after_secs {
+        Some(secs) => format!("; retry after {secs}s"),
+        None => String::new(),
+    })]
     RateLimited { retry_after_secs: Option<u64> },
     #[error("source not implemented until milestone {milestone}")]
     NotImplemented { milestone: &'static str },

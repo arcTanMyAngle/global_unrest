@@ -10,16 +10,26 @@
 //! optional source; see [`live::TelegramSource`] for the session/auth story
 //! and `examples/login_setup.rs` for the one-time interactive login.
 //!
-//! **Aggregate-only by construction, same as `source-bluesky`.** Message
-//! text is handed straight to [`chatter::ChatterAccumulator::observe`] and
-//! dropped in the same call; no function in this crate returns message
-//! text, sender identity, or a message URL to a caller. See
-//! docs/SAFETY_AND_PRIVACY.md hard rule 6 before changing anything here.
+//! **The ingest path is aggregate-only by construction, same as
+//! `source-bluesky`.** Message text is handed straight to
+//! [`chatter::ChatterAccumulator::observe`] and dropped in the same call;
+//! nothing on that path returns message text, sender identity, or a message
+//! URL to a caller, and its `(place, topic, window) -> count` boundary has
+//! not moved.
+//!
+//! [`media`] is the one exception, added by explicit user direction: an
+//! on-demand lookup that returns a caption, a post URL, and a channel
+//! attribution for one named place, so a person can watch footage published
+//! about it. Nothing there runs on a timer, nothing it returns is stored,
+//! and it never reads a message's sender. That module's docs and
+//! docs/SAFETY_AND_PRIVACY.md's "On-demand media lookup" section state the
+//! full bounds — read both, plus hard rule 6, before changing either path.
 
 #[cfg(feature = "live")]
 pub mod file_session;
 #[cfg(feature = "live")]
 mod live;
+pub mod media;
 #[cfg(feature = "live")]
 pub use file_session::FileSession;
 #[cfg(feature = "live")]
@@ -83,6 +93,28 @@ impl ChannelSweep {
 /// before trusting, and prefer real subscriber counts/recent post dates over
 /// a description alone.
 ///
+/// Two things the 2026-08-13 widening pass learned the hard way, both worth
+/// repeating on the next pass:
+///
+/// - **Read the timestamps, not just "posts are visible."** Three of the
+///   original eight had gone quiet — one for over four years — while still
+///   rendering a full page of old posts. A dormant channel costs a
+///   `resolve_username` and a search call on every sweep and returns nothing.
+///   Parse the preview's `<time datetime=…>` attributes and compare to today.
+/// - **An empty `t.me/s/<handle>` page does not mean the channel is gone.**
+///   Many channels simply switch the web preview off; `https://t.me/<handle>`
+///   (no `/s/`) still shows the title and subscriber count, and MTProto can
+///   still read them. It does mean *this* verification method can't see the
+///   content, which is reason enough not to add one — but not reason to drop
+///   one already verified (see `borderlandbeat`).
+///
+/// Also worth knowing: a handle that looks perfect can be a squatted or
+/// abandoned name rather than the outlet you meant. `insightcrime` (25
+/// subscribers, crypto-spam description), `sudantribune` (25 subscribers,
+/// description: "username for sale"), `Faytuks`, `Excelsior`, and
+/// `volcaholic1` all resolve to something unrelated to the well-known name.
+/// The subscriber count and description are the cheap tell.
+///
 /// Deliberately excluded, with reasons (do not re-add without addressing
 /// the reason first):
 /// - `globalconflictmonitor` — real but tiny (~74 subscribers) and one post
@@ -107,22 +139,52 @@ impl ChannelSweep {
 ///   session, so its readability here couldn't actually be confirmed.
 ///   Revisit from inside a live session rather than re-adding on reputation
 ///   alone.
+/// - `WarMonitors` — large (155K subscribers) and genuinely active, but its
+///   own description sells in-channel ad slots through a bot and names a
+///   gambling site as its sponsor. Placement being purchasable is a
+///   different problem from partisanship and a worse one for a volume
+///   signal: it means posting rate can be bought outright.
+/// - `disclosetv` — large and active, but it aggregates viral claims with no
+///   sourcing and frames itself as theatre ("the grand theater of our
+///   time"). Volume there tracks what is spreading, not what is happening.
+/// - `addisstandard` — an unattended bot mirror of the Addis Standard site
+///   (its own description says "automatically posted by bot" and "read
+///   cautiously"), and quiet for ~6 months. Ethiopia coverage is still a gap.
+/// - `SentDefender` — resolves to `osintdefender`, already on the list. A
+///   channel's second username is a duplicate, and sweeping it twice would
+///   double-count every message it carries.
+/// - `bnonews`, `AuroraIntel`, `bellingcat` — all real, all readable, all
+///   dormant here (last posts 2026-02, 2025-06 and 2024-01 respectively).
+///   The organisations are active elsewhere; these Telegram mirrors are not.
+/// - `Militarylandnet`, `SudanWarMonitor`, `myanmarnow`, `noelreports`,
+///   `IntelPointAlert`, `TheInsiderPaper`, `middleeasteye`, `visegrad24` —
+///   web preview off, so the same situation as `GeoConfirmed`: nothing here
+///   says they're bad, only that this check couldn't see them.
+///
+/// Coverage gaps as of 2026-08-13, in rough priority order for the next
+/// pass: the Caribbean (nothing at all), South Asia, West Africa/the Sahel
+/// (lost when `osintsahel` was dropped), and Ethiopia/the wider Horn beyond
+/// Somalia.
 pub const ALLOWED_CHANNELS: &[&str] = &[
-    // Global/multi-region conflict aggregators.
+    // Global/multi-region aggregators.
     "liveuamap",
     "ClashReport",
     "osintdefender",
+    "insiderpaper", // global breaking news; heavy video, named outlet
     // Regional.
-    "osintsahel",     // Sahel (Mali, Burkina Faso, Niger)
-    "Osinttechnical", // Ukraine equipment/loss verification
-    "AMK_Mapping",    // Russia-Ukraine + Middle East
+    "AMK_Mapping",     // Russia-Ukraine + Middle East
+    "AlertaMundoNews", // Latin America + world, Spanish-language, video-heavy
+    "garoweonline",    // Somalia and East Africa
     // Underreported/"forgotten story" beats, deliberately included even
     // though smaller than the aggregators above.
     "borderlandbeat", // Mexican cartel violence, citizen journalism since 2009
-    "DVBTV",          // Democratic Voice of Burma — Myanmar, exile outlet
-                      // banned by the junta; posts mostly in Burmese, so
-                      // expect little signal until chatter's topic tokens
-                      // gain Burmese equivalents (see chatter::TopicMatcher).
+    // The three Myanmar outlets post mostly in Burmese, so expect little
+    // ingest signal from them until chatter's topic tokens gain Burmese
+    // equivalents (see chatter::TopicMatcher). They earn their place on the
+    // media side, where the search term is usually a Latin-script place name.
+    "MyanmarWitness", // human-rights reporting, geolocation-led
+    "DVBTV",          // Democratic Voice of Burma — exile outlet, junta-banned
+    "khitthitnews",   // Khit Thit Media — high volume and very fresh
 ];
 
 #[cfg(test)]

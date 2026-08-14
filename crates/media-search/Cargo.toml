@@ -10,13 +10,16 @@ publish.workspace = true
 # The network half. Everything else — query construction, response parsing,
 # ranking, dedup — is pure and tested offline, same split as the source-*
 # crates.
-live = ["dep:reqwest"]
+# `tokio` is here only for the connect retry's `sleep`; the crate spawns no
+# task and owns no runtime — it runs on whichever one the caller is already on.
+live = ["dep:reqwest", "dep:tokio"]
 
 [dependencies]
 chrono.workspace = true
 core-types.workspace = true
 reqwest = { workspace = true, optional = true }
 serde_json.workspace = true
+tokio = { workspace = true, optional = true }
 tracing.workspace = true
 url.workspace = true
 

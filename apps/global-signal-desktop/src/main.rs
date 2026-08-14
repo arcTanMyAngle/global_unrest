@@ -12,6 +12,8 @@ mod digest;
 mod how_to_read;
 mod ingest;
 mod map_view;
+mod media;
+mod media_page;
 mod panels;
 mod sparkline;
 mod style;

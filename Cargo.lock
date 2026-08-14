@@ -2587,6 +2587,7 @@ dependencies = [
  "eframe",
  "egui",
  "geo-utils",
+ "media-search",
  "renderer",
  "serde",
  "serde_json",
@@ -3865,6 +3866,19 @@ name = "md5"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
+
+[[package]]
+name = "media-search"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "core-types",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "memchr"
@@ -6167,6 +6181,7 @@ dependencies = [
  "grammers-client",
  "grammers-mtsender",
  "grammers-session",
+ "media-search",
  "serde",
  "serde_json",
  "tokio",

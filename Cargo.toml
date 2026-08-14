@@ -7,6 +7,7 @@ members = [
     "crates/core-types",
     "crates/daily-digest",
     "crates/geo-utils",
+    "crates/media-search",
     "crates/renderer",
     "crates/source-acled",
     "crates/source-bluesky",
@@ -39,6 +40,7 @@ chatter = { path = "crates/chatter" }
 core-types = { path = "crates/core-types" }
 daily-digest = { path = "crates/daily-digest" }
 geo-utils = { path = "crates/geo-utils" }
+media-search = { path = "crates/media-search" }
 renderer = { path = "crates/renderer" }
 source-acled = { path = "crates/source-acled" }
 source-bluesky = { path = "crates/source-bluesky" }

@@ -12,6 +12,7 @@ use core_types::{
 };
 use daily_digest::{DayDigest, DayKey, DigestFacts};
 use geo_utils::CountryIndex;
+use media_search::MediaHit;
 use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
@@ -22,6 +23,8 @@ use storage::{
 use crate::digest::{DigestHandle, DigestMsg};
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
 use crate::map_view::MapView;
+use crate::media::{MediaHandle, MediaMsg};
+use crate::video::VideoPlayer;
 
 /// Natural Earth 1:110m countries (public domain; attribution in README).
 pub const NE_COUNTRIES: &str =
@@ -41,6 +44,11 @@ pub enum Phase {
 pub enum Page {
     Map,
     DailyEvents,
+    /// On-demand video lookup for one named place (`crate::media_page`). Its
+    /// own page for a mechanical reason as well as an editorial one: the
+    /// embedded player is a native child window that paints over any egui
+    /// layout sharing its rectangle.
+    Media,
 }
 
 /// One normalized batch awaiting ingest (events + normalization failures).
@@ -357,6 +365,28 @@ pub struct App {
     /// on the day it belongs to.
     pub digest_generating: Option<DayKey>,
     pub digest_error: Option<String>,
+
+    // --- Media page (crate::media_page) ---
+    // Every field here is session-scoped by design: results are held for as
+    // long as the page shows them and are replaced by the next search. None of
+    // it reaches storage (docs/SAFETY_AND_PRIVACY.md, "On-demand media
+    // lookup").
+    media_rx: Option<mpsc::Receiver<MediaMsg>>,
+    pub media_handle: MediaHandle,
+    pub media_place: String,
+    pub media_topic: String,
+    pub media_window_hours: i64,
+    pub media_hits: Vec<MediaHit>,
+    /// Providers that failed on the last search, named so one rate-limited API
+    /// reads as "news is unavailable" rather than "nothing happened here".
+    pub media_problems: Vec<String>,
+    pub media_searching: bool,
+    /// Index into `media_hits` of the clip in the player.
+    pub media_selected: Option<usize>,
+    pub media_status: Option<String>,
+    /// Owns the child webview for the whole session — built lazily on first
+    /// play, then reused.
+    pub media_player: VideoPlayer,
 }
 
 impl App {
@@ -419,6 +449,8 @@ impl App {
         let (ingest_rx, ingest_handle) = ingest::spawn(move || ctx.request_repaint());
         let ctx = cc.egui_ctx.clone();
         let (digest_rx, digest_handle) = crate::digest::spawn(move || ctx.request_repaint());
+        let ctx = cc.egui_ctx.clone();
+        let (media_rx, media_handle) = crate::media::spawn(move || ctx.request_repaint());
         let phase = Phase::Loading("loading live data…".into());
 
         let mut app = Self {
@@ -493,6 +525,17 @@ impl App {
             pending_digest_store: None,
             digest_generating: None,
             digest_error: None,
+            media_rx: Some(media_rx),
+            media_handle,
+            media_place: String::new(),
+            media_topic: String::new(),
+            media_window_hours: crate::media_page::WINDOWS[0].1,
+            media_hits: Vec::new(),
+            media_problems: Vec::new(),
+            media_searching: false,
+            media_selected: None,
+            media_status: None,
+            media_player: VideoPlayer::default(),
         };
 
         // Live updates are the desktop default. LES_ONLINE=0 remains a useful
@@ -812,6 +855,48 @@ impl App {
 
         // 4. Daily Events: worker results, then the page's storage replies.
         self.poll_digest();
+        self.poll_media();
+    }
+
+    /// Drain the media worker. Nothing here touches storage — a search's
+    /// results live in these fields until the next search replaces them.
+    fn poll_media(&mut self) {
+        let Some(rx) = &self.media_rx else { return };
+        loop {
+            match rx.try_recv() {
+                Ok(MediaMsg::Results {
+                    query,
+                    hits,
+                    problems,
+                }) => {
+                    self.media_searching = false;
+                    self.media_selected = None;
+                    self.media_status = Some(if hits.is_empty() {
+                        format!(
+                            "no video found for {} in the {}",
+                            query.place.trim(),
+                            crate::media_page::window_label(self.media_window_hours)
+                        )
+                    } else {
+                        format!(
+                            "{} result{} for {} · {}",
+                            hits.len(),
+                            if hits.len() == 1 { "" } else { "s" },
+                            query.place.trim(),
+                            crate::media_page::window_label(self.media_window_hours)
+                        )
+                    });
+                    self.media_hits = hits;
+                    self.media_problems = problems;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.media_rx = None;
+                    self.media_searching = false;
+                    break;
+                }
+            }
+        }
     }
 
     /// Drain the digest worker and its storage replies. Split out of
@@ -1274,7 +1359,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_async();
         self.advance_playback(&ctx);
@@ -1289,12 +1374,20 @@ impl eframe::App for App {
         // Panel order matters in egui 0.35: sides first, central last.
         self.top_bar(ui);
         match self.page {
+            // The player is a native child window, so leaving the Media page
+            // has to take it down explicitly — otherwise it keeps painting
+            // over whatever replaces it.
             Page::Map => {
+                self.media_player.hide();
                 self.timeline_panel(ui);
                 self.inspector_panel(ui);
                 self.central_map(ui);
             }
-            Page::DailyEvents => self.daily_events_page(ui),
+            Page::DailyEvents => {
+                self.media_player.hide();
+                self.daily_events_page(ui);
+            }
+            Page::Media => self.media_page(ui, frame),
         }
         self.log_window(&ctx);
         self.how_to_read_window(&ctx);

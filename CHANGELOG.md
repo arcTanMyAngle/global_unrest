@@ -10,6 +10,23 @@ project with no published crate API to stabilize against.
 
 ### Added
 
+- Daily Events: a separate, opt-in desktop page that writes a model-generated
+  digest for a selected UTC day only after an explicit user action. Digests
+  have separate media-attention and event-data sections, display their record
+  counts/model/generation time, and cache locally by day.
+- daily-digest: bounded fact construction and an optional Anthropic Messages
+  API transport, plus a local mock-server suite. ACLED and
+  Bluesky/Telegram row-level data are withheld from third-party processing;
+  only permitted aggregate counts reach the digest path.
+- Storage migration 0003 for the local daily_digest cache.
+- M7 service hardening: request middleware, snapshot ETags and conditional
+  GET, events pagination, OpenAPI, Prometheus metrics, health staleness, and
+  committed integration snapshot coverage.
+- V2/V3 map work: attention-vs-unrest divergence, top movers, regional
+  sparklines, paged event ledger, source-shaped markers, NOAA alert overlay,
+  legend, graticule/country labels, focus dimming, reading guide, now-follow,
+  and typed UTC ranges.
+
 - `source-bluesky`: a new optional live source (feature `bluesky-live`,
   keyless, desktop default) for the Bluesky Jetstream firehose — the first
   **streaming** source in the workspace. It publishes **aggregate chatter
@@ -25,7 +42,7 @@ project with no published crate API to stabilize against.
   0.27% of a live 5,918-post sample.
 - `source-telegram`: a new optional live source (feature `telegram-live`,
   credential-gated, desktop default) for public Telegram channels — the
-  third real-time chatter source. MTProto (`grammers-client`, pure Rust) is
+  second aggregate-chatter source. MTProto (`grammers-client`, pure Rust) is
   the only mechanism that can read a third-party public channel's history
   without that channel's owner cooperating; poll-based (not streamed) like
   NOAA/IODA, sweeping a small live-verified curated allowlist of 8 channels
@@ -57,6 +74,10 @@ project with no published crate API to stabilize against.
   (real Natural Earth geometry, never a hand-typed coordinate table).
 
 ### Changed
+
+- The desktop default feature set now includes ACLED, NOAA, IODA, Bluesky,
+  Telegram, and the Daily Events Anthropic transport. Credentials still gate
+  ACLED, Telegram, and digest generation at runtime.
 
 - Desktop runtime is live-data-only: live polling defaults on, ACLED/NOAA are
   default features, `.env` is loaded automatically, and synthetic fixtures are

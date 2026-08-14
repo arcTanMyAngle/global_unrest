@@ -1,4 +1,8 @@
-# M4 services API (contract)
+# Services API
+
+The desktop does not currently consume this HTTP API. It has its own local
+storage path; this service is a separate, narrow read surface over
+worker-published snapshots.
 
 `services/api` is a read-only axum HTTP API over the Parquet snapshots
 `services/workers` publishes. It never opens a `.duckdb` file — DuckDB is
@@ -9,8 +13,7 @@ snapshot named by a `LATEST` pointer file; there is no persistent
 connection or cache to invalidate.
 
 This is intentionally a **narrower** read surface than the desktop's
-`StorageHandle` queries: it covers what M4's acceptance criteria need
-(`docker compose up` serves the API; the desktop can consume it) without
+`StorageHandle` queries. It keeps the service contract focused without
 duplicating storage's per-region headline/theme aggregation
 (`RegionDetail`) against a second backend. That fuller inspector detail
 stays desktop-only (direct `StorageHandle` access) until a real need to
@@ -37,6 +40,10 @@ Windows and POSIX, so the api never observes a half-written pointer. Each
 version directory is immutable once published — the api can read it
 without any lock.
 
+After the startup fixture publish, the worker republishes whenever a successful
+enabled source cycle adds records. This includes GDELT and any worker features
+compiled for ACLED, NOAA, IODA, Bluesky, or Telegram.
+
 ## Error envelope
 
 Non-2xx responses are `{"error": "<message>"}` with a matching HTTP status.
@@ -47,7 +54,7 @@ means the per-IP rate limit rejected the request; both come from
 `tower-http`/`tower_governor` directly rather than `ApiError`, so their
 bodies don't necessarily match the `{"error": ...}` shape exactly.
 
-## Middleware stack (M7)
+## Middleware stack (M7, shipped)
 
 Applied to every route, outermost first: request tracing (`tower-http`,
 one structured log line per request/response), a `408` timeout
@@ -62,12 +69,18 @@ and a permissive `GET`-only CORS policy (safe with no credentialed
 requests anywhere in this api). Graceful shutdown drains in-flight
 requests on Ctrl+C or (Unix) `SIGTERM` before the process exits.
 
-**`ETag` / conditional GET.** Every response carries an `ETag` set to the
+**`ETag` / conditional GET.** Normal responses after a snapshot exists carry an `ETag` set to the
 current snapshot version (e.g. `"v1752624000123"`) — a snapshot is
 immutable once published, so an unchanged version guarantees an unchanged
 body. Send `If-None-Match: "<version>"` on a repeat request; a match short
 -circuits to `304 Not Modified` with no body, skipping the Parquet query
 entirely.
+
+**Conditional GET detail.** Once a snapshot exists, non-304 responses carry
+its quoted ETag. A matching If-None-Match request returns 304 before the
+handler and metrics layer, with no body and no ETag header. This is an
+optimization for snapshot-backed clients rather than an API promise that a
+304 echoes its validator.
 
 ## Endpoints
 
@@ -185,7 +198,11 @@ not.
 - `200` — `EventsPage` as above
 - `400` / `503` as above
 
-## What M4 does not expose (by design)
+Metrics record requests that reach the metrics middleware. A conditional-GET
+304 short-circuits before that layer and is therefore not represented in the
+request counter.
+
+## What the API does not expose (by design)
 
 - Per-region headline/theme/outlet breakdown (`RegionDetail`) — desktop-only.
 - `ingest_log` — not part of the Parquet handoff (only `events`,

@@ -1,67 +1,100 @@
 # Contributing
 
-This started as a solo milestone-driven build (see
-[docs/PLAN.md](docs/PLAN.md) and [HANDOFF.md](HANDOFF.md) for the full
-history), but the workflow below applies to anyone sending a PR.
+Live Earth Signals is a milestone-driven Rust project. Contributions should be
+small, reviewable, and grounded in the project's evidence, privacy, and
+precision rules.
 
 ## Before you start
 
-- Read [CLAUDE.md](CLAUDE.md) for the architecture map, hard project rules,
-  and version gotchas — most of it applies regardless of who or what is
-  writing the code.
-- Check [docs/ROADMAP.md](docs/ROADMAP.md) and open issues so work doesn't
-  collide with an in-flight milestone.
-- Non-negotiable rules from the project brief (also in CLAUDE.md): public/
-  authorized data sources only, no person-level tracking, metadata-only
-  storage (never article bodies), media attention and event data always
-  shown as separate components, credentials via env vars only.
+- Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+  [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md).
+- Check [docs/ROADMAP.md](docs/ROADMAP.md) and open issues before starting
+  work that may overlap another change.
+- Keep these non-negotiable constraints intact: use public or authorized
+  sources only; do not add person-level tracking; store metadata rather than
+  article bodies; preserve attention/event separation; and keep credentials
+  outside the repository.
 
 ## Workflow
 
-1. One focused change per PR — small, reviewable, milestone- or
-   issue-scoped. Match the existing PR-sized-commit style
-   (`git log --oneline` shows the pattern: one commit per logical step).
-2. Run the quality gates locally before pushing (CI runs the same checks
-   plus the M5 feature matrix, the `docker compose` smoke test, and
-   `cargo-deny`):
+1. Keep one focused concern per pull request. Avoid mixing source behavior,
+   rendering redesign, and documentation overhaul in a single change unless
+   they are inseparable.
+2. Run the workspace gates before pushing:
 
-   ```sh
+   ~~~sh
    cargo fmt --all --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
-   cargo test -p source-acled --features live   # if you touched ingest/source code
-   ```
+   cargo deny check
+   ~~~
 
-   If you touched the desktop app or `services/workers`, also clippy/test
-   the M5 feature combinations:
+3. Run the focused mock suite when changing a credentialed network path:
 
-   ```sh
-   cargo clippy -p global-signal-desktop -p workers --features acled-live,noaa-live --all-targets -- -D warnings
-   cargo test -p global-signal-desktop -p workers --features acled-live,noaa-live
-   ```
-3. Regenerate fixtures only if you changed the fixture generator, and
-   commit the regenerated output — fixtures are the permanent offline
-   regression base (`cargo run -p source-fixtures --bin generate-fixtures`).
-4. Update the relevant doc alongside the code: `docs/DATA_MODEL.md` for
-   schema changes, `docs/SAFETY_AND_PRIVACY.md` for a new data source or
-   licensing term, `docs/API.md` for API surface changes, `CHANGELOG.md`
-   under `[Unreleased]` for anything user-visible.
-5. New live data sources must be feature-gated (off by default, like
-   `acled-live`/`noaa-live`), degrade gracefully offline, and add a
-   licensing row to `docs/SAFETY_AND_PRIVACY.md` before the PR lands.
-6. New visualizations: build on the app's own visual language — never
-   copy a data provider's dashboard, charts, or branding (see
-   `docs/VISUALIZATION.md`).
+   ~~~sh
+   cargo test -p source-acled --features live
+   cargo test -p daily-digest --features live
+   ~~~
+
+4. When changing desktop or worker feature wiring, use no-default-features
+   coverage in addition to the normal desktop build:
+
+   ~~~sh
+   cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/anthropic-live"
+   ~~~
+
+   CI also runs each source feature separately. Keep
+   .github/workflows/ci.yml in sync if the feature surface changes.
+
+5. Regenerate fixtures only when changing the fixture generator, and commit
+   the deterministic result:
+
+   ~~~sh
+   cargo run -p source-fixtures --bin generate-fixtures
+   ~~~
+
+## Documentation requirements
+
+Update the relevant documentation in the same pull request:
+
+| Change | Update |
+|---|---|
+| User-visible capability or setup | README.md and CHANGELOG.md under Unreleased |
+| Domain type, migration, or local cache | docs/DATA_MODEL.md |
+| Source, license, privacy boundary, or third-party processing | docs/SAFETY_AND_PRIVACY.md |
+| HTTP route, response, or API behavior | docs/API.md |
+| Runtime topology, crate ownership, or handoff | docs/ARCHITECTURE.md |
+| Commands, environment variables, CI, or Docker | docs/DEVELOPMENT.md |
+| Visualization encoding or performance contract | docs/VISUALIZATION.md |
+
+The historical PLAN.md does not replace current documentation. Preserve it as
+a dated planning record; update README, ROADMAP, and the implementation docs
+for current behavior.
+
+## Source and safety rules
+
+- New live-source code should be feature-gated at the crate/worker level and
+  degrade clearly when credentials or connectivity are unavailable. The
+  desktop's default feature set is intentional and must be updated
+  consciously, with matching README and CI changes.
+- Add attribution, licensing, retention, privacy, and precision decisions to
+  SAFETY_AND_PRIVACY.md before adding a source.
+- A country/admin-only source must shade a region, never render as a guessed
+  point.
+- Social sources must aggregate before storage. Do not introduce post text,
+  author identity, message identifiers, or URLs into stored rows, logs, or
+  APIs.
+- Daily Events changes require review of its two-section schema and
+  third-party processing boundary. Do not turn generated prose into an event,
+  a severity score, a forecast, or a map caption.
 
 ## Reporting issues
 
-Bug reports and feature requests are welcome via GitHub Issues. For
-anything touching a live data source's terms of use or a privacy concern,
-say so explicitly in the issue — those get read against
-`docs/SAFETY_AND_PRIVACY.md` first.
+Report bugs and feature requests through GitHub Issues. Explicitly flag any
+question involving live-source terms, privacy, exact location, or public
+hosting so it can be reviewed against the safety policy.
 
 ## License
 
-By contributing, you agree your contributions are dual-licensed under MIT
-OR Apache-2.0, matching the rest of the project (`LICENSE-MIT`,
-`LICENSE-APACHE`).
+By contributing, you agree that your contribution is dual-licensed under MIT
+or Apache-2.0, matching LICENSE-MIT and LICENSE-APACHE.

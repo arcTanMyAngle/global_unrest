@@ -1,121 +1,193 @@
 # Architecture
 
-Live Earth Signals is a desktop-first Rust workspace that visualizes global
-news attention and unrest/event signals from public or authorized sources.
-Milestone 1 runs 100% offline from committed fixtures; live APIs arrive only
-after that pipeline is proven.
+Live Earth Signals is a desktop-first Rust workspace for examining media
+attention, reported events, official alerts, and aggregate chatter without
+collapsing them into a claim of ground truth. The desktop is live-data-only;
+fixtures support tests and the worker's fixture-based smoke path.
 
-## Runtime architecture (desktop, M1–M3)
+## Desktop runtime
 
-```
-┌─────────────────────────── Desktop app (eframe) ───────────────────────────┐
-│  UI thread (egui)                                                          │
-│   ├── MapView ── renderer crate: Basemap / Heatmap / Marker layers         │
-│   │              (projection + cached epaint::Mesh, invalidated only on    │
-│   │               viewport or time-window change)                          │
-│   ├── TimelinePanel (time slider, play/replay)                             │
-│   ├── InspectorPanel (region scores, components, headlines)                │
-│   └── FilterPanel (event kinds, confidence)                                │
-│         ▲ response channel (query results → repaint notification)          │
-│         ▼ command channel (queries, ingest commands)                       │
-│  Storage actor thread ── owns duckdb::Connection (it is !Sync)             │
-│         │  migrations, appender inserts, bucket queries, Parquet export    │
-│  Ingest thread (small tokio runtime) ── SignalSource adapters              │
-│         fixtures (M1) │ GDELT DOC JSON + CSV-zip dumps (M3) │ ACLED (M5)   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+~~~mermaid
+flowchart LR
+    subgraph Sources["Live ingest sources"]
+        GDELT["GDELT: attention + events"]
+        ACLED["ACLED: authorized event data"]
+        NOAA["NOAA/NWS: official alerts"]
+        IODA["IODA: outage events"]
+        BSKY["Bluesky: aggregate chatter"]
+        TG["Telegram: aggregate chatter"]
+    end
 
-Data flow: `RawRecord` (per-source payload) → fallible `normalize()` per
-record → `GeoTemporalEvent` successes + `ingest_log` rows for failures →
-DuckDB `events` → bucket aggregation (H3 res 3 × 6-hour bucket) →
-`region_buckets` → renderer layers and the inspector.
+    subgraph App["global-signal-desktop"]
+        INGEST["ingest worker"]
+        UI["egui UI: map, timeline, inspector"]
+        STORAGE[("storage actor: DuckDB")]
+        FACTS["daily facts query"]
+        DIGEST["Daily Events page"]
+        CACHE["local digest cache"]
+        QUERY["place + topic + time window"]
+        MEDIA["media-search worker"]
+        PLAYER["media page + player"]
+    end
 
-## Threading model
+    Sources --> INGEST --> STORAGE
+    STORAGE --> UI
+    STORAGE --> FACTS
+    FACTS -->|"explicit Generate click"| GEMINI["Google Gemini API"]
+    GEMINI --> DIGEST
+    DIGEST --> CACHE --> STORAGE
 
-- **UI thread**: egui only. Never blocks on queries; sends `StorageCmd`s and
-  polls response channels each frame.
-- **Storage actor**: one OS thread owning the single DuckDB connection.
-  `duckdb::Connection` is `!Sync`; the actor serializes all access. Results
-  are sent back over channels and the actor fires a repaint notifier.
-- **Ingest thread**: a long-lived worker with a current-thread tokio runtime.
-  It never loads fixtures in the desktop runtime. With live updates enabled,
-  it runs a `select!` loop driven by control messages
-  (toggle online / fetch now) and the 15-minute feed cadence. Each live cycle
-  is rate-limited (`governor`), fetches GDELT DOC attention + the latest Events
-  dump, normalizes, and streams an incremental batch plus a `SourceStatus` back
-  to the UI. Fetch failures degrade gracefully: the last-known data stays on
-  screen and the worker backs off (exponential + jitter, honoring
-  `Retry-After`). The worker never touches storage — the UI ingests batches, so
-  dedup by event id makes overlapping re-fetches idempotent.
+    QUERY --> MEDIA --> PLAYER
+    GDELT -. "on-demand video lookup" .-> MEDIA
+    BSKY -. "on-demand public-post lookup" .-> MEDIA
+    TG -. "configured allowlist only" .-> MEDIA
+~~~
 
-## Cross-process rule (M4) — implemented
+The desktop enables all live-source feature paths by default. Keyless sources
+can start immediately; ACLED requires authorized OAuth credentials, Telegram
+requires a pre-created local MTProto session, and Daily Events needs
+GEMINI_API_KEY only when the user requests a digest. The keyless Media page
+queries GDELT and Bluesky only after an explicit search; its Telegram leg is
+available only with that same configured local session. The desktop never
+switches to fixtures when a source is unavailable.
 
-**DuckDB is single-writer-per-file across processes.** The desktop and the
-services never share a `.duckdb` file read-write. The M4 worker service owns
-its own ingest database and publishes **immutable date-partitioned Parquet
-snapshots** as the sole handoff surface; the api service reads those snapshots
-directly. The M2 Parquet export layout is reused (`export_parquet`), not
-rewritten.
+### Threading model
 
-```
-┌── services/workers ──┐   publish/                    ┌── services/api ──┐
-│ owns worker.duckdb   │   ├── LATEST  (pointer)  ─────│ read-only        │
-│ ingest fixtures+GDELT│──▶│ v<millis>/               │ read_parquet per │
-│ publish_snapshot()   │   │   manifest.json          │ request; 503 til │
-│ after every cycle    │   │   events/date=…/*.parquet│ first snapshot   │
-└──────────────────────┘   │   region_buckets/…       └──────┬───────────┘
-                           │   baselines.parquet             │ GET /health
-   keep_last prunes old ───┤   v<older>/  …                  │ /meta /buckets
-   version dirs            └──────────────────────────       ▼ /events (JSON)
-```
+- **UI thread:** owns egui state and never blocks. It sends storage commands
+  and polls replies each frame.
+- **Storage actor:** one OS thread owns the DuckDB connection, applies
+  migrations, inserts normalized records, rebuilds buckets, serves queries,
+  exports Parquet, and persists the Daily Events cache. DuckDB connections are
+  not shared between threads.
+- **Ingest worker:** a long-lived current-thread Tokio runtime. It receives
+  online/fetch-now control messages and polls or drains sources at their own
+  cadence. It sends normalized batches and source status back to the UI; only
+  the UI hands batches to storage.
+- **Digest worker:** a separate background task. It calls Google Gemini only
+  after an explicit Generate click, returns a parsed two-section digest to the
+  UI, and never opens storage itself.
+- **Media-search worker:** a separate current-thread Tokio task with no
+  cadence. It handles one explicit, place-scoped query at a time and returns
+  transient hits to the UI. It never opens storage. Results remain in process
+  memory until the next search replaces them or the app exits.
 
-`StorageHandle::publish_snapshot(root, keep_last)` writes a new `v<millis>/`
-directory (same hive-partitioned shape as `export_parquet`) plus a
-`manifest.json`, then atomically repoints `root/LATEST` via
-write-temp-then-rename (atomic on Windows and POSIX). Each version directory is
-immutable once published, so the api reads it lock-free: every request opens a
-fresh in-memory DuckDB, resolves `LATEST`, and runs `read_parquet(...)` — it
-never opens a `.duckdb` file. Contract and endpoints: [API.md](API.md).
+The ingest worker keeps cached data visible if a request fails. GDELT runs on
+its feed cadence; NOAA every 10 minutes; IODA and Telegram every 15 minutes;
+ACLED every 12 hours; Bluesky continuously accumulates and drains completed
+five-minute windows. Media lookup has no background cadence.
+
+## Data flow and evidence boundaries
+
+Each ingest source converts its payload into a RawRecord, normalizes records
+individually, then sends successful GeoTemporalEvent values and failures
+separately. Failures are recorded in the ingest log rather than silently
+dropped.
+
+The storage actor turns events into H3 resolution-3, six-hour RegionBucket
+rows. Attention observations and discrete event records remain separate in
+both scoring and UI. Country/admin precision records shade regions; only
+city/exact records can become point markers.
+
+Daily Events is intentionally outside the ingest flow. It reads a selected
+UTC day from storage, sends only bounded facts to Google Gemini when explicitly
+requested, and caches one generated digest per UTC day locally. A later
+explicit regeneration replaces that cache row. The output schema has separate
+media-attention and event-data fields. ACLED and Bluesky/Telegram rows are
+withheld from third-party processing and contribute only permitted aggregate
+counts. See [SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md).
+
+The Media page is a separate, deliberately narrow research flow rather than a
+SignalSource. It does not create GeoTemporalEvents, feed the map, or write
+DuckDB, Parquet, API, or cache data. An explicit user query may return a
+public video link, short display label, time, and outlet/channel attribution
+for one place and bounded time window. News results and unverified public
+social posts are displayed separately. On Windows, supported links can use a
+provider's published embed inside the app; unsupported links and non-Windows
+builds keep the browser fallback. The feature does not extract media streams
+or add post-level data to the aggregate chatter ingest path.
+
+## Worker/API boundary
+
+DuckDB is single-writer-per-file across processes. The desktop, worker, and API
+never share a DuckDB file.
+
+~~~mermaid
+flowchart LR
+    FIX["Fixtures: worker startup and smoke tests"]
+    LIVE["GDELT + worker-enabled live sources"]
+    WORKER["services/workers
+owns worker.duckdb"]
+    SNAP[("versioned Parquet snapshots
+LATEST pointer + manifest")]
+    API["services/api
+read-only Axum API"]
+
+    FIX --> WORKER
+    LIVE --> WORKER
+    WORKER --> SNAP --> API
+~~~
+
+The worker loads fixtures at startup, then ingests GDELT and any live-source
+features compiled for the worker. It publishes an immutable snapshot whenever
+a successful cycle adds data. Each snapshot has date-partitioned events and
+region buckets, baselines, a manifest, and an atomically updated LATEST
+pointer.
+
+The API resolves LATEST per request, opens an in-memory DuckDB connection, and
+reads Parquet only. It exposes health, metadata, buckets, paginated events,
+Prometheus metrics, and OpenAPI. Middleware provides tracing, timeout,
+concurrency limits, per-IP rate limiting, compression, CORS, conditional GET
+using the snapshot ETag, and graceful shutdown. See [API.md](API.md) for the
+contract and the ACLED public-serving guard.
 
 ## Crate map
 
-| Crate | Role |
+| Crate or package | Role |
 |---|---|
-| `crates/core-types` | Domain types: `GeoTemporalEvent`, enums, `TimeWindow`, `RegionBucket`, `SignalSource` trait, `RawRecord`. No I/O. |
-| `crates/geo-utils` | Equirectangular viewport math, H3 cell assignment, antimeridian splitting, country point-in-polygon lookup. egui-free. |
-| `crates/source-fixtures` | Test-only fixture adapter + deterministic generator; never linked into the production desktop runtime. |
-| `crates/source-gdelt` | M3 ✅: DOC 2.0 JSON API (`doc`) + 15-minute Events CSV-zip dumps (`events`), country/FIPS geocoding (`country`), and rate-limit/backoff/cadence policy (`sched`). Keyless; parsing/normalization pure and offline-testable, only `fetch*` touch the network. |
-| `crates/source-acled` | M5: feature-gated (`live`) ACLED adapter — OAuth password/refresh grants (`ACLED_EMAIL`/`ACLED_PASSWORD`), paged windowed reads, pure normalization that never stores `notes`. |
-| `crates/source-noaa` | M5: feature-gated (`live`) NOAA/NWS active alerts — keyless, US coverage; polygon alerts only (zone-scoped alerts yield no events). |
-| `crates/source-ioda` | Feature-gated (`live`) IODA internet-outage events — keyless, country precision, log-scaled severity from an unbounded anomaly score. |
-| `crates/chatter` | Aggregate-before-storage machinery for streaming social sources: place/topic word matching over bundled gazetteers, an in-memory accumulator, and `ChatterRollup` normalization. Enforces the aggregate-only rule (no API accepts or returns author identity or post text). Pure, no I/O. |
-| `crates/source-bluesky` | Feature-gated (`live`) Bluesky Jetstream adapter — the workspace's only **streaming** source. A long-lived WebSocket task counts into a `chatter` accumulator; `fetch` drains completed windows, so the stream stays behind the same poll-shaped `SignalSource` interface. |
-| `crates/source-telegram` | Feature-gated (`live`), credential-gated Telegram adapter — MTProto (`grammers-client`, pure Rust) over a curated public-channel allowlist, polled like NOAA/IODA rather than streamed. Login is a one-time interactive step (`examples/login_setup.rs`) that saves a local session file; the real source only opens it. Reuses `chatter` unchanged. |
-| `crates/analytics` | Bucket aggregation (M1); scoring, baselines, spike detection (M2). Pure functions. |
-| `crates/storage` | DuckDB actor (migrations, appender, queries, Parquet export) + rusqlite settings DB. |
-| `crates/renderer` | egui **layer library** (not a wgpu engine): cached-mesh basemap/heatmap/marker layers. |
-| `apps/global-signal-desktop` | eframe shell wiring ingest → storage → layers → panels. |
-| `services/workers` | M4 ✅: ingest worker owning its own DuckDB; ingests fixtures + live GDELT (reusing `source-gdelt`), publishes a versioned Parquet snapshot after every cycle. |
-| `services/api` | M4 ✅: axum read API (`/health` `/meta` `/buckets` `/events`) over the worker's published snapshots via `read_parquet`; never opens a `.duckdb` file. See [API.md](API.md). |
+| crates/core-types | Domain types, source traits, event identifiers, precision, RegionBucket, and safe video/embed classification. No I/O. |
+| crates/geo-utils | Equirectangular viewport math, H3 assignment, antimeridian handling, country lookup, and bundled city/country indexes. |
+| crates/source-fixtures | Deterministic test fixtures and generator. It is never linked into the production desktop path. |
+| crates/source-gdelt | GDELT DOC attention and Events dump client, normalization, cadence, rate limiting, and backoff. |
+| crates/source-acled | Authorized ACLED OAuth adapter; never stores ACLED notes. |
+| crates/source-noaa | NOAA/NWS active alerts adapter; usable polygon alerts only. |
+| crates/source-ioda | Keyless IODA outage adapter with country-precision severity. |
+| crates/chatter | Pure aggregate-before-storage place/topic matching and completed-window accumulation. |
+| crates/source-bluesky | Bluesky Jetstream stream that drains aggregate chatter windows. |
+| crates/source-telegram | Curated public-channel MTProto adapter for chatter rollups and the narrowly scoped, on-demand media leg. |
+| crates/media-search | Place-scoped, on-demand GDELT/Bluesky video lookup. It is not a SignalSource and has no storage. |
+| crates/analytics | Pure bucket aggregation, scores, baselines, spikes, and divergence helpers. |
+| crates/storage | DuckDB actor, migrations, queries, Parquet snapshot publishing, and local settings. |
+| crates/daily-digest | Daily fact types, bounded prompt construction, response parsing, and optional Google Gemini transport. |
+| crates/renderer | Cached egui basemap, heatmap, alert, marker, halo, graticule, and glyph layers. |
+| apps/global-signal-desktop | Eframe application that connects ingest, storage, renderer, Daily Events, and Media UI. |
+| services/workers | Separate ingest process that owns a service DuckDB database and publishes snapshots. |
+| services/api | Read-only Axum service over worker snapshots. |
 
 ## Rendering strategy
 
-eframe 0.35 (wgpu backend, the default since 0.35; `glow` remains eframe's
-documented fallback for problem drivers). The renderer crate caches
-tessellated geometry in **lon/lat space** (triangulation via earcut for
-country fills, fan triangulation for H3 cells, quads for markers) and maps it
-to screen space with a cheap affine transform when the viewport changes —
-equirectangular projection is affine in lon/lat, so pan/zoom is O(vertices)
-of `mul-add`, and nothing re-tessellates per frame. `egui_wgpu` paint
-callbacks are the escape hatch if a layer ever outgrows this; none should
-before M3.
+The renderer uses cached epaint meshes in longitude/latitude space, with cheap
+affine transforms for an equirectangular viewport. Pan and zoom do not trigger
+per-frame geometry tessellation. Layer-specific overlays such as alert
+outlines, graticules, labels, marker glyphs, and halos have bounded work.
 
-Dependency rule: eframe 0.35 rides wgpu 29. Never bump wgpu independently of
-eframe; upgrades happen in one dedicated PR per egui release.
+V1-V3 add a timeline histogram, anomaly halos, severity sizing, recency fade,
+attention-vs-unrest divergence, top movers, regional sparklines, a paged event
+ledger, source-shaped markers, NOAA alert overlay, legend, orientation aids,
+and a reading guide. The precision contract and attention/event separation
+apply to every layer.
 
-## Live-only desktop invariant
+eframe 0.35 and wgpu 29 move together. Do not upgrade wgpu independently.
 
-The desktop database and map contain only records from live sources. Synthetic
-fixtures remain a permanent, headless regression harness for tests and the
-explicit service smoke-test path; they are never loaded by the desktop binary.
-An empty live database is a valid state and renders as “waiting for live data.”
+## Runtime invariants
+
+- The desktop map and its DuckDB database contain live-source records only.
+- Fixtures remain a deterministic regression harness and an explicit
+  worker/service smoke input.
+- No source is allowed to silently fabricate a precise location. Country and
+  admin records shade regions rather than rendering at guessed points.
+- The API never opens the worker database; Parquet snapshots are the only
+  cross-process handoff.
+- Generated prose is a separate, labelled interpretation aid. It is never
+  treated as an event source or rendered as a map caption.
+- Media lookup is user-directed and transient. Its post-level public links
+  never enter aggregate ingestion, DuckDB, Parquet, logs, or the services API.

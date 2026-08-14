@@ -1,148 +1,98 @@
-# Roadmap — from M5 to a professional release
+# Roadmap
 
-M0–M5 of [PLAN.md](PLAN.md) are complete (statuses there). This document is
-the forward plan, user-approved 2026-07-16. The visualization work has its
-own detailed design doc: **[VISUALIZATION.md](VISUALIZATION.md)** — batch V1
-shipped 2026-08-10, V2 and V3 both on 2026-08-12 (see HANDOFF.md), so the
-**whole V1–V3 visualization arc is complete**. The user-prioritized real-time
-source run (IODA ✅, Bluesky ✅, Telegram ✅ — all shipped 2026-08-11/12) is
-complete too; **M7 is the focus now**.
+This is the current forward-looking roadmap. The original approved plan is
+kept in [PLAN.md](PLAN.md) as a dated planning record; use the README and
+development docs for current behavior.
 
-## Standing loose ends
+## Shipped
 
-| | Status |
+| Area | Status |
 |---|---|
-| ACLED live data | **Fully live-verified 2026-07-17** (institutional account): 17,560 real events → normalize (0 failures) → snapshot → api. The account is date-restricted to events older than 12 months, so use `LES_ACLED_WINDOW` for ingest windows. |
-| `docker compose up` | **Closed 2026-07-18** — CI's `compose-smoke` job builds both images and runs the stack with `LES_ONLINE=0`, asserting `/health` reports events > 0. Still never run interactively on the dev machine (no local docker CLI), but the stack is now exercised on every push/PR. |
-| Branch protection on `main` | **Not done** — `gh` is installed but not authenticated on this machine, so it can't be scripted here. Manual step (once, via GitHub → repo Settings → Branches, or `gh auth login` then `gh api repos/arcTanMyAngle/global_unrest/branches/main/protection -X PUT ...`): require the `check` and `feature-matrix` jobs to pass before merge. |
+| M1-M3 | Complete: offline regression harness, transparent scoring, and live GDELT ingestion. |
+| M4 | Complete: worker-owned DuckDB, immutable Parquet snapshots, read-only API, and Docker Compose smoke coverage. |
+| M5 | Complete: authorized ACLED and keyless NOAA/NWS layers. |
+| M6 | Complete: CI, release workflow, cargo-deny, Dependabot, changelog, and contributor guidance. |
+| V1-V3 | Complete: timeline/anomaly reading, analytical views, layer identity, orientation, and reading guidance. |
+| IODA, Bluesky, Telegram | Complete: country-precision outages and two aggregate-only chatter sources. |
+| M7 | Complete: API hardening, conditional GET, pagination, OpenAPI, metrics, health staleness, integration fixtures, and full feature verification. |
+| Daily Events | Complete: opt-in, locally cached, model-written day digests with the safety boundary reviewed and enforced. |
 
-## M6 — Repo hygiene, CI depth, releases ✅ (2026-07-18, except branch protection — see above)
+### M7 service hardening
 
-Repo is live and public: `github.com/arcTanMyAngle/global_unrest` (pushed
-2026-07-17, CI active on push).
+The API now has request tracing, a timeout, concurrency cap, per-IP rate limit,
+GET-only CORS, gzip compression, and graceful shutdown. Snapshot versions are
+ETags; events are paginated; OpenAPI is available at /openapi.json; Prometheus
+metrics are available at /metrics; and /health reports snapshot age and
+staleness rather than turning an old snapshot into an ambiguous readiness
+failure.
 
-1. ✅ CI matrix: `feature-matrix` job covers the M5 feature combinations
-   (`acled-live`, `noaa-live`, both) on the desktop app + worker binary;
-   `acled-live-mock` job runs `cargo test -p source-acled --features live`.
-2. ✅ **Compose smoke job** (ubuntu): builds both Docker images, runs the
-   stack with `LES_ONLINE=0` (fixtures only), asserts `/health` → 200 with
-   `snapshot.events > 0` — closes the M4 verification gap without local
-   Docker. `docker-compose.yml`'s `LES_ONLINE` is now shell-overridable
-   (`${LES_ONLINE:-1}`) to make this possible.
-3. ✅ Supply chain: `cargo-deny` job (`deny.toml`) — advisories (with two
-   documented, justified `ignore`s: quick-xml's DoS-class CVEs are
-   build-time-only via `wayland-scanner`'s bundled protocol XML, never
-   attacker input; `ttf-parser` is unmaintained with no upstream fix,
-   reached only through the Linux Wayland clipboard's font fallback) +
-   license allowlist (added `BSL-1.0`/`OFL-1.1`/`Ubuntu-font-1.0`/
-   `CDLA-Permissive-2.0` after running the tool for real). Dependabot
-   config (`.github/dependabot.yml`, cargo + actions, weekly, `wgpu`
-   excluded since it's locked to `eframe`).
-4. ✅ Releases: `.github/workflows/release.yml`, tag-driven (`v*`) — desktop
-   binaries for Windows/Linux/macOS attached to GitHub Releases, worker/api
-   images to GHCR. `CHANGELOG.md` (Keep-a-Changelog; retroactive 0.1.0–0.5.0
-   per milestone, 0.6.0 = this M6 work). Version bump policy: workspace
-   version is milestone-tied (`0.<milestone>.0`, all crates `publish =
-   false` — none of this is meant for crates.io); bumped to 0.6.0.
-5. ✅ Portfolio README: a real screenshot (offline fixture mode, `assets/
-   screenshots/map-overview.png`, captured via the run skill), a mermaid
-   architecture diagram, CI/license/rust-version badges, an "Ethics & data
-   policy" section summarizing SAFETY_AND_PRIVACY.md. `CONTRIBUTING.md`.
-   ⏳ Branch protection on `main` — manual, see the loose-ends table above.
+Public deployments must not serve ACLED-derived data. The API excludes
+ACLED-sourced event rows by default, but aggregates cannot be safely
+subtracted at the API layer. A publicly reachable worker must therefore not
+ingest ACLED in the first place.
 
-## V1–V3 — Visualization batches
+### Daily Events
 
-See [VISUALIZATION.md](VISUALIZATION.md). Summary: V1 timeline histogram +
-spike halos + severity markers + recency fade **✅ shipped 2026-08-10** (4
-PR-sized commits; also added a user-requested "has video" marker filter,
-folded into the severity/tooltip commit — see HANDOFF.md); V2
-attention↔unrest divergence layer + top-movers panel + region sparkline and
-event ledger **✅ shipped 2026-08-12**; V3 per-source marker identity (shape =
-source) + NOAA weather-alert overlay + full legend, basemap orientation polish
-(graticule, border hierarchy, cached-galley labels, focus dimming), and the
-"how to read this map" overlay **✅ shipped 2026-08-12**. The missing-glyph
-problem was solved by **painting** the legend swatches from the renderer's own
-corner table rather than bundling a font — no new asset, and the legend cannot
-drift from the map. Honest-visualization principles and perf guardrails are
-defined there and are binding.
+Daily Events is deliberately an interpretation layer, not a new signal source.
+For a selected UTC day, the user explicitly requests a model-written digest;
+the UI keeps media attention and event data in separate labelled sections with
+their source record counts. The digest is cached locally and can be
+regenerated by an explicit action.
 
-## M7 — Service hardening (api/worker)
+The Anthropic request is bounded. ACLED and Bluesky/Telegram row-level data
+are withheld; the output schema cannot contain a blended summary field. See
+[SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md) for the complete processing
+boundary and review record.
 
-- axum middleware: request timeout, concurrency cap, per-IP rate limit
-  (`tower-governor`), CORS, compression, `tower-http` tracing; graceful
-  shutdown.
-- Snapshot version as `ETag`/`If-None-Match` on all endpoints; `/events`
-  pagination.
-- OpenAPI via `utoipa` served at `/openapi.json` (docs/API.md becomes
-  machine-checked).
-- Prometheus `/metrics`; snapshot-age staleness surfaced in `/health`.
-- Integration suite against a committed fixture snapshot.
-- **Policy:** ACLED-bearing snapshots are never served publicly
-  (SAFETY_AND_PRIVACY.md); any hosted demo runs GDELT + fixtures only.
+## M8: platform and source polish
 
-## M8 — Stretch layers & desktop platform polish
+The remaining platform work is intentionally scoped rather than a commitment
+to add every possible feed:
 
-- **IODA internet-outage events ✅ 2026-08-11** — pulled forward from this
-  bucket per user request (real-time signal ahead of mainstream media): a
-  new `source-ioda` crate, feature `ioda-live` (keyless, desktop default),
-  country-precision `Disruption` events with a log-scaled severity from
-  IODA's unbounded anomaly score. See HANDOFF.md and CHANGELOG.md.
-- **Bluesky Jetstream chatter volume ✅ 2026-08-12** — second of the three
-  user-prioritized real-time sources. New `chatter` + `source-bluesky`
-  crates, feature `bluesky-live` (keyless, desktop default): the first
-  streaming source, publishing **aggregate chatter counts only** per
-  SAFETY_AND_PRIVACY.md hard rule 6.
-- **Telegram public-channel chatter volume ✅ 2026-08-12** — third and last
-  of the user-prioritized real-time sources. New `source-telegram` crate,
-  feature `telegram-live` (desktop default, credential-gated — needs a
-  one-time interactive login), reusing `chatter` unchanged. MTProto over a
-  small live-verified curated allowlist (`ALLOWED_CHANNELS`), poll-based
-  like NOAA/IODA rather than streamed. See HANDOFF.md.
-- walkers 0.56 slippy-tile basemap: its own design pass first —
-  Web-Mercator vs equirectangular projection decision, OSM tile-policy row
-  in SAFETY, online-only and clearly toggled.
-- CelesTrak satellites layer (keyless; `sgp4` propagation; a moving-point
-  layer class) — the literal "what's overhead" stretch.
-- AIS ship positions (aisstream.io websocket, free key) only if wanted —
-  high-volume streaming needs its own thinning design.
-- Settings UI (sources on/off + status; credentials stay env-only, never in
-  the settings DB), About panel with full attributions.
-- criterion benches wired into CI as regression checks; profiling pass
-  toward 1M-event retention.
+- Settings and About UI for source state and full attributions. Credentials
+  stay in environment variables, never the settings database.
+- A slippy-tile basemap design pass before implementation: projection,
+  provider policy, offline behavior, and a clear user toggle.
+- Criterion benchmarks in CI and a profiling pass toward higher retention.
+- Optional moving-layer design work, such as CelesTrak satellites, only after
+  its thinning, precision, and disclosure behavior are defined.
+- AIS or other high-volume streams only with a dedicated volume, privacy, and
+  licensing design.
 
-## M9 — Voluntary on-scene channels
+M8 items must preserve cached rendering, the point-vs-region precision rule,
+and the attention/event separation.
 
-Build opt-in channels that journalists and other field contributors can use
-to publish live or recently recorded video, audio, text, and supporting media.
-Viewers can follow a channel in real time, while the publisher controls exact
-location disclosure, broadcast delay, retention, and audience access.
+## M9: voluntary on-scene channels
 
-This milestone begins with a threat model and a small end-to-end prototype,
-not a public broadcast launch. Its required foundations are:
+Any on-scene publishing work begins with a threat model and a small,
+safety-reviewed end-to-end prototype. It must provide:
 
-- publisher and newsroom authentication, signed media provenance, and capture
-  time kept distinct from upload and display time;
-- explicit evidence states (`unreviewed firsthand`, `identity verified`,
-  `independently corroborated`, `disputed`, and `corrected`) instead of a
-  guaranteed-truth badge;
-- approximate/hidden location by default, optional safety delay, emergency
+- publisher and newsroom authentication, provenance, and capture-time history;
+- explicit states such as unreviewed, identity verified, corroborated,
+  disputed, and corrected, rather than a truth badge;
+- approximate or hidden location by default, optional delay, emergency
   cutoff, metadata stripping, expiring sessions, and publisher-controlled
   retention;
-- channel discovery and playback, reconnecting low-bandwidth ingest, and a
-  text-only fallback for dangerous or unreliable network conditions;
-- moderation, impersonation resistance, bystander privacy, deepfake/replay
-  warnings, audit trails, and rapid correction/retraction distribution;
-- a documented incident-response and legal/licensing review before any hosted
-  deployment.
+- moderation, anti-impersonation controls, bystander privacy, replay/deepfake
+  warnings, audit trails, and correction/retraction distribution;
+- incident-response and legal/licensing review before hosted deployment.
 
-Field reports remain a separate evidence class from media attention, provider
-events, and official alerts. Corroboration links these classes without
-silently blending them into one score.
+Voluntary publishing is in scope. Covert tracking, location inference, and
+tactical targeting are not.
 
-## Standing quality bar (unchanged, every session)
+## Quality bar
 
-`cargo fmt --all --check` · `cargo clippy --workspace --all-targets -- -D
-warnings` (plus the feature matrix when ingest/source code changes) ·
-`cargo test --workspace` · `cargo test -p source-acled --features live` ·
-PR-sized commits · fixtures stay the permanent offline regression base ·
-HANDOFF.md updated at session end.
+Every change should keep these green:
+
+~~~sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test -p source-acled --features live
+cargo test -p daily-digest --features live
+cargo deny check
+~~~
+
+Ingest or feature work also needs the source-feature matrix from
+.github/workflows/ci.yml. Fixtures remain the deterministic offline regression
+base; the desktop remains live-data-only.

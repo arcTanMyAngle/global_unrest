@@ -6,368 +6,245 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](rust-toolchain.toml)
 
-The world changes faster than any single newsroom, dashboard, or feed can
-explain. Live Earth Signals is a desktop-first map for finding meaningful
-patterns in that motion: where public-interest events are being reported, how
-attention shifts over time, and where independent signal sources agree—or do
-not.
+Live Earth Signals is a desktop-first Rust map for inspecting public-interest
+signals without treating attention as truth. It keeps media attention,
+structured event data, official alerts, and aggregate chatter visibly
+separate; preserves provenance; and avoids person-level tracking.
 
-It is being built for people who need to look outward with care: journalists
-following a developing story, communities seeking context during disruption,
-researchers tracing patterns, and future field contributors sharing what they
-have witnessed on their own terms. The long-term aim is a place for opt-in,
-real-time field channels that can be followed like a live broadcast, without
-turning people or places into targets.
+The current build includes the completed M1-M7 work and visualization batches
+V1-V3. The desktop ingests live GDELT, NOAA/NWS, IODA, Bluesky aggregate
+chatter, optional ACLED, and optional Telegram aggregate chatter. Synthetic
+fixtures are never loaded by the desktop; they remain regression data and the
+fixtures-only service smoke-test path.
 
-The application uses only live, public, or properly authorized sources at
-runtime. It preserves provenance and keeps media attention, provider events,
-official alerts, and future firsthand reports visibly separate. No glowing
-dot is presented as guaranteed ground truth: even sincere eyewitnesses can be
-mistaken, delayed, coerced, or impersonated. The product direction is
-**traceable evidence**—identity and consent signals, timestamps, source
-history, corroboration, corrections, and a clear confidence state.
+## Read the evidence, not a single score
 
-**Milestones 1–6 and visualization batches V1–V3 are complete** (see
-[CHANGELOG.md](CHANGELOG.md)). The desktop is live-data-only: **GDELT**
-(keyless), **ACLED** (authorized myACLED account), **NOAA/NWS active alerts**
-(keyless), **IODA internet-outage events** (keyless), **Bluesky aggregate
-chatter** (keyless), and credential-gated **Telegram aggregate chatter**.
-Fixtures remain test assets; the desktop never displays them as live data.
-
-## Built for attentive people
-
-- **Journalists and newsrooms** following developing stories, comparing
-  coverage with structured event reports, and eventually publishing or
-  following consent-based field channels.
-- **People in affected areas** seeking a provenance-rich view of nearby
-  reports and official alerts without mistaking a viral post for confirmation.
-- **Humanitarian, civic, conflict, and OSINT researchers** studying aggregate
-  patterns, coverage gaps, and changes over time.
-- **Emergency and weather analysts** viewing US NOAA/NWS polygon alerts
-  alongside other signals.
-- **Educators and developers** exploring a transparent Rust, DuckDB, H3, and
-  Parquet geospatial pipeline.
+- **Media attention** says that outlets or public feeds are covering
+  something. It does not confirm the underlying claim.
+- **Provider event data** is a normalized report from GDELT Events or an
+  authorized provider such as ACLED. It can be corrected and is not
+  infallible ground truth.
+- **Official alerts** are notices from the issuing agency, within that
+  agency's coverage and update cycle.
+- **Aggregate chatter** is a count of public posts or channel messages that
+  matched a place and topic. The app stores no post text, author identity,
+  message identifier, or message URL.
 
 This is a situational-awareness aid, not a substitute for official emergency
-instructions or a promise that an area is safe. It does not provide
-person-level tracking or live video channels. Its job is humbler and, we
-think, more useful: make the evidence easier to inspect before people decide
-what they believe or do.
-
-## What is available today
-
-| Capability | Status | What it means |
-|---|---|---|
-| GDELT media attention and events | Live | Global news metadata and CAMEO event records; coverage is not confirmation. |
-| ACLED event data | Live with authorized credentials | Curated conflict and civic-event records; access and available dates depend on the account. |
-| NOAA/NWS alerts | Live | Active US and territory alerts with polygon geometry; zone-only alerts are not placed at guessed coordinates. |
-| IODA internet-outage events | Live | Country-precision internet-outage severity signal (keyless, near-real-time); shades regions only, never a point marker. |
-| Map, filters, replay, and inspector | Available | Explore heat, markers, sources, themes, confidence, and six-hour analysis buckets. |
-| Related video and source links | Available | Click a region to open video URLs carried by its real source records, inspect source pages that may contain media, or launch a clearly labeled external YouTube search. |
-| Local Parquet export and ingest log | Available | Export normalized session data and inspect rejected records. |
-| On-scene publisher channels | Planned | Opt-in live video/audio/text with publisher safety controls, provenance, and corroboration states. |
-
-### How to read the evidence
-
-The interface treats these as different evidence classes:
-
-1. **Media attention** says that outlets are covering something. It does not
-   prove the underlying claim or that the publisher is located at the event.
-2. **Provider event data** is normalized from GDELT Events or an authorized
-   provider such as ACLED. It may be curated or corrected later, but is still
-   a report rather than infallible truth.
-3. **Official alerts** are authoritative notices from their issuing agency,
-   within that agency's coverage and update cycle.
-4. **Firsthand field reports** are a planned class. They should show whether
-   the publisher is authenticated, whether time/location evidence is present,
-   whether independent sources corroborate the report, and whether it has been
-   corrected or disputed. A `live`, `verified identity`, or `on scene` badge
-   must never be presented as proof that every claim is true.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    subgraph Sources["Live runtime sources"]
-        GDELT["source-gdelt\n(M3, keyless)"]
-        ACLED["source-acled\n(M5, acled-live)"]
-        NOAA["source-noaa\n(M5, noaa-live)"]
-        IODA["source-ioda\n(ioda-live, keyless)"]
-        BSKY["source-bluesky\n(bluesky-live, keyless)\nstreaming"]
-        TG["source-telegram\n(telegram-live)\ncredential-gated, MTProto"]
-    end
-
-    FIX["source-fixtures\ntests only; never displayed"]
-
-    subgraph Core["Pure core (no I/O)"]
-        CT["core-types\nGeoTemporalEvent, SignalSource"]
-        AN["analytics\nscore_buckets, baselines"]
-        GEO["geo-utils\nH3, viewport, precision"]
-    end
-
-    subgraph Storage["storage — DuckDB actor thread"]
-        DB[("!Sync connection\nsingle-writer-per-file")]
-    end
-
-    GDELT --> CT
-    ACLED --> CT
-    NOAA --> CT
-    IODA --> CT
-    BSKY --> CHAT["chatter\naggregate-only rollups"] --> CT
-    TG --> CHAT
-    FIX -. tests only .-> CT
-    CT --> Storage
-    Storage --> AN
-
-    subgraph Desktop["apps/global-signal-desktop (eframe)"]
-        UI["map / timeline / inspector\ncached-mesh renderer"]
-    end
-
-    subgraph Services["services/* (M4, Docker)"]
-        WORKER["workers\nown DuckDB, publish Parquet"]
-        API["api\naxum, read-only, Parquet-only"]
-    end
-
-    Storage --> UI
-    WORKER --> DB
-    WORKER -- "atomic LATEST pointer" --> SNAP[("Parquet snapshots")]
-    API -- "read_parquet, never .duckdb" --> SNAP
-```
-
-Full crate-by-crate map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+instructions or a promise that an area is safe.
 
 ## Quickstart
 
-Bring up a living map of the signals shaping the day:
+1. Copy [.env.example](.env.example) to .env. Credentials are optional for
+   the keyless map sources.
+2. Run the desktop:
 
-```sh
-# Copy .env.example to .env and add authorized ACLED credentials if available.
-# The first build compiles bundled DuckDB and can take several minutes.
-cargo run -p global-signal-desktop
-```
+   ~~~sh
+   cargo run -p global-signal-desktop
+   ~~~
 
-You get a dark world map with:
+The first build compiles bundled DuckDB and can take several minutes. Live
+updates start by default; set LES_ONLINE=0 to start with network polling
+paused. An empty database waits for live records rather than falling back to
+synthetic data.
 
-- **Heatmap** — H3 cells shaded by media attention, event count, or source
-  diversity (log scale; toggle in the top bar). Cells roll up to coarser H3
-  parents at world zoom.
-- **Event markers** — protests, conflicts, and disruptions colored by kind and
-  shaped by source. Only city/exact-precision records render as points;
-  country/admin centroids shade regions instead of faking hotspots.
-- **Timeline and replay** — follow the rhythm of the retained live-data extent
-  in six-hour buckets, then move through it at your own pace.
-- **Region inspector** — click anywhere: counts by kind, attention vs.
-  events (always separate), **score components as separate bars**
-  (attention / unrest / spike-vs-baseline / combined, per
-  [docs/SCORING.md](docs/SCORING.md)), low-confidence badges (baseline cold
-  start, coarse geocoding), top themes, outlet diversity, headline metadata,
-  source links, and related-video actions. Known video hosts/direct media URLs
-  are labeled as candidates; external search results remain explicitly
-  unverified.
-- **Filters** — event kinds, themes (vocabulary from the data), minimum
-  location confidence, layer toggles.
-- **Parquet export** — one click writes the session as date-partitioned
-  Parquet (the M4 service handoff layout).
-- **Ingest log** — malformed records are logged and surfaced, never
-  silently dropped.
+## What is available today
 
-Pan by dragging, zoom with the scroll wheel, `reset view` in the top bar.
+| Capability | Status | What it does |
+|---|---|---|
+| Map and analysis | Available | Heat modes for attention, events, source diversity, and attention-vs-unrest divergence; a six-hour timeline with replay, now-follow, and typed UTC ranges. |
+| Evidence inspection | Available | Per-region score components, source links and video candidates, source-shaped markers, legend, top movers, sparklines, and a paged event ledger. |
+| NOAA alert layer | Available | A US NWS weather-alert overlay separated visually from unrest signals, with graticule, country labels, and an in-app reading guide. |
+| GDELT | Live | Global news metadata and CAMEO event records. Coverage is not confirmation. |
+| ACLED | Live with authorized credentials | Curated conflict and civic-event records. Account access and available dates vary by tier. |
+| NOAA/NWS | Live | Active US and territory alerts with usable polygon geometry. |
+| IODA | Live | Country-precision internet-outage severity. It shades regions and never creates a point marker. |
+| Bluesky | Live, aggregate-only | Keyless Jetstream chatter counts in completed five-minute windows. |
+| Telegram | Live with setup | Aggregate-only public-channel chatter from a curated allowlist, using a local MTProto session. |
+| Daily Events | Opt-in | A model-written, two-section digest for one UTC day of stored data. |
+| Media research and playback | On demand | Public video lookup for one selected place and time window; results are transient and can play in-app on Windows or open in a browser. |
+| Services API | Available | Dockerized worker/API snapshots with conditional GET, pagination, OpenAPI, metrics, and health staleness reporting. |
+| On-scene publishing | Planned | Consent-based field channels with publisher safety controls and explicit evidence states. |
 
-### Live updates
+### Source cadence and limits
 
-Live updates start automatically. GDELT uses the DOC 2.0 API (media
-attention, geocoded to source country) plus the 15-minute Events dumps
-(discrete CAMEO events), rate-limited and politely backed off. `↻` forces an
-immediate fetch; the inspector's **Live source** panels show per-source state
-and, if the network drops, a degraded/partial badge. Last-known real data stays
-on screen. The **live updates** checkbox pauses network requests without
-switching to synthetic data. `LES_ONLINE=0` starts paused.
-
-| Source | Normal fetch cadence | Important limitation |
+| Source | Normal cadence | Important limit |
 |---|---:|---|
-| GDELT | 15 minutes | Upstream DOC or Events feeds can be partial, delayed, or temporarily unavailable. |
-| NOAA/NWS | 10 minutes | US and territories only; only alerts with usable geometry appear on the map. |
-| IODA | 15 minutes | Country-precision only — shades regions, never a point marker. |
-| ACLED | 12 hours | Credentials, license tier, curation delay, and account date restrictions apply. |
+| GDELT | 15 minutes | Upstream DOC and Events feeds can be partial, delayed, or unavailable. |
+| NOAA/NWS | 10 minutes | US and territories only; zone-only alerts are not mapped. |
+| IODA | 15 minutes | Country precision only; never rendered as a point. |
+| ACLED | 12 hours | Requires authorized credentials; licensing and account date restrictions apply. |
+| Bluesky | 5 minutes | A continuous stream is published only as completed aggregate windows. |
+| Telegram | 15 minutes | Requires app credentials and a pre-created local session; reads only the curated public-channel allowlist. |
 
-Three times are deliberately kept distinct: the **event/publish time** from
-the source, the **ingest time** when this app received it, and the **six-hour
-analysis bucket** used by the timeline and scores. A frequent fetch does not
-mean that every underlying event is current or independently confirmed.
+The app keeps source event time, ingest time, and six-hour analysis buckets
+separate. A frequent fetch does not mean every underlying report is current or
+independently confirmed.
 
-### ACLED, NOAA, and IODA
+## Optional credentials, Daily Events, and media research
 
-```sh
-# All three adapters are desktop defaults; `.env` is loaded automatically.
-cargo run -p global-signal-desktop
-```
+ACLED uses ACLED_EMAIL and ACLED_PASSWORD from an authorized myACLED account.
+Some accounts are date-restricted; use
+LES_ACLED_WINDOW=YYYY-MM-DD|YYYY-MM-DD for a fixed inclusive historical
+window.
 
-ACLED credentials are `ACLED_EMAIL` / `ACLED_PASSWORD` env vars (OAuth —
-ACLED retired API keys). Note: ACLED grants **API** access only to
-Research/Partner/Enterprise-tier myACLED accounts (institutional email);
-Open-tier accounts authenticate but receive `403 Access denied` on data
-reads. Without credentials the ACLED status line simply reports itself off.
-Some tiers are also **date-restricted** (e.g. only events older than
-12 months) — set `LES_ACLED_WINDOW=YYYY-MM-DD|YYYY-MM-DD` to fetch a fixed
-historical window instead of the rolling recent one. NOAA and IODA are both
-keyless — no credentials or setup needed.
+Telegram requires a dedicated account's TELEGRAM_API_ID and
+TELEGRAM_API_HASH, then a one-time local session setup:
 
-The M4 services take the same features: `cargo run -p workers --features
-acled-live,noaa-live,ioda-live` ingests live and publishes Parquet snapshots
-that `cargo run -p api` serves (see [docs/API.md](docs/API.md)).
+~~~sh
+cargo run -p source-telegram --features live --example login_setup
+~~~
 
-## Commands
+To create a Daily Events digest, set GEMINI_API_KEY in .env or the process
+environment, open **daily events**, choose a UTC day with stored data, and
+click **generate digest**. Nothing is generated automatically. A digest is
+cached locally per day and can be regenerated explicitly.
 
-```sh
-cargo test --workspace                          # all tests (headless)
-cargo run -p source-fixtures --bin generate-fixtures   # regenerate fixtures
-cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check                                 # advisories + license allowlist (needs `cargo install cargo-deny`)
-docker compose up                                # M4 worker+api stack (see docker-compose.yml)
-```
+The page always keeps **media attention** and **event data** in separate
+sections with their record counts, model, and generation time. A bounded set
+of aggregate counts and permitted record metadata is sent to Google Gemini for a
+requested digest; ACLED and Bluesky/Telegram row-level data are withheld and
+remain counts-only. Read the exact boundary in
+[Safety and privacy](docs/SAFETY_AND_PRIVACY.md#third-party-processing-google-gemini-api).
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus the feature
-matrix (each of `acled-live`/`noaa-live`/`ioda-live`/`bluesky-live`/
-`telegram-live` alone, plus the full union), the ACLED OAuth live-mock
-suite, and a `docker compose` smoke test. Tag-driven releases
-(`.github/workflows/release.yml`) build desktop binaries for Windows/Linux/
-macOS and push worker/api images to GHCR — see [CONTRIBUTING.md](CONTRIBUTING.md).
+The **media** page is a separate, user-directed research action. Pick a place,
+an optional topic, and a bounded time window; only then does the app search
+GDELT, public Bluesky posts, and the configured Telegram allowlist for video.
+Nothing is fetched on a timer or written to the database. News videos and
+unverified public posts are labelled separately. On Windows, supported
+provider embeds can play inside the app; every result retains a browser
+fallback.
+
+## Services API
+
+For the worker/API stack, Docker Compose is the normal entry point:
+
+~~~sh
+docker compose up
+~~~
+
+Once the worker has published a snapshot, the API is available at
+http://localhost:8080. See [docs/API.md](docs/API.md) for /health, /meta,
+/buckets, /events, /metrics, and /openapi.json.
+
+The worker owns its DuckDB database and publishes immutable Parquet snapshots.
+The API reads only those snapshots; it never opens the worker database. The
+worker loads fixtures at startup for its service/test path, then can ingest
+GDELT and any enabled live-source features. Do not expose ACLED-bearing
+snapshots publicly.
+
+## Architecture
+
+~~~mermaid
+flowchart LR
+    subgraph Sources["Live runtime sources"]
+        GDELT["GDELT"]
+        ACLED["ACLED (authorized)"]
+        NOAA["NOAA/NWS"]
+        IODA["IODA"]
+        BSKY["Bluesky aggregate chatter"]
+        TG["Telegram aggregate chatter"]
+    end
+
+    subgraph Desktop["Desktop app"]
+        INGEST["live ingest"]
+        STORE[("DuckDB storage actor")]
+        MAP["map, timeline, inspector"]
+        FACTS["daily facts"]
+        DIGEST["Daily Events page"]
+    end
+
+    Sources --> INGEST --> STORE --> MAP
+    STORE --> FACTS
+    FACTS -->|"explicit Generate click"| GEMINI["Google Gemini API"]
+    GEMINI --> DIGEST
+    DIGEST -->|"local cache"| STORE
+
+    QUERY["place + topic + time window"]
+    QUERY --> SEARCH["on-demand media search"]
+    SEARCH --> MEDIA["media page + player"]
+
+    FIX["Fixtures: tests and service smoke only"]
+    FIX -.-> WORKER
+    subgraph Services["Worker and read-only API"]
+        WORKER["workers: DuckDB + snapshot publisher"]
+        SNAP[("immutable Parquet snapshots")]
+        API["api: Axum + read_parquet"]
+    end
+    WORKER --> SNAP --> API
+~~~
+
+The full crate map, threading model, data boundaries, and service handoff are
+in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Commands and CI
+
+~~~sh
+# Formatting, linting, and headless tests
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Network-path mock suites; no real credentials required
+cargo test -p source-acled --features live
+cargo test -p daily-digest --features live
+
+# Fixture maintenance and service stack
+cargo run -p source-fixtures --bin generate-fixtures
+docker compose up
+
+# Advisory and license checks (requires cargo-deny)
+cargo deny check
+~~~
+
+CI runs the workspace gates on Windows and Linux; source-feature checks for
+ACLED, NOAA, IODA, Bluesky, Telegram, and the desktop-only gemini-live,
+media-live, and video-embed features; the full feature union; Daily Events and
+media-search mock suites; Docker Compose smoke coverage; and cargo-deny.
+Tag-driven releases build desktop binaries and publish worker/API images.
 
 ## Documentation
 
 | Doc | Contents |
 |---|---|
-| [HANDOFF.md](HANDOFF.md) | Session handoff: current status, next task list, known quirks |
-| [docs/PLAN.md](docs/PLAN.md) | The approved project plan, with milestone status |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Forward plan: M6 repo/CI/releases, M7 service hardening, M8 stretch layers |
-| [docs/VISUALIZATION.md](docs/VISUALIZATION.md) | Visualization design plan (V1–V3): timeline, anomaly halos, divergence view, ledger |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Crate map, threading model, rendering strategy, single-writer rule |
-| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | `GeoTemporalEvent`, buckets, DuckDB schema, fixtures |
-| [docs/SCORING.md](docs/SCORING.md) | Transparent scoring formulas, baseline/spike design (M2) |
-| [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) | Hard rules, licensing, biases, retention |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup, env vars, build notes |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | PR workflow, quality gates, feature-gating rules for new sources |
-| [CHANGELOG.md](CHANGELOG.md) | Milestone-tied version history |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Runtime topology, crate map, threading, and snapshot handoff. |
+| [docs/API.md](docs/API.md) | Services API, snapshot contract, middleware, and endpoints. |
+| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | Domain types, DuckDB schema, Daily Events cache, transient media research, and fixtures. |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup, environment variables, test commands, and service operations. |
+| [docs/SCORING.md](docs/SCORING.md) | Transparent scoring and baseline design. |
+| [docs/VISUALIZATION.md](docs/VISUALIZATION.md) | Shipped V1-V3 visualization decisions and guardrails. |
+| [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) | Hard safety rules, licensing, bias, retention, and Daily Events/media boundaries. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Completed work and the remaining M8/M9 direction. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and verification requirements. |
+| [CHANGELOG.md](CHANGELOG.md) | Milestone-tied release history. |
+| [HANDOFF.md](HANDOFF.md) | Dated engineering handoff notes and implementation history. |
 
-## Roadmap
+## Status and direction
 
-- **M1 ✅** offline fixture pipeline: ingest → DuckDB → map/timeline/inspector
-- **M2 ✅** scoring depth: score components, 28-day median baselines, spike
-  detection with cold-start badges, theme filters, Parquet export
-- **M3 ✅** live GDELT ingestion (DOC 2.0 API + 15-min Events dumps),
-  rate-limited fetch loop, retention, dedup, graceful degradation. Optional
-  OSM slippy-tile layer deferred (stretch)
-- **M4 ✅** Dockerized services (axum API + ingest worker, Parquet handoff)
-- **M5 ✅** ACLED adapter (feature `acled-live`, authorized OAuth access only)
-  and NOAA/NWS active-alerts layer (feature `noaa-live`, keyless). AIS /
-  CelesTrak remain backlog stretch layers.
-- **M6 ✅** repo hygiene: CI feature matrix + compose smoke test, cargo-deny,
-  Dependabot, tag-driven releases (desktop binaries + GHCR images),
-  CHANGELOG, this README, CONTRIBUTING.md.
-- **V1 ✅** visualization batch: timeline histogram, spike halos, severity
-  markers, recency fade ([docs/VISUALIZATION.md](docs/VISUALIZATION.md)).
-- **IODA ✅** internet-outage events layer (feature `ioda-live`, keyless,
-  country-precision).
-- **Bluesky ✅** Jetstream chatter-volume layer (feature `bluesky-live`,
-  keyless, aggregate-only).
-- **Telegram ✅** public-channel chatter-volume layer (feature
-  `telegram-live`, credential-gated, aggregate-only, curated channel
-  allowlist).
-- **Next**: visualization batch V2, M7 service hardening — see
-  [docs/ROADMAP.md](docs/ROADMAP.md).
+Completed: M1-M7, visualization V1-V3, and the IODA, Bluesky, Telegram,
+Daily Events, and on-demand media-research layers.
 
-### Product direction: on-scene channels
+Next: remaining M8 platform/source polish and safety-gated M9 voluntary
+on-scene publishing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the current
+plan.
 
-A future release is intended to let approved journalists and voluntary field
-contributors run channels that viewers can tune into in real time. A channel
-may carry live or recently recorded video, audio, text updates, and supporting
-media. This is **publishing by a consenting source**, not covert tracking.
+## Safety, data, and attribution
 
-The feature should ship only with the following foundations:
-
-- **Publisher safety controls:** approximate or hidden location by default,
-  optional broadcast delay, emergency stream cutoff, expiring sessions, and
-  the ability to remove location metadata before media is distributed.
-- **Authentication and provenance:** signed uploads, account and newsroom
-  verification where available, original capture time separated from upload
-  time, an audit trail for edits, and preserved source attribution.
-- **Verification states:** clear labels such as `unreviewed firsthand`,
-  `identity verified`, `independently corroborated`, `disputed`, and
-  `corrected`; no universal "ground truth" badge.
-- **Corroboration:** links between a field report, independent reporters,
-  official alerts, and structured event providers without silently blending
-  them into one score.
-- **Abuse resistance:** reporting and moderation, anti-impersonation controls,
-  rate limits, replay/deepfake warnings, and restricted access when a public
-  broadcast could endanger a source or bystander.
-- **Bystander privacy:** no face recognition, involuntary identity search, or
-  precise persistent location histories; retention and download permissions
-  remain under an explicit policy.
-
-Real-time delivery and safety can conflict. The publisher—not the viewer—must
-control whether exact location and true-live timing are disclosed. Emergency
-services and local safety guidance remain authoritative when they differ from
-a channel.
-
-## Ethics & data policy
-
-This is a civic-data and voluntary field-publishing tool, not a covert
-surveillance or targeting system — see
-[docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) for the full policy.
-An on-scene contributor choosing to publish a channel is supported; locating,
-profiling, or following a person without consent is as well. In short:
-
-- **Aggregate by default** — existing data signals are keyed to H3
-  cells/countries and times. A future publisher may opt into a channel, but
-  exact location is never inferred or exposed by default.
-- **Metadata, not article bodies** — headlines, URLs, outlet domains only.
-- **Attention ≠ truth** — media attention and event data are always shown
-  as separate, transparent components, never a single blended score.
-- **Public/authorized sources only**, rate-limited client-side, never
-  bypassing paywalls or auth. ACLED data specifically is never
-  redistributed (no `notes` narrative stored; ACLED-bearing snapshots are
-  never served publicly — see M7's hardening policy).
-
-## Data & attribution
-
-- Desktop runtime data is live/real-source only. Synthetic fixtures use
-  reserved `.example` domains and remain isolated to automated tests; they are
-  never loaded into or displayed by the desktop application.
-- GDELT data is from the **[GDELT Project](https://www.gdeltproject.org/)**,
-  used **with attribution** per its terms (keyless, no redistribution of raw
-  dumps). GDELT DOC attention is geocoded only to the *source country* and is
-  always shown at country precision—an imperfect, coverage-biased proxy.
-- Basemap: [Natural Earth](https://www.naturalearthdata.com/) 1:110m
-  countries (public domain).
-- ACLED (included in desktop defaults): data from the **Armed Conflict Location &
-  Event Data Project (ACLED)**, [acleddata.com](https://acleddata.com) —
-  authorized access only (free myACLED account; OAuth credentials via
-  `ACLED_EMAIL`/`ACLED_PASSWORD` env vars). Used with attribution; raw ACLED
-  data (including event narratives) is never stored or redistributed.
-- NOAA (included in desktop defaults): **NOAA/NWS active weather alerts**
-  ([api.weather.gov](https://www.weather.gov/documentation/services-web-api)),
-  US-government public domain; US coverage only.
-- IODA (included in desktop defaults): **Internet Outage Detection and
-  Analysis** ([ioda.inetintel.cc.gatech.edu](https://ioda.inetintel.cc.gatech.edu)),
-  Georgia Tech Internet Intelligence Research Lab — keyless public API,
-  © Georgia Tech Research Corporation. Country-precision internet-outage
-  severity signal; aggregate network telemetry only, no person-level data.
-- Bluesky (included in desktop defaults): **Jetstream** public firehose
-  ([bsky.app](https://bsky.app)) — keyless. This app stores **aggregate
-  chatter counts only**: how many public posts in a five-minute window
-  mentioned both a known place and a known topic. Post text, author
-  handles/DIDs, post ids, and links are never stored, logged, or exposed by
-  any API in the source adapter, and place attribution is keyword matching
-  against a public gazetteer, never inference about where a person is. See
-  [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.
-- Telegram (included in desktop defaults, credential-gated): a small,
-  live-verified, curated allowlist of public channels
-  ([telegram.org](https://telegram.org)), read via a dedicated account's own
-  MTProto session — not a bot, since Telegram's Bot API cannot read a
-  channel it wasn't added to. Same **aggregate chatter counts only**
-  guarantee as Bluesky: no message text, sender identity, or message URL is
-  ever stored, logged, or exposed by any API in the source adapter. See
-  [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) hard rule 6.
+- The project is not a covert-surveillance or targeting system. A contributor
+  choosing to publish is supported; locating, profiling, or following a
+  person without consent is prohibited.
+- Media attention and structured events remain separate components. Aggregate
+  chatter is never treated as an on-the-ground observation. The Media page is
+  a narrow exception for user-requested, transient public video research; it
+  does not alter the aggregate ingest/storage boundary.
+- The desktop stores source metadata, not article bodies. ACLED narratives are
+  not stored or redistributed; ACLED data must not be publicly served.
+- GDELT is used with attribution. Natural Earth country data is public domain.
+  NOAA/NWS is US government public-domain data. IODA, Bluesky, and Telegram
+  use the constraints documented in [Safety and privacy](docs/SAFETY_AND_PRIVACY.md).
+- Daily Events is labelled generated text, not a news report. Its output helps
+  readers inspect stored signals; it does not assess importance, attribute
+  cause, or forecast events.
 
 ## License
 

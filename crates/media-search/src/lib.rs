@@ -156,8 +156,12 @@ pub fn search_terms(raw: &str) -> String {
 /// post both linking one YouTube video — so identity is the URL, not the
 /// provider. The first occurrence wins, which is why callers pass the
 /// providers in the order they'd rather attribute to.
+///
+/// The sort is by timestamp *only*, deliberately: `sort_by` is stable, so ties
+/// keep the caller's order and that attribution preference survives. Adding a
+/// URL tiebreak would silently hand ties to whichever copy sorts lower.
 pub fn merge(mut hits: Vec<MediaHit>) -> Vec<MediaHit> {
-    hits.sort_by(|a, b| b.ts_utc.cmp(&a.ts_utc).then_with(|| a.url.cmp(&b.url)));
+    hits.sort_by_key(|hit| std::cmp::Reverse(hit.ts_utc));
     let mut seen = std::collections::HashSet::new();
     hits.retain(|hit| seen.insert(hit.url.to_lowercase()));
     hits
@@ -233,7 +237,11 @@ mod tests {
         let urls: Vec<&str> = merged.iter().map(|h| h.url.as_str()).collect();
         assert_eq!(
             urls,
-            vec!["https://youtu.be/b", "https://t.me/chan/7", "https://youtu.be/a"]
+            vec![
+                "https://youtu.be/b",
+                "https://t.me/chan/7",
+                "https://youtu.be/a"
+            ]
         );
     }
 

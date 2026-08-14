@@ -16,6 +16,8 @@ default = [
     "bluesky-live",
     "telegram-live",
     "gemini-live",
+    "media-live",
+    "video-embed",
 ]
 acled-live = ["dep:source-acled", "source-acled/live"]
 # NOAA/NWS active alerts (M5 optional layer): keyless, US coverage.
@@ -43,6 +45,11 @@ gemini-live = ["daily-digest/live"]
 # this feature on Linux/macOS is a no-op that compiles the stub player.
 # That is deliberate: CI's ubuntu leg has no webkit2gtk-4.1 dev packages.
 video-embed = ["dep:wry"]
+# On-demand, place-scoped media lookup (see src/media_page.rs). Shaped like
+# `gemini-live`, not like the source features: `media-search` is not optional,
+# because the page and its types are built either way — the feature adds only
+# the network half, so a build without it shows an honest "search unavailable".
+media-live = ["media-search/live"]
 
 [dependencies]
 analytics.workspace = true
@@ -55,6 +62,7 @@ dotenvy.workspace = true
 eframe.workspace = true
 egui.workspace = true
 geo-utils.workspace = true
+media-search.workspace = true
 renderer.workspace = true
 serde.workspace = true
 serde_json.workspace = true

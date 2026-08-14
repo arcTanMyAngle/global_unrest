@@ -1,5 +1,12 @@
 # Approved plan (vendored)
 
+> Historical planning record, not the current setup guide. It preserves the
+> original M0-M5 design decisions and acceptance criteria; for shipped
+> behavior use README.md, ROADMAP.md, ARCHITECTURE.md, and DEVELOPMENT.md.
+> M6, M7, V1-V3, the IODA/Bluesky/Telegram layers, and Daily Events have since
+> shipped. The desktop is now live-data-only; fixtures remain test and
+> service-smoke input.
+
 > User-approved 2026-07-13 (original at
 > `~/.claude/plans/prompt-1-md-recursive-rossum.md`; brief at
 > `../prompt_1.md` outside the repo). Vendored so future sessions don't
@@ -83,8 +90,8 @@ buckets with a trailing 28-day median.
 `Box<dyn>`); `RawRecord` is a self-contained enum. Normalization fallible
 per record → `ingest_log`. GDELT reality for M3: DOC 2.0 API is keyless
 JSON REST; **Events/Mentions/GKG are 15-minute CSV-zip dumps** — two code
-paths in source-gdelt. ACLED behind a cargo feature + `ACLED_API_KEY`,
-disabled by default.
+paths in source-gdelt. ACLED now uses a cargo feature plus OAuth
+credentials (ACLED_EMAIL and ACLED_PASSWORD); the desktop enables the feature by default, but credentials still gate it.
 
 ## 6. Rendering approach
 

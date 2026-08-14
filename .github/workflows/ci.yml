@@ -45,10 +45,17 @@ jobs:
   # already compiles the union; this job is what covers each feature *alone*
   # and the worker binary, whose features stay opt-in.
   #
-  # `gemini-live` is package-qualified because it exists only on the
-  # desktop app — the worker has no Daily Events page. The solo entries all
-  # leave it off, which is what compiles the stub `api` module in
-  # `apps/global-signal-desktop/src/digest.rs`.
+  # `gemini-live` and `media-live` are package-qualified because they exist
+  # only on the desktop app — the worker has neither a Daily Events page nor
+  # a Media page. The solo entries all leave them off, which is what compiles
+  # the stub `api` modules in `apps/global-signal-desktop/src/digest.rs` and
+  # `src/media.rs`.
+  #
+  # `video-embed` is desktop-only too, and on ubuntu it is a deliberate
+  # no-op: `wry` sits under `[target.'cfg(windows)'.dependencies]`, so this
+  # leg compiles the stub player. Its purpose here is to catch the opposite
+  # mistake — a `#[cfg]` that leaves `video.rs` with dead code when the
+  # webview is absent, which `-D warnings` then fails on.
   feature-matrix:
     strategy:
       fail-fast: false
@@ -61,7 +68,9 @@ jobs:
             "bluesky-live",
             "telegram-live",
             "global-signal-desktop/gemini-live",
-            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live",
+            "global-signal-desktop/media-live",
+            "global-signal-desktop/video-embed",
+            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed",
           ]
     runs-on: ubuntu-latest
     steps:
@@ -106,6 +115,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: daily-digest live mock suite
         run: cargo test -p daily-digest --features live
+
+  # media-search's `live` feature carries its own mock-server suite
+  # (tests/live_mock.rs): request shape per provider, response parsing, the
+  # moderation-label filter, and the per-provider failure reporting that keeps
+  # one throttled API from reading as "nothing happened here". Local socket
+  # only — no network, no credentials.
+  media-search-live-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: media-search live mock suite
+        run: cargo test -p media-search --features live
 
   # Closes the M4 verification gap: `docker compose up` was written but
   # never run locally (no docker CLI on the dev machine). Runs fixtures-only

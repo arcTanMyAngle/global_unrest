@@ -1,5 +1,9 @@
 # Session handoff — Live Earth Signals
 
+> This is a dated engineering handoff journal. Older sections intentionally
+> preserve the state of their session and can mention work that is now shipped.
+> Use README.md, docs/ROADMAP.md, and docs/DEVELOPMENT.md for current behavior.
+
 Last session: 2026-08-13 (**ninth** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
 

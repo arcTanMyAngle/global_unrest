@@ -7,6 +7,24 @@ doc is the design plan for that. Execute in batches (V1 → V3); each item
 lists implementation notes against the renderer architecture and its
 acceptance criteria.
 
+## Shipped status
+
+V1, V2, and V3 are complete. The baseline section below describes the
+pre-batch M1-M5 map; the later batch sections and this summary describe the
+current implementation.
+
+The current map has four heat modes: attention, events, source diversity, and
+attention-vs-unrest divergence. It also includes the timeline histogram,
+spike halos, severity sizing, replay fade, top movers, per-region sparklines,
+a paged event ledger, source-shaped markers, NOAA's separate alert overlay,
+a painted legend, graticule/country labels, focus dimming, and the How to
+read this map overlay. The timeline follows the current UTC bucket until the
+user scrubs, plays, or applies a custom range; typed UTC ranges can be
+applied directly.
+
+Daily Events is a separate interpretation page, not a visualization layer. It
+does not change the map's attention/event separation or rendering contract.
+
 ## Principles (non-negotiable, from the brief + SAFETY doc)
 
 1. **Honest before pretty.** The precision rendering contract (only

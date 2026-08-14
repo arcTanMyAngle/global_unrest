@@ -35,11 +35,15 @@ async fn spawn_and_wait_ready(
 ) -> ApiProcess {
     let base = format!("http://{bind}");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_api"));
+    // stderr is inherited, not swallowed: a child process's stderr bypasses
+    // cargo's per-test capture, so an api-side failure shows up in the CI log
+    // next to the assertion it caused. `RUST_LOG=error` keeps that to actual
+    // errors — the deliberate 400s and 429s below stay silent.
     cmd.env("LES_PUBLISH_DIR", fixtures_dir())
         .env("LES_API_BIND", bind)
         .env("RUST_LOG", "error")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -59,9 +63,22 @@ async fn spawn_and_wait_ready(
     panic!("api on {bind} did not become ready within 5s");
 }
 
+/// Parse a response that is expected to have succeeded.
+///
+/// The status check is not redundant with the assertions that follow it.
+/// `ApiError` renders as `{"error": "..."}` — valid JSON with a 4xx/5xx
+/// status — so without this, a failed request reaches the caller as a `Value`
+/// that merely lacks the expected keys, and the test reports a downstream
+/// symptom ("time_extent is null") while discarding the status and message
+/// that say what actually went wrong. Every call site here expects 200; the
+/// deliberate 400s are asserted on `.status()` directly.
 async fn json_body(resp: reqwest::Response) -> Value {
     let status = resp.status();
     let text = resp.text().await.expect("response body readable");
+    assert!(
+        status.is_success(),
+        "expected 2xx, got {status}; body: {text}"
+    );
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("status {status}, body {text:?}: {e}"))
 }
 

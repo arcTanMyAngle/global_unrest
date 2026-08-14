@@ -11,9 +11,11 @@ publish.workspace = true
 # (not streaming, unlike Bluesky): each cycle sweeps a small curated channel
 # allowlist via MTProto and drains completed chatter windows.
 #
-# Aggregate-only by construction, same as `source-bluesky`: nothing here may
-# ever return message text or author identity to a caller
-# (docs/SAFETY_AND_PRIVACY.md hard rule 6).
+# The ingest path is aggregate-only by construction, same as `source-bluesky`:
+# nothing on it may ever return message text or author identity to a caller
+# (docs/SAFETY_AND_PRIVACY.md hard rule 6). `src/media.rs` is the one
+# user-directed exception — an on-demand, nothing-stored lookup that reuses
+# this crate's session. Read that module's docs before touching it.
 
 [features]
 default = []
@@ -30,6 +32,10 @@ live = [
 chatter.workspace = true
 chrono.workspace = true
 core-types.workspace = true
+# Not optional: `src/media.rs` is the pure half of the on-demand lookup and is
+# unit-tested without the `live` feature. The arrow only points this way —
+# `media-search` must never depend on this crate, or the graph cycles.
+media-search.workspace = true
 tracing.workspace = true
 grammers-client = { workspace = true, optional = true }
 grammers-mtsender = { workspace = true, optional = true }

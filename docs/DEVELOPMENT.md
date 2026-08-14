@@ -2,74 +2,148 @@
 
 ## Prerequisites
 
-- Rust (pinned by `rust-toolchain.toml`; rustup installs it automatically).
-- Windows: MSVC Build Tools (the bundled DuckDB C++ amalgamation compiles
-  from source — the **first** build takes several minutes and is memory
-  hungry; later builds hit the cache).
-- Linux: a C/C++ toolchain (`build-essential`).
-- The desktop is live-data-only and needs network access to ingest data.
-  Committed fixtures remain a headless regression harness only.
+- Rust is pinned by rust-toolchain.toml; rustup installs the selected toolchain.
+- On Windows, install MSVC Build Tools. Bundled DuckDB compiles from source,
+  so the first build is CPU- and memory-intensive.
+- On Linux, install a C/C++ toolchain such as build-essential.
+- The desktop is live-data-only. It needs network access to ingest records;
+  committed fixtures are a headless regression harness and a service smoke
+  fixture, not a desktop fallback.
+
+## Run the desktop
+
+Copy .env.example to .env if you need credentialed sources or Daily Events,
+then run:
+
+~~~sh
+cargo run -p global-signal-desktop
+~~~
+
+The desktop enables GDELT, ACLED, NOAA, IODA, Bluesky, Telegram, the Daily
+Events Gemini path, on-demand media search, and the Windows player path by
+default. Credentials still control whether ACLED, Telegram, and Gemini
+generation are available. GDELT, NOAA, IODA, Bluesky, and the keyless media
+search legs are available without credentials.
+
+Live updates begin automatically. Set LES_ONLINE=0 or LES_ONLINE=false to
+start with polling paused; cached real data remains visible. The desktop never
+loads synthetic fixtures.
 
 ## Common commands
 
-```sh
-# Run the live-only desktop (GDELT + NOAA + IODA, and ACLED when credentialed)
-cargo run -p global-signal-desktop
-
-# Regenerate synthetic fixtures (deterministic; commit the result)
-cargo run -p source-fixtures --bin generate-fixtures
-
-# Quality gates (run after every change; CI runs the same three)
+~~~sh
+# Format, lint, and test the workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-```
 
-## Environment variables
+# Credentialed network paths against local mock servers
+cargo test -p source-acled --features live
+cargo test -p daily-digest --features live
+cargo test -p media-search --features live
+
+# Deterministic fixture maintenance
+cargo run -p source-fixtures --bin generate-fixtures
+
+# Dependency advisories and licenses
+cargo deny check
+~~~
+
+## Desktop environment variables
+
+The desktop loads .env during startup. Process environment variables take
+precedence; credentials and session files must never be committed.
 
 | Variable | Purpose |
 |---|---|
-| `RUST_LOG` | tracing filter, e.g. `RUST_LOG=global_signal_desktop=debug`. |
-| `WGPU_BACKEND` | Override the wgpu backend (`dx12`, `vulkan`, `gl`) if a driver misbehaves. |
-| `LES_DATA_DIR` | Override the desktop data directory. |
-| `LES_ONLINE` | Live updates default on; `0`/`false` starts with network polling paused. |
-| `LES_RETENTION_DAYS` | Events retention cap in days (overrides the saved setting; `0`/unset = keep everything). |
-| `LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` | Point the live loop at a local/mock server (testing; reproduces the network-down path). |
-| `ACLED_EMAIL` / `ACLED_PASSWORD` | myACLED OAuth credentials (M5, feature `acled-live`; ACLED retired API keys). Never committed — shell or gitignored `.env` only; see `.env.example`. |
-| `LES_ACLED_TOKEN_URL` / `LES_ACLED_ENDPOINT` | Point the ACLED adapter at a local/mock server (testing). |
-| `LES_ACLED_WINDOW` | Fixed `YYYY-MM-DD\|YYYY-MM-DD` fetch window (inclusive) replacing the rolling 14-day lookback — for date-restricted ACLED tiers (e.g. accounts limited to events older than 12 months). |
-| `LES_NOAA_ENDPOINT` | Point the NOAA alerts adapter at a local/mock server (testing). |
-| `LES_IODA_ENDPOINT` | Point the IODA outage-events adapter at a local/mock server (testing). IODA itself is keyless — no credential env vars needed. |
-| `LES_BLUESKY_ENDPOINT` | Pin the Jetstream WebSocket to one endpoint (e.g. a local mock) instead of rotating the public instances. Bluesky is keyless — no credential env vars. |
-| `LES_BLUESKY_WINDOW_SECS` | Chatter aggregation window, default 300. Only whole completed windows are ever published, so this also sets how long a burst takes to appear. |
-| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | MTProto app credentials from [my.telegram.org](https://my.telegram.org) for a dedicated account (feature `telegram-live`) — not a bot token. `TELEGRAM_API_HASH` is only read by the one-time `login_setup` example, never by the running source. Never committed; see `.env.example`. |
-| `LES_TELEGRAM_SESSION_FILE` | Path to the local JSON session file created by `cargo run -p source-telegram --features live --example login_setup`. Treat it like a credential — it holds a live login (gitignored). |
+| RUST_LOG | Tracing filter, for example global_signal_desktop=debug. |
+| WGPU_BACKEND | Override the wgpu backend (dx12, vulkan, or gl) when a driver misbehaves. |
+| LES_DATA_DIR | Override the desktop data directory. |
+| LES_ONLINE | Live updates default on; 0, false, or no starts with polling paused. |
+| LES_RETENTION_DAYS | Events retention cap in days. 0 or unset keeps all retained records. |
+| LES_GDELT_DOC_ENDPOINT / LES_GDELT_EVENTS_URL | Point GDELT requests at a local/mock endpoint. |
+| ACLED_EMAIL / ACLED_PASSWORD | Authorized myACLED OAuth credentials. ACLED no longer uses API keys. |
+| LES_ACLED_TOKEN_URL / LES_ACLED_ENDPOINT | Local/mock ACLED OAuth or data endpoint. |
+| LES_ACLED_WINDOW | Inclusive fixed window, YYYY-MM-DD\|YYYY-MM-DD, for date-restricted ACLED accounts. |
+| LES_NOAA_ENDPOINT | Local/mock NOAA alerts endpoint. |
+| LES_IODA_ENDPOINT | Local/mock IODA endpoint. IODA is keyless. |
+| LES_BLUESKY_ENDPOINT | Pin Bluesky Jetstream to a local/mock or chosen endpoint. |
+| LES_BLUESKY_WINDOW_SECS | Aggregate chatter window in seconds; default 300. Only completed windows are stored. |
+| TELEGRAM_API_ID / TELEGRAM_API_HASH | MTProto app credentials for a dedicated account. The hash is used only by the interactive session setup tool. |
+| LES_TELEGRAM_SESSION_FILE | Local JSON session generated by the Telegram login setup example. Treat it as a credential. |
+| GEMINI_API_KEY | Enables explicit Daily Events generation. No request is made until the user clicks Generate digest. |
+| LES_GEMINI_ENDPOINT | Local/mock Google Generative Language API endpoint override. |
 
-## Where data lives
+Create a Telegram session once before enabling the source:
 
-- Analytics DuckDB + settings SQLite: the per-user local data dir (for
-  example `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data` on Windows).
-- On startup, the desktop removes any legacy rows attributed to `fixtures`
-  and rebuilds its aggregates before showing data.
+~~~sh
+cargo run -p source-telegram --features live --example login_setup
+~~~
 
-## Dependency policy
+## Media research and playback
 
-- All shared dependency versions are pinned **once** in the workspace root
-  `Cargo.toml`. Member crates say `dep.workspace = true`.
-- eframe/egui and wgpu move in lockstep (eframe 0.35 = wgpu 29). egui
-  upgrades happen in one dedicated PR, never as a side effect.
-- `source-gdelt` (M3) uses **reqwest with rustls** (no OpenSSL/native-tls, so
-  CI stays clean on Windows + Linux), `zip`/`flate2` with the pure-Rust
-  miniz_oxide backend for the Events dumps, and `governor` for rate limiting.
+The Media page is enabled by the media-live feature and makes no background
+requests. A person selects a place, optional topic, and one of the bounded
+time windows; the app then looks for public video through GDELT, Bluesky, and
+the configured Telegram allowlist. Results are held only in the current UI
+session and are never written to DuckDB, logs, or a cache.
 
-## Build performance notes
+The Windows-only video-embed feature uses WebView2 through wry to render a
+provider's published embed page in the app. Linux/macOS and builds without the
+feature retain the result list and browser fallback but report honestly that
+they cannot embed playback. Do not extract stream URLs from a watch page.
 
-- `[profile.dev.package."*"] opt-level = 2` keeps epaint/geo math fast in dev
-  while workspace crates compile incrementally.
-- If cold builds hurt, install `sccache` and set `RUSTC_WRAPPER=sccache`.
+## Local data
 
-## Docker (M4+)
+- Analytics records and the Daily Events cache are stored in the per-user data
+  directory, for example
+  %LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data on Windows.
+- The storage actor owns the DuckDB connection. The settings database is a
+  separate local SQLite file.
+- On startup, the desktop removes legacy fixture rows and rebuilds derived
+  aggregates before rendering live data.
 
-Backend services (`services/api`, `services/workers`) are stubs until M4;
-`docker/` gains its compose file then. Docker on Windows means WSL2. The
-desktop app is always a native binary, never containerized.
+## Services
+
+The service stack is implemented and runs separately from the desktop:
+
+~~~sh
+docker compose up
+~~~
+
+Compose starts a worker that owns its DuckDB database and publishes Parquet
+snapshots, then an API on http://localhost:8080 that reads only those
+snapshots. The Compose worker starts with fixture data and GDELT; the optional
+worker source features are opt-in at build time. For a no-network smoke run,
+set LES_ONLINE=0 in the shell before invoking Compose.
+
+The worker binary does not load .env itself. For a manual service run, supply
+credentials and feature flags through the process/container environment; set
+LES_PUBLISH_DIR to the same directory for workers and api, and mount it
+read-only in api. The API also honors LES_API_BIND and, for a private
+authorized deployment only, LES_API_ALLOW_ACLED=1. Read
+[API.md](API.md) before enabling the latter.
+
+## Feature coverage
+
+CI tests each source feature by itself, the complete source union, and the
+desktop-only gemini-live, media-live, and video-embed features. When changing
+feature wiring, mirror the workflow's no-default-features posture:
+
+~~~sh
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+~~~
+
+The exact per-feature matrix and mock suites live in .github/workflows/ci.yml.
+
+## Dependency and build policy
+
+- Shared dependency versions are pinned once in the workspace Cargo.toml.
+  Member crates use workspace dependencies.
+- eframe/egui and wgpu move in lockstep. eframe 0.35 uses wgpu 29; do not
+  bump wgpu independently.
+- reqwest uses rustls, and the GDELT ZIP path uses the pure-Rust miniz_oxide
+  backend, keeping CI free of OpenSSL and system zlib requirements.
+- The development profile optimizes dependencies to keep map rendering and
+  geospatial math responsive while workspace crates retain fast incremental
+  builds. If cold builds are painful, use sccache through RUSTC_WRAPPER.

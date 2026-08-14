@@ -104,6 +104,11 @@ impl App {
                         "A model-written summary of one day of stored records, with media \
                          attention and event data kept in separate sections.",
                     );
+                ui.selectable_value(&mut page, Page::Media, "media")
+                    .on_hover_text(
+                        "Look up public video for one place and time window, and play it \
+                         in the app. Fetched only when you ask; nothing is stored.",
+                    );
                 self.set_page(page);
                 ui.separator();
 
@@ -129,7 +134,7 @@ impl App {
                     self.fetch_now();
                 }
                 self.source_status_label(ui);
-                if matches!(self.page, Page::DailyEvents) {
+                if matches!(self.page, Page::DailyEvents | Page::Media) {
                     return;
                 }
                 ui.separator();

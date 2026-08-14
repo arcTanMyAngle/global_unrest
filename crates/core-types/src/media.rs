@@ -121,7 +121,9 @@ pub fn embed_for(raw: &str) -> Option<Embed> {
         // vimeo.com/<numeric id> — only numeric, so /channels, /ondemand and
         // other section pages fall through to the browser instead of
         // producing a player URL for something that is not a video.
-        let id = segments.first().filter(|s| s.chars().all(|c| c.is_ascii_digit()))?;
+        let id = segments
+            .first()
+            .filter(|s| s.chars().all(|c| c.is_ascii_digit()))?;
         return Some(Embed::Page(format!(
             "https://player.vimeo.com/video/{id}?autoplay=1"
         )));
@@ -154,9 +156,7 @@ pub fn embed_for(raw: &str) -> Option<Embed> {
             .iter()
             .position(|seg| *seg == "video")
             .and_then(|i| segments.get(i + 1))?;
-        return Some(Embed::Page(format!(
-            "https://www.tiktok.com/embed/v2/{id}"
-        )));
+        return Some(Embed::Page(format!("https://www.tiktok.com/embed/v2/{id}")));
     }
     if host_matches(&host, "rumble.com") {
         // Rumble watch-page slugs do not map to an embed id without an API
@@ -301,6 +301,9 @@ mod tests {
         // Ordinary news articles stay ordinary news articles.
         assert_eq!(embed_for("https://news.example.org/story"), None);
         // Lookalike domains must not be treated as the real host.
-        assert_eq!(embed_for("https://youtube.com.attacker.example/watch?v=x"), None);
+        assert_eq!(
+            embed_for("https://youtube.com.attacker.example/watch?v=x"),
+            None
+        );
     }
 }

@@ -57,6 +57,10 @@ impl PlaybackRequest {
 /// not, and there is no bundled hls.js here, so an HLS file shows the
 /// `<video>` element's own error state rather than silently blank. The
 /// browser fallback stays reachable for exactly that case.
+///
+/// Only the real webview calls this, so builds without it would warn on an
+/// unused function; the test cfg keeps the escaping test running everywhere.
+#[cfg(any(test, all(target_os = "windows", feature = "video-embed")))]
 fn file_player_html(url: &str) -> String {
     // The URL is attribute-escaped rather than interpolated raw: it comes
     // from a third-party API response, and a `"` in it would otherwise break

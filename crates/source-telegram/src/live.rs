@@ -21,11 +21,14 @@ use core_types::{
     SourceId, TimeWindow,
 };
 use grammers_client::Client;
+use grammers_client::media::Media;
+use grammers_client::tl::enums::MessagesFilter;
 use grammers_mtsender::SenderPool;
+use media_search::{MediaHit, MediaQuery};
 use tokio::sync::OnceCell;
 
 use crate::file_session::FileSession;
-use crate::{ALLOWED_CHANNELS, ChannelSweep};
+use crate::{ALLOWED_CHANNELS, ChannelSweep, media};
 
 /// Don't ingest a channel's entire history the first time it's swept — just
 /// the most recent handful, enough to prime the per-channel high-water mark.
@@ -60,6 +63,9 @@ pub struct TelegramSource {
     /// behavior ACLED relies on) — safe, just occasionally redundant work,
     /// never double counted.
     last_seen: Mutex<HashMap<String, i32>>,
+    /// Open the session file without writing it back. See
+    /// [`TelegramSource::read_only`].
+    read_only: bool,
 }
 
 impl TelegramSource {
@@ -97,7 +103,22 @@ impl TelegramSource {
             conn: OnceCell::new(),
             accumulator: Mutex::new(accumulator),
             last_seen: Mutex::new(HashMap::new()),
+            read_only: false,
         }))
+    }
+
+    /// Use the login on disk without writing back to it.
+    ///
+    /// For the **second** client on one session file — the desktop runs this
+    /// source twice: once polling chatter, once answering
+    /// [`TelegramSource::search_media`]. Two writers would take turns
+    /// overwriting each other's cached peers and pay for it in
+    /// `resolve_username` flood waits, so the media instance reads only. See
+    /// [`FileSession::load_read_only`] for why that costs nothing.
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
     }
 
     /// Open (or reuse) the MTProto connection. On failure the cell stays
@@ -106,7 +127,12 @@ impl TelegramSource {
         let conn =
             self.conn
                 .get_or_try_init(|| async {
-                    let session = FileSession::load(&self.session_path).map_err(|e| {
+                    let session = if self.read_only {
+                        FileSession::load_read_only(&self.session_path)
+                    } else {
+                        FileSession::load(&self.session_path)
+                    }
+                    .map_err(|e| {
                         SourceError::Other(format!(
                             "opening telegram session file `{}`: {e}",
                             self.session_path
@@ -212,6 +238,114 @@ impl TelegramSource {
             scanned = sweep.scanned(),
             "telegram channel swept"
         );
+    }
+
+    /// On-demand video lookup across the same allowlist — the user-directed
+    /// exception to this crate's aggregate-only rule (see [`crate::media`]).
+    ///
+    /// **No cadence.** This runs only when a person presses search for a named
+    /// place; nothing here is scheduled, and nothing it returns is stored.
+    ///
+    /// Scope is deliberately narrow: uploaded video only
+    /// (`InputMessagesFilterVideo`). Posts that merely *link* a video host are
+    /// left to the GDELT and Bluesky legs in `media-search`, which already
+    /// cover exactly that and cover it across far more of the web than eight
+    /// channels could.
+    ///
+    /// One dead channel must not empty the panel, so per-channel failures are
+    /// logged and skipped; the whole search fails only when every channel did.
+    pub async fn search_media(&self, query: &MediaQuery) -> Result<Vec<MediaHit>, SourceError> {
+        if !query.is_valid() {
+            return Ok(Vec::new());
+        }
+        let Some(text) = media::query_text(&query.place, &query.topic) else {
+            return Ok(Vec::new());
+        };
+
+        let client = self.ensure_conn().await?;
+        let mut hits = Vec::new();
+        let mut failed = 0usize;
+        for name in ALLOWED_CHANNELS {
+            match self.search_channel(client, name, &text, query).await {
+                Ok(found) => hits.extend(found),
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(channel = name, error = %e, "telegram media search failed");
+                }
+            }
+        }
+        if failed == ALLOWED_CHANNELS.len() {
+            return Err(SourceError::Other(
+                "every telegram channel search failed — the session may have expired".to_string(),
+            ));
+        }
+
+        let mut hits = media_search::merge(hits);
+        hits.truncate(query.limit);
+        Ok(hits)
+    }
+
+    /// Search one channel for video matching `text` inside the query window.
+    ///
+    /// Only the message id, its own caption, and its date are read — never
+    /// `sender()`. Channel posts can carry a signing author, and a named
+    /// individual is not something this project surfaces.
+    async fn search_channel(
+        &self,
+        client: &Client,
+        name: &str,
+        text: &str,
+        query: &MediaQuery,
+    ) -> Result<Vec<MediaHit>, SourceError> {
+        let peer = client
+            .resolve_username(name)
+            .await
+            .map_err(|e| SourceError::Other(format!("resolving @{name}: {e}")))?;
+        let Some(peer) = peer else {
+            return Ok(Vec::new());
+        };
+        let peer_ref = peer
+            .to_ref()
+            .await
+            .map_err(|e| SourceError::Other(format!("addressing @{name}: {e}")))?;
+        let Some(peer_ref) = peer_ref else {
+            return Ok(Vec::new());
+        };
+
+        // `min_date`/`max_date` want a fixed-offset timestamp; the query
+        // carries UTC, so this is a representation change, not a shift.
+        let mut iter = client
+            .search_messages(peer_ref)
+            .query(text)
+            .filter(MessagesFilter::InputMessagesFilterVideo)
+            .min_date(&query.start.fixed_offset())
+            .max_date(&query.end.fixed_offset())
+            .limit(media::PER_CHANNEL_LIMIT);
+
+        let mut hits = Vec::new();
+        loop {
+            let msg = match iter.next().await {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(e) => return Err(SourceError::Other(format!("searching @{name}: {e}"))),
+            };
+            // The server-side filter counts some non-playable documents as
+            // video, so the attachment is checked again before a row promises
+            // the reader something to watch.
+            let playable = match msg.media() {
+                Some(Media::Document(doc)) => {
+                    media::is_video_attachment(doc.mime_type(), doc.name())
+                }
+                _ => false,
+            };
+            if !playable {
+                continue;
+            }
+            if let Some(hit) = media::hit(name, msg.id(), msg.text(), msg.date()) {
+                hits.push(hit);
+            }
+        }
+        Ok(hits)
     }
 }
 

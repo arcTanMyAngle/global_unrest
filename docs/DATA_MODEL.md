@@ -7,7 +7,7 @@ The single normalized record every source adapter produces.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `u64` | Deterministic FNV-1a hash of `(source, source_event_id)` — re-ingesting the same record is idempotent. |
-| `source` | `SourceId` | `Fixtures` \| `Gdelt` \| `Acled` \| `Noaa` \| `Ioda`. |
+| `source` | `SourceId` | `Fixtures` \| `Gdelt` \| `Acled` \| `Noaa` \| `Ioda` \| `Bluesky` \| `Telegram`. |
 | `source_event_id` | `String` | Source-native identifier. |
 | `kind` | `EventKind` | `NewsAttention` \| `Protest` \| `Conflict` \| `Disruption` \| `Other`. |
 | `themes` | `Vec<String>` | Coarse topic tags from the source. |
@@ -43,6 +43,12 @@ Sources often geocode to country/admin centroids. Rendering a
 middle of a country. The contract, enforced in the renderer: **only `City`
 and `Exact` records render as point markers; `Country` and `Admin1` records
 contribute to region-level shading only.**
+
+### Current source identifiers
+
+The current SourceId enum includes Fixtures, Gdelt, Acled, Noaa, Ioda,
+Bluesky, and Telegram. Fixtures are test/service-smoke input only; the
+desktop removes legacy fixture rows and never loads them at runtime.
 
 ## GDELT normalization (M3)
 
@@ -228,6 +234,17 @@ parents via `geo_utils::cell_parent` at display time). Carries:
 - `ingest_log` — one row per failed/refused record: source, reason, raw
   excerpt, timestamp. Normalization failures are never silently dropped.
 
+## Daily Events cache
+
+Migration 0003 adds the local daily_digest cache for the Daily Events page.
+It is keyed by a UTC calendar day and records the model, generation time,
+separate media-attention and event-data prose, and the two record counts the
+prose was generated from. An explicit regeneration replaces that day's row.
+There is intentionally no combined-summary column.
+
+The cache is not part of the worker-to-API snapshot contract. It belongs to
+the desktop's local analytics store and is never exposed by services/api.
+
 ## Parquet session export (M4 handoff layout)
 
 `StorageHandle::export_parquet` (UI: "export parquet") writes a session as:
@@ -258,7 +275,7 @@ DuckDB is single-writer per file, so Parquet partitions, never a shared
 `services/api` reads only these snapshots (docs/API.md); older versions are
 pruned past `keep_last`.
 
-## SQLite (settings.db)
+## SQLite (settings.sqlite)
 
 App settings only: window geometry, last filters, data paths. Never analytics
 data.

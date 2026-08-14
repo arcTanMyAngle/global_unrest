@@ -93,6 +93,9 @@ analytics reference bitwise and that the fixtures' scripted Paris spike
 
 ## Milestone status
 
+M2 scoring work is complete. The labels below record when each scoring layer
+landed; they are not a statement that M2 is the current project milestone.
+
 - **M1**: raw counts only — done.
-- **M2 (current)**: full components, baselines, spike detection, cold-start
+- **M2**: full components, baselines, spike detection, cold-start
   badges, window composition — **implemented as described above**.

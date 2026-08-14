@@ -42,6 +42,9 @@ const TEMP_SUFFIX: &str = "-tmp";
 pub struct FileSession {
     path: PathBuf,
     data: Mutex<SessionData>,
+    /// When set, state changes stay in memory and the file is never written.
+    /// See [`FileSession::load_read_only`].
+    read_only: bool,
 }
 
 #[derive(Debug)]
@@ -72,7 +75,27 @@ impl FileSession {
     /// logged in would send them back through an SMS login without saying
     /// why.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, FileSessionError> {
-        let path = path.into();
+        Self::open(path.into(), false)
+    }
+
+    /// Load the session at `path` but never write it back.
+    ///
+    /// For a **second** client sharing one login — the desktop's on-demand
+    /// media lookup runs alongside the ingest poller, and both would otherwise
+    /// hold the same file. Each [`FileSession::save`] writes the *whole* state,
+    /// so two writers take turns overwriting each other's peer cache; the
+    /// dropped entries come back as extra `resolve_username` calls, which is
+    /// exactly what Telegram answers with a flood wait. Making the reader
+    /// read-only leaves one writer and removes the race.
+    ///
+    /// Nothing is lost by it: the auth key and home DC are already on disk
+    /// (login wrote them), and neither client runs the update loop, so the only
+    /// state this drops is a peer cache that the writer keeps anyway.
+    pub fn load_read_only(path: impl Into<PathBuf>) -> Result<Self, FileSessionError> {
+        Self::open(path.into(), true)
+    }
+
+    fn open(path: PathBuf, read_only: bool) -> Result<Self, FileSessionError> {
         let data = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str::<PersistedSession>(&text)
                 .map_err(FileSessionError::Format)?
@@ -83,6 +106,7 @@ impl FileSession {
         Ok(Self {
             path,
             data: Mutex::new(data),
+            read_only,
         })
     }
 
@@ -97,6 +121,9 @@ impl FileSession {
     /// interrupted write leaves the previous (still valid) session intact
     /// rather than a truncated file that `load` would reject.
     fn save(&self, data: &SessionData) -> Result<(), FileSessionError> {
+        if self.read_only {
+            return Ok(());
+        }
         let json = serde_json::to_string(&PersistedSession::from(data))
             .map_err(FileSessionError::Format)?;
         let temp = temp_path(&self.path);
@@ -390,6 +417,22 @@ mod tests {
             FileSession::load(&corrupt),
             Err(FileSessionError::Format(_))
         ));
+    }
+
+    /// A read-only session still serves what login wrote, and still tracks
+    /// changes in memory — it just never touches the file the writer owns.
+    #[tokio::test]
+    async fn a_read_only_session_reads_the_file_but_never_writes_it() {
+        let path = temp_dir().join("read-only.session");
+        let writer = FileSession::load(&path).unwrap();
+        writer.set_home_dc_id(HOME_DC).await.unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        let reader = FileSession::load_read_only(&path).unwrap();
+        assert_eq!(reader.home_dc_id().unwrap(), HOME_DC);
+        reader.set_home_dc_id(OTHER_DC).await.unwrap();
+        assert_eq!(reader.home_dc_id().unwrap(), OTHER_DC);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }
 
     #[test]

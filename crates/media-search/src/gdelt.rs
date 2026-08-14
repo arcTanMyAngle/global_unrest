@@ -172,7 +172,10 @@ mod tests {
     fn the_or_group_holds_only_bare_domain_terms() {
         let expr = query_expression("Colombia", "earthquake").unwrap();
         assert!(expr.starts_with("colombia earthquake ("), "{expr}");
-        assert!(expr.contains("domain:youtube.com OR domain:youtu.be"), "{expr}");
+        assert!(
+            expr.contains("domain:youtube.com OR domain:youtu.be"),
+            "{expr}"
+        );
         // The rejection-causing shape: no quoted phrase anywhere.
         assert!(!expr.contains('"'), "{expr}");
         // And user text cannot inject its own parentheses.
