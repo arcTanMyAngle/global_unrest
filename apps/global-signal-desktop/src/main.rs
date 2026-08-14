@@ -16,6 +16,7 @@ mod panels;
 mod sparkline;
 mod style;
 mod timeline_strip;
+mod video;
 
 use tracing_subscriber::EnvFilter;
 

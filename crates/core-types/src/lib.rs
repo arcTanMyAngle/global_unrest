@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 mod media;
-pub use media::is_video_url;
+pub use media::{Embed, embed_for, is_video_url};
 
 /// Canonical H3 resolution for region keys. Parents are derived, never stored.
 pub const H3_RESOLUTION: u8 = 3;

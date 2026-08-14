@@ -37,6 +37,12 @@ telegram-live = ["dep:source-telegram", "source-telegram/live"]
 # The feature only adds the network half, so a build without it still shows
 # every previously cached digest.
 gemini-live = ["daily-digest/live"]
+# In-app video playback: an embedded platform webview parented into the
+# eframe window (see src/video.rs). Windows-only in practice — `wry` is
+# declared under `[target.'cfg(windows)'.dependencies]` below, so enabling
+# this feature on Linux/macOS is a no-op that compiles the stub player.
+# That is deliberate: CI's ubuntu leg has no webkit2gtk-4.1 dev packages.
+video-embed = ["dep:wry"]
 
 [dependencies]
 analytics.workspace = true
@@ -63,6 +69,14 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+
+# wry only builds cleanly where a system webview is a given. On Windows that
+# is WebView2 (preinstalled on Win11); on Linux it would need webkit2gtk-4.1
+# dev packages, which CI's ubuntu leg has not got — hence the target gate
+# rather than a plain optional dependency. All call sites are
+# `#[cfg(all(target_os = "windows", feature = "video-embed"))]`.
+[target.'cfg(windows)'.dependencies]
+wry = { workspace = true, optional = true }
 
 [dev-dependencies]
 source-fixtures.workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "media-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# The network half. Everything else — query construction, response parsing,
+# ranking, dedup — is pure and tested offline, same split as the source-*
+# crates.
+live = ["dep:reqwest"]
+
+[dependencies]
+chrono.workspace = true
+core-types.workspace = true
+reqwest = { workspace = true, optional = true }
+serde_json.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

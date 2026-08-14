@@ -122,6 +122,17 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# In-app video playback (desktop only, feature `video-embed`). This is the
+# only way to play a *page* URL — YouTube/Vimeo/Rumble/Bluesky all serve
+# video through a player page, and extracting the underlying stream would be
+# scraping. wry parents a platform webview (WebView2 on Windows, preinstalled
+# on Win11) as a child of the eframe window; see apps/global-signal-desktop/
+# src/video.rs for the airspace caveat. Declared here for the pin only — the
+# member declares it under `[target.'cfg(windows)'.dependencies]`, because on
+# Linux wry needs webkit2gtk-4.1 dev packages that CI's ubuntu leg has not
+# got. `default-features = false` drops the custom-protocol/drag-drop/devtools
+# extras; we only ever call `WebViewBuilder::build_as_child` + `load_url`.
+wry = { version = "0.55", default-features = false }
 # M7 services/api hardening. tower supplies ServiceBuilder ("util") and the
 # concurrency cap ("limit"); tower-http supplies request tracing, CORS,
 # response compression, and a timeout layer that needs no extra crypto/TLS
