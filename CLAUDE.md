@@ -245,8 +245,14 @@ Cargo workspace, edition 2024, all dep versions pinned in the **root**
   bad key is an ordinary **400 `INVALID_ARGUMENT`**, not a 401/403 — the
   credential hint comes from `error.details[].reason == "API_KEY_INVALID"`.
   429s usually carry no `Retry-After`; the delay is a `RetryInfo` detail
-  (`"41s"`). Thinking is on by default and `thinkingLevel: "low"` measurably
-  zeroes `thoughtsTokenCount`; thought parts are flagged `thought: true` while
+  (`"41s"`) — and read the `quotaId`, because the free tier's request cap is
+  **per model per project per day** (20): a day of debugging exhausts the one
+  model in `MODEL` and leaves every sibling id untouched, so a 429 is a reason
+  to check `quotaValue` before concluding the key or project is spent.
+  Thinking is on by default; `thinkingLevel: "low"` holds
+  `thoughtsTokenCount` to double digits (it is a floor, not an off switch) and
+  must be nested under `generationConfig.thinkingConfig` — at the top level of
+  `generationConfig` it 400s as an unknown field. Thought parts are flagged `thought: true` while
   the *answer* part carries a `thoughtSignature`, so `parse_response` filters
   on the flag, not on some thinking-shaped field. Blocks arrive as **HTTP
   200** in two shapes: `promptFeedback.blockReason` with no candidates, or a

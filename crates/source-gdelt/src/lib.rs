@@ -33,15 +33,25 @@ pub const EVENTS_LASTUPDATE_URL: &str = "http://data.gdeltproject.org/gdeltv2/la
 
 /// A broad civic-attention default query. Callers can override it; theme
 /// filters passed to [`SignalSource::fetch`] refine it further. Includes
-/// drug-policy unrest/trafficking/overdose-crisis coverage alongside the
-/// general civic terms — a topical widening of the query, not a new
-/// `EventKind`: DOC results are always `EventKind::NewsAttention`, so this
-/// is exactly the "media attention" half of the attention/event-data split
-/// (CLAUDE.md), never a claim about ground-truth events. Multi-word terms
-/// are quoted per the DOC 2.0 exact-phrase syntax; bare words are an
-/// implicit OR-alternative, same as the pre-existing terms.
+/// drug-policy trafficking/overdose coverage alongside the general civic
+/// terms — a topical widening of the query, not a new `EventKind`: DOC
+/// results are always `EventKind::NewsAttention`, so this is exactly the
+/// "media attention" half of the attention/event-data split (CLAUDE.md),
+/// never a claim about ground-truth events.
+///
+/// **Every term must be a bare word.** DOC 2.0 documents `"exact phrase"`
+/// syntax, and it does work in a query built only of phrases — but a quoted
+/// phrase used as an alternative *inside* a parenthesized `OR` group is
+/// rejected, and the rejection arrives as **HTTP 200 with a plain-text body**
+/// ("One or more of your parenthetical clauses had an error in it."), not as
+/// an error status. An earlier revision carried `"drug trafficking"` and
+/// `"overdose crisis"` here and silently returned zero articles on every
+/// call for as long as it stood: the whole media-attention half of the
+/// dashboard was empty while the Events path kept working, so the app looked
+/// merely quiet rather than broken. Probe any change to this constant against
+/// the live endpoint — the documented syntax is not the accepted syntax.
 pub const DEFAULT_QUERY: &str = "(protest OR unrest OR flood OR earthquake OR wildfire OR \
-     election OR strike OR \"drug trafficking\" OR narcotics OR \"overdose crisis\")";
+     election OR strike OR narcotics OR trafficking OR overdose)";
 
 /// Live GDELT adapter over the DOC 2.0 JSON API.
 ///
@@ -115,7 +125,7 @@ impl GdeltSource {
         let txt = lastupdate
             .text()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
         let refs = events::parse_lastupdate(&txt)?;
         let url = events::export_url(&refs)
             .ok_or_else(|| SourceError::Other("lastupdate.txt has no export dump".into()))?;
@@ -125,7 +135,7 @@ impl GdeltSource {
             .await?
             .bytes()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
         let csv = events::unzip_csv(&bytes)?;
 
         let out: Vec<RawRecord> = events::rows(&csv)
@@ -144,7 +154,7 @@ impl GdeltSource {
             .get(url)
             .send()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after_secs = resp
                 .headers()
@@ -154,7 +164,7 @@ impl GdeltSource {
             return Err(SourceError::RateLimited { retry_after_secs });
         }
         resp.error_for_status()
-            .map_err(|e| SourceError::Http(e.to_string()))
+            .map_err(|e| SourceError::Http(http_detail(&e)))
     }
 
     /// The DOC query this fetch will issue for `window`, incorporating any
@@ -174,6 +184,25 @@ impl GdeltSource {
             themes,
         }
     }
+}
+
+/// Flatten a `reqwest::Error` and its cause chain into one string.
+///
+/// `reqwest::Error`'s `Display` is only the outermost layer — "error sending
+/// request" — and the cause that tells you *what* went wrong (DNS failure,
+/// TLS handshake, connect timeout, connection reset) lives in `source()`.
+/// This string is the whole of what an `ingest_log` row and a status badge
+/// get to say, so drop nothing.
+fn http_detail(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    use std::fmt::Write as _;
+    let mut s = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let _ = write!(s, ": {c}");
+        cause = c.source();
+    }
+    s
 }
 
 /// GDELT theme-filter query: `(theme:PROTEST OR theme:FLOOD)`, upper-cased as
@@ -205,7 +234,7 @@ impl SignalSource for GdeltSource {
             .await?
             .text()
             .await
-            .map_err(|e| SourceError::Http(e.to_string()))?;
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
 
         let mut out = Vec::new();
         for mut article in doc::articles(&body)? {

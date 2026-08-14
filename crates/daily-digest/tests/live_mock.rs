@@ -125,6 +125,7 @@ fn facts() -> DigestFacts {
                 source: "ioda".into(),
                 label: Some("national outage".into()),
                 severity: Some(0.75),
+                occurrences: 3,
             }],
             counts_only_sources: vec![("acled".into(), 16)],
         },

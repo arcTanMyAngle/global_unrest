@@ -14,7 +14,7 @@ use std::sync::mpsc;
 
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use core_types::{
-    GeoTemporalEvent, IngestFailure, SignalSource, SourceError, SourceFilters, TimeWindow,
+    GeoTemporalEvent, IngestFailure, SignalSource, SourceError, SourceFilters, SourceId, TimeWindow,
 };
 use source_gdelt::{GdeltSource, sched};
 use tokio::sync::mpsc as tokio_mpsc;
@@ -732,7 +732,14 @@ async fn fetch_cycle(
             events.extend(e);
             failures.extend(f);
         }
-        Err(e) => doc_err = Some(e),
+        Err(e) => {
+            failures.push(fetch_failure(
+                "doc",
+                &e,
+                gdelt.doc_query(window, &filters).query,
+            ));
+            doc_err = Some(e);
+        }
     }
     match gdelt.fetch_events().await {
         Ok(raws) => {
@@ -740,7 +747,14 @@ async fn fetch_cycle(
             events.extend(e);
             failures.extend(f);
         }
-        Err(e) => events_err = Some(e),
+        Err(e) => {
+            failures.push(fetch_failure(
+                "events",
+                &e,
+                source_gdelt::EVENTS_LASTUPDATE_URL.to_owned(),
+            ));
+            events_err = Some(e);
+        }
     }
 
     let both_failed = doc_err.is_some() && events_err.is_some();
@@ -793,6 +807,26 @@ async fn fetch_cycle(
     let _ = tx.send(IngestMsg::Status(status.clone()));
     wake();
     delay
+}
+
+/// Record a whole-fetch failure as an [`IngestFailure`] so it reaches
+/// `ingest_log`.
+///
+/// A failure of *one* GDELT half is not `degraded` — the cycle still succeeds
+/// on the other half — so without this its only trace is a `partial:` fragment
+/// inside a `SourceStatus.detail` that the next cycle overwrites. A malformed
+/// DOC query emptied the entire media-attention half of the dashboard for a
+/// whole session that way, while the app reported itself online. There is no
+/// `RawRecord` to attribute, so the excerpt carries the request instead (the
+/// DOC query expression, or the Events pointer URL) — the thing you need to
+/// know to reproduce it. Volume is bounded by the scheduler's backoff.
+fn fetch_failure(half: &str, err: &SourceError, request: String) -> IngestFailure {
+    IngestFailure {
+        source: SourceId::Gdelt,
+        reason: format!("{half} fetch failed: {err}"),
+        raw_excerpt: request,
+        occurred_at: Utc::now(),
+    }
 }
 
 /// Choose which error drives backoff: a `RateLimited` (so its `Retry-After` is

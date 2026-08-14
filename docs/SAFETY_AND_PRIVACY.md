@@ -108,10 +108,14 @@ no requests.
 - **What is sent**: one request per generated day, containing the day's
   aggregate counts (records, articles, distinct outlet domains, per-country
   totals) plus a bounded sample of row-level fields — headline titles and
-  outlet domains, event kind/source/label/severity — drawn only from GDELT,
-  NOAA, and IODA. All of it is public metadata this project is permitted to
-  republish, and all of it is capped (`MAX_PLACES`, `MAX_HEADLINES`,
-  `MAX_NOTABLE`) so the request cannot grow into a bulk export.
+  outlet domains, event kind/source/label/severity, and how many rows each
+  distinct event label stood for — drawn only from GDELT, NOAA, and IODA.
+  That last field (`EventFact::occurrences`) is a count of collapsed
+  duplicates, not a new kind of content: identical rows are grouped so one
+  repeated alert name cannot consume the whole sample. All of it is public
+  metadata this project is permitted to republish, and all of it is capped
+  (`MAX_PLACES`, `MAX_HEADLINES`, `MAX_NOTABLE`) so the request cannot grow
+  into a bulk export.
 - **What is never sent**: article bodies (never stored in the first place),
   ACLED rows, and anything person-level. The `DigestFacts` type has no field
   that can carry an author, handle, user id, or post/message text; the

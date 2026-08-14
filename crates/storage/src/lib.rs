@@ -1978,41 +1978,91 @@ fn digest_events(conn: &Connection, window: EpochWindow) -> Result<EventFacts, S
         }
     }
 
-    // Most severe first: an unranked sample of a busy day tells the model
-    // nothing about which events mattered.
+    // Rank by what the model can actually *name*, then by severity — and let
+    // no one dataset own the sample.
+    //
+    // A flat `ORDER BY severity DESC` reads as neutral and is not: severity is
+    // only comparable within a source. GDELT Events rows all land at 1.0 and
+    // carry no label, so on a real day they took every slot and the model was
+    // handed forty anonymous rows — which is why the event prose could only
+    // recite totals. Labelled rows sort first, identical labels collapse (see
+    // `EventFact::occurrences`), and the round-robin below keeps a source with
+    // thousands of rows from crowding out one with nine.
     let mut notable = Vec::new();
     {
         let mut stmt = conn.prepare(&format!(
-            "SELECT coalesce(country_iso, '???'), kind, source, headline, severity
+            "SELECT coalesce(country_iso, '???'), kind, source, headline,
+                    max(severity), count(*)
              FROM events {WHERE}
-             ORDER BY severity DESC NULLS LAST, ts_epoch_s DESC
+             GROUP BY 1, 2, 3, 4
+             ORDER BY (headline IS NOT NULL) DESC,
+                      max(severity) DESC NULLS LAST,
+                      count(*) DESC
              LIMIT ?"
         ))?;
-        let rows = stmt.query_map(params![window.0, window.1, (MAX_NOTABLE * 4) as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<f32>>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![window.0, window.1, (MAX_NOTABLE * 20) as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<f32>>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        )?;
+        // Grouped, in rank order, per source. Withheld sources are dropped here
+        // and not before: `row_level_permitted` stays the single gate.
+        let mut per_source: Vec<(String, Vec<EventFact>)> = Vec::new();
         for row in rows {
-            if notable.len() >= MAX_NOTABLE {
-                break;
-            }
-            let (country_iso, kind, source, headline, severity) = row?;
+            let (country_iso, kind, source, headline, severity, n) = row?;
             if !row_level_permitted(parse_source(&source)?) {
                 continue;
             }
-            notable.push(EventFact {
+            let fact = EventFact {
                 country_iso,
                 kind,
-                source,
+                source: source.clone(),
                 label: headline,
                 severity,
-            });
+                occurrences: n.max(1) as u64,
+            };
+            match per_source.iter_mut().find(|(s, _)| *s == source) {
+                Some((_, queue)) => queue.push(fact),
+                None => per_source.push((source, vec![fact])),
+            }
         }
+        let mut cursor = 0usize;
+        while notable.len() < MAX_NOTABLE {
+            let before = notable.len();
+            for (_, queue) in &per_source {
+                if notable.len() >= MAX_NOTABLE {
+                    break;
+                }
+                if let Some(fact) = queue.get(cursor) {
+                    notable.push(fact.clone());
+                }
+            }
+            if notable.len() == before {
+                break;
+            }
+            cursor += 1;
+        }
+        // Round-robin picks *which* entries survive; this puts the survivors
+        // back in a rank order the prompt can read top-down.
+        notable.sort_by(|a, b| {
+            b.label
+                .is_some()
+                .cmp(&a.label.is_some())
+                .then_with(|| {
+                    b.severity
+                        .unwrap_or(f32::MIN)
+                        .total_cmp(&a.severity.unwrap_or(f32::MIN))
+                })
+                .then_with(|| b.occurrences.cmp(&a.occurrences))
+        });
     }
 
     Ok(EventFacts {
@@ -2956,6 +3006,63 @@ mod tests {
         let rendered = daily_digest::render_facts(&facts);
         assert!(!rendered.contains("acled row text"), "{rendered}");
         assert!(rendered.contains("acled=2"), "{rendered}");
+    }
+
+    /// The failure this ranking exists to prevent: a source with thousands of
+    /// unlabelled rows at a saturated severity took every notable slot, and the
+    /// digest was handed nothing it could name.
+    #[test]
+    fn digest_notable_prefers_named_rows_and_collapses_repeats() {
+        let store = open_mem();
+        let mut events = Vec::new();
+        // 60 unlabelled GDELT event rows, all at the top of the severity scale.
+        for seq in 0..60u32 {
+            let mut e = from_source(
+                sample_event(seq, EventKind::Protest, 3, 100),
+                SourceId::Gdelt,
+                seq,
+            );
+            e.headline = None;
+            e.severity = Some(1.0);
+            events.push(e);
+        }
+        // Six NOAA alerts, lower severity, two labels repeated three times each.
+        for seq in 0..6u32 {
+            let mut e = noaa_alert(1000 + seq, 5, 200, Some(0.5));
+            e.headline = Some(if seq < 3 {
+                "Flood Warning".into()
+            } else {
+                "Winter Storm Warning".into()
+            });
+            events.push(e);
+        }
+        store.ingest(events, vec![]).wait().unwrap();
+
+        let facts = store
+            .digest_facts(DayKey::parse(DIGEST_DAY).unwrap())
+            .wait()
+            .unwrap();
+        let notable = &facts.events.notable;
+
+        assert!(notable.len() <= MAX_NOTABLE);
+        // Both named alerts survive the flood of higher-severity anonymous rows…
+        let flood = notable
+            .iter()
+            .find(|e| e.label.as_deref() == Some("Flood Warning"))
+            .expect("named alert crowded out by unlabelled rows");
+        assert_eq!(flood.occurrences, 3, "repeats must collapse into a count");
+        assert!(
+            notable
+                .iter()
+                .any(|e| e.label.as_deref() == Some("Winter Storm Warning"))
+        );
+        // …and they sort ahead of the unlabelled rows, which are still present.
+        assert!(notable[0].label.is_some());
+        let gdelt = notable
+            .iter()
+            .find(|e| e.source == "gdelt")
+            .expect("the busy source is dropped entirely");
+        assert_eq!(gdelt.occurrences, 60);
     }
 
     #[test]

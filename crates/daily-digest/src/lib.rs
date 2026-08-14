@@ -43,14 +43,22 @@ pub const API_KEY_ENV: &str = "GEMINI_API_KEY";
 /// long-familiar `gemini-2.5-flash`, which now returns 404 "no longer
 /// available to new users" — a model id here has a shelf life, and a 404 on
 /// generate is the symptom to look for first.
-pub const MODEL: &str = "gemini-3.7-flash";
+///
+/// The free tier's request cap is *per model per project per day* (20, quota
+/// id `GenerateRequestsPerDayPerProjectPerModel-FreeTier`), so a day spent
+/// debugging against one model exhausts that model and no other. Switching
+/// this id is therefore a real workaround for a 429, not a superstition —
+/// and a 429 here does not mean the key or the project is out of budget.
+pub const MODEL: &str = "gemini-3.6-flash";
 /// Caps thinking *and* response text together. A digest is two short
 /// sections; the headroom is for thinking.
 pub const MAX_TOKENS: u32 = 4_096;
 /// Writing two short paragraphs from pre-aggregated counts is not a reasoning
-/// task. `low` measurably zeroes `thoughtsTokenCount` on this model, which
-/// matters when the whole point of this provider is staying inside a free
-/// quota.
+/// task, and thinking tokens count against [`MAX_TOKENS`] alongside the
+/// answer. `low` holds `thoughtsTokenCount` to double digits here; it is a
+/// floor, not an off switch, so the headroom in `MAX_TOKENS` still matters.
+/// It must be sent nested under `thinkingConfig` — at the top level of
+/// `generationConfig` it is an unknown field and 400s.
 pub const THINKING_LEVEL: &str = "low";
 
 /// Full `generateContent` URL for [`MODEL`] under `base`.
@@ -141,6 +149,12 @@ pub struct HeadlineFact {
 
 /// One discrete event, reduced to the structural fields the map already
 /// shows. `label` is the source's own event label, not a narrative.
+///
+/// A day repeats the same label constantly — a flood warning is reissued for
+/// every affected zone — so identical `(country, kind, source, label)` rows
+/// are collapsed into one entry and `occurrences` carries how many there
+/// were. Forty repetitions of "Flood Warning" is a count wearing a name, and
+/// it spends the whole sample saying one thing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventFact {
     pub country_iso: String,
@@ -148,6 +162,8 @@ pub struct EventFact {
     pub source: String,
     pub label: Option<String>,
     pub severity: Option<f32>,
+    /// Rows collapsed into this entry; at least 1.
+    pub occurrences: u64,
 }
 
 /// The media-attention half of a day. Counts of *coverage*, not of events.
@@ -268,18 +284,23 @@ pub fn output_schema() -> Value {
         "properties": {
             "media_attention": {
                 "type": "string",
-                "description": "2-5 sentences on what the world's news coverage \
+                "description": "4-8 sentences on what the world's news coverage \
                                 concentrated on this day, in coverage terms only \
                                 (articles, outlets, where coverage clustered). \
-                                Never assert that an event happened on the strength \
-                                of coverage alone."
+                                Name the countries, outlet domains, and headline \
+                                subjects you were given rather than restating \
+                                totals. Never assert that an event happened on the \
+                                strength of coverage alone."
             },
             "event_data": {
                 "type": "string",
-                "description": "2-5 sentences on the discrete events recorded this \
+                "description": "4-8 sentences on the discrete events recorded this \
                                 day by the event datasets and monitors, in event \
                                 terms only (counts by kind, where, which dataset). \
-                                Never use coverage volume as evidence of an event."
+                                Name the individual alerts, outages, and other \
+                                labelled rows you were given, with their severities, \
+                                rather than only their totals. Never use coverage \
+                                volume as evidence of an event."
             }
         },
         "required": ["media_attention", "event_data"],
@@ -307,8 +328,15 @@ outcomes from your own knowledge, and do not speculate about what the numbers \
 imply. If the day is thin, say it is thin.
 4. Name places and datasets. Never name or describe individual people, and \
 never characterise the users, authors, or members of any platform.
-5. Plain declarative prose, no headings, no bullet lists, no markdown. Cite \
-the counts you are describing.";
+5. Prefer named specifics to bare aggregates. The facts include labelled rows \
+as well as totals: weather-alert names, internet-outage labels, headline text \
+and outlet domains, each with its country and severity. Use them. Say which \
+alerts, which outages, which outlets and which countries — a total is context \
+for a specific, not a substitute for one. Rule 4 still binds: describe what a \
+headline concerned without naming the people in it. Where a list is empty, say \
+so plainly rather than reaching for an example. Plain declarative prose, no \
+headings, no bullet lists, no markdown, and cite the counts alongside the \
+specifics you name.";
 
 /// Render the facts the model sees. Deterministic, and the exact text the
 /// mock-server tests assert against.
@@ -377,6 +405,9 @@ pub fn render_facts(facts: &DigestFacts) -> String {
             }
             if let Some(sev) = ev.severity {
                 let _ = write!(s, " (severity {sev:.2})");
+            }
+            if ev.occurrences > 1 {
+                let _ = write!(s, " ×{}", ev.occurrences);
             }
             let _ = writeln!(s);
         }
@@ -546,6 +577,7 @@ mod tests {
                     source: "ioda".into(),
                     label: Some("national outage".into()),
                     severity: Some(0.75),
+                    occurrences: 3,
                 }],
                 counts_only_sources: vec![("acled".into(), 12)],
             },

@@ -82,9 +82,17 @@ fn fmt_datetime(ts: DateTime<Utc>) -> String {
 /// Parse a DOC `artlist` JSON body into its article objects. A body with no
 /// `articles` key (GDELT's shape for "no matches") yields an empty list, not
 /// an error.
+///
+/// A rejected query is **not** a non-2xx status: DOC answers `200` with a bare
+/// sentence of plain text (see [`reject_reason`]), which would otherwise
+/// surface as an opaque JSON parse error. Naming it here is what makes the
+/// difference between "the world is quiet today" and "every DOC call this
+/// process ever made returned nothing".
 pub fn articles(body: &str) -> Result<Vec<Value>, SourceError> {
-    let doc: Value = serde_json::from_str(body)
-        .map_err(|e| SourceError::Other(format!("DOC response was not JSON: {e}")))?;
+    let doc: Value = serde_json::from_str(body).map_err(|e| match reject_reason(body) {
+        Some(msg) => SourceError::Other(format!("GDELT rejected the DOC query: {msg}")),
+        None => SourceError::Other(format!("DOC response was not JSON: {e}")),
+    })?;
     match doc.get("articles") {
         Some(Value::Array(items)) => Ok(items.clone()),
         None | Some(Value::Null) => Ok(Vec::new()),
@@ -93,6 +101,23 @@ pub fn articles(body: &str) -> Result<Vec<Value>, SourceError> {
             kind_of(other)
         ))),
     }
+}
+
+/// Recognize DOC's plain-text query rejection and hand back its own words.
+///
+/// GDELT signals a malformed query expression with `200 OK` and a single
+/// sentence of prose — e.g. "One or more of your parenthetical clauses had an
+/// error in it." — so the caller sees a body that merely fails to be JSON.
+/// A short, non-empty body that starts with neither a JSON token nor an HTML
+/// tag is that case; anything longer or markup-shaped is left to the generic
+/// parse error, which keeps a truncated HTML gateway page out of the message.
+fn reject_reason(body: &str) -> Option<String> {
+    const MAX_LEN: usize = 400;
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_LEN || trimmed.starts_with(['{', '[', '<']) {
+        return None;
+    }
+    Some(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// Stamp a query's theme tags onto an article so provenance survives into
@@ -277,6 +302,42 @@ mod tests {
         );
         assert!(articles("not json").is_err());
         assert!(articles(r#"{"articles":42}"#).is_err());
+    }
+
+    #[test]
+    fn plain_text_rejection_is_named_as_a_query_rejection() {
+        // Verbatim shape of what the live endpoint returns, with 200 OK, for a
+        // quoted phrase inside a parenthesized OR group.
+        let err = articles("One or more of your parenthetical clauses had an error in it.\n")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("GDELT rejected the DOC query"), "{msg}");
+        assert!(msg.contains("parenthetical clauses"), "{msg}");
+    }
+
+    #[test]
+    fn markup_and_long_bodies_stay_generic_parse_errors() {
+        for body in [
+            "<html><body>502 Bad Gateway</body></html>",
+            &"x".repeat(401),
+        ] {
+            let msg = articles(body).unwrap_err().to_string();
+            assert!(msg.contains("was not JSON"), "{msg}");
+        }
+        assert_eq!(reject_reason(""), None);
+        assert_eq!(reject_reason(" \n "), None);
+    }
+
+    #[test]
+    fn default_query_carries_no_quoted_phrase() {
+        // A quoted phrase inside this parenthesized OR group is rejected by the
+        // live endpoint (200 + plain text), which cost a full session of empty
+        // media attention. Keep the terms bare.
+        assert!(
+            !crate::DEFAULT_QUERY.contains('"'),
+            "DEFAULT_QUERY must use bare words only: {}",
+            crate::DEFAULT_QUERY
+        );
     }
 
     fn sample_article() -> Value {
