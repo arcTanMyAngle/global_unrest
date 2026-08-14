@@ -163,6 +163,10 @@ mod imp {
     }
 
     impl VideoPlayer {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
         /// Position the player over `rect` (egui points) and make sure it is
         /// showing `request`. Returns `Err` with a human-readable reason if
         /// the platform webview could not be created at all.
@@ -322,6 +326,10 @@ mod imp {
     pub struct VideoPlayer;
 
     impl VideoPlayer {
+        pub fn new() -> Self {
+            Self
+        }
+
         pub fn show(
             &mut self,
             _frame: &eframe::Frame,

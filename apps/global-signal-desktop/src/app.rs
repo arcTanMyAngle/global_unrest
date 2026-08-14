@@ -534,7 +534,7 @@ impl App {
             media_searching: false,
             media_selected: None,
             media_status: None,
-            media_player: VideoPlayer::default(),
+            media_player: VideoPlayer::new(),
         };
 
         // Live updates are the desktop default. LES_ONLINE=0 remains a useful
