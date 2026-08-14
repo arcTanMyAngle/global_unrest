@@ -6,10 +6,13 @@
 //! stream past and keeps nothing, while this returns a short, transient,
 //! place-scoped list of links a person asked to see.
 //!
-//! **The hit URL is always the post's own page**, never an extracted stream.
-//! A post's video lives behind an HLS playlist that Chromium/WebView2 cannot
-//! decode natively anyway; `embed.bsky.app` is Bluesky's own published player
-//! and is what [`core_types::embed_for`] maps a post URL onto.
+//! **The hit URL is never an extracted stream.** A native Bluesky video lives
+//! behind an HLS playlist that Chromium/WebView2 cannot decode anyway, so the
+//! hit is the post's own page and `embed.bsky.app` — Bluesky's published
+//! player, which [`core_types::embed_for`] maps a post URL onto — does the
+//! playing. A post that is instead a *link card* to a video host already names
+//! that host's own page, and that page is the hit: sending someone to the post
+//! widget would just show them the card they would have to click again.
 //!
 //! Pure: [`request_url`] builds the call and [`hits`] parses a response. The
 //! network round trip is in `crate::live`.
@@ -122,9 +125,9 @@ pub fn hits(body: &str) -> Result<Vec<MediaHit>, SourceError> {
     };
     let mut out = Vec::new();
     for post in posts {
-        if !carries_video(post.get("embed")) {
+        let Some(playable) = playable(post.get("embed")) else {
             continue;
-        }
+        };
         if is_labelled(post.get("labels"))
             || is_labelled(post.get("author").and_then(|a| a.get("labels")))
         {
@@ -137,7 +140,7 @@ pub fn hits(body: &str) -> Result<Vec<MediaHit>, SourceError> {
         else {
             continue;
         };
-        let Some(rkey) = post.get("uri").and_then(|v| v.as_str()).and_then(post_rkey) else {
+        let Some((did, rkey)) = post.get("uri").and_then(|v| v.as_str()).and_then(post_ref) else {
             continue;
         };
         let Some(ts_utc) = post
@@ -152,20 +155,53 @@ pub fn hits(body: &str) -> Result<Vec<MediaHit>, SourceError> {
             .and_then(|r| r.get("text"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let title = if text.trim().is_empty() {
-            format!("video posted by @{handle}")
-        } else {
-            short_title(text)
-        };
         out.push(MediaHit {
-            url: format!("https://bsky.app/profile/{handle}/post/{rkey}"),
-            title,
+            url: match playable {
+                // Keyed by DID, not by handle. `bsky.app` accepts either, but
+                // `embed.bsky.app` accepts only a DID — a handle there answers
+                // "Invalid DID: DID syntax didn't validate via regex" and the
+                // player shows that instead of the video (live-verified
+                // 2026-08-14, which is the only way this surfaces: a fixture
+                // handle looks fine to `embed_for`).
+                Playable::Native => format!("https://bsky.app/profile/{did}/post/{rkey}"),
+                Playable::External { uri, .. } => uri.to_string(),
+            },
+            title: hit_title(text, playable, handle),
             provider: Provider::Bluesky,
             ts_utc,
             origin: format!("@{handle}"),
         });
     }
     Ok(out)
+}
+
+/// Label for one hit: the post's own words when it has any, otherwise the link
+/// card's headline, otherwise who posted it.
+///
+/// A post whose entire text is the link it shares is treated as having no
+/// words of its own — "youtube.com/watch?v=OjHO…" tells a reader nothing that
+/// the card's title would not tell them better.
+fn hit_title(text: &str, playable: Playable<'_>, handle: &str) -> String {
+    let text = text.trim();
+    if !text.is_empty() && !is_bare_link(text) {
+        return short_title(text);
+    }
+    if let Playable::External {
+        title: Some(card), ..
+    } = playable
+        && !card.trim().is_empty()
+    {
+        return short_title(card);
+    }
+    format!("video posted by @{handle}")
+}
+
+fn is_bare_link(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    words.next().is_none() && (first.starts_with("http://") || first.starts_with("https://"))
 }
 
 /// Does this label list carry one of [`BLOCKED_LABELS`]?
@@ -181,39 +217,63 @@ fn is_labelled(labels: Option<&Value>) -> bool {
     })
 }
 
-/// Does this embed view contain something playable?
-fn carries_video(embed: Option<&Value>) -> bool {
-    let Some(embed) = embed else { return false };
+/// What a post's embed gives the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Playable<'a> {
+    /// Bluesky's own video — play the post page through its widget.
+    Native,
+    /// A link card pointing at a video host: `uri` is that host's own page,
+    /// and `title` is the card's headline if it published one.
+    External {
+        uri: &'a str,
+        title: Option<&'a str>,
+    },
+}
+
+/// Does this embed view contain something playable, and if so, what?
+fn playable(embed: Option<&Value>) -> Option<Playable<'_>> {
+    let embed = embed?;
     match embed.get("$type").and_then(|v| v.as_str()) {
         // A native Bluesky video: `playlist` is the HLS manifest, which we
         // never open ourselves — its presence is only the "yes, video" signal.
-        Some("app.bsky.embed.video#view") => embed.get("playlist").is_some(),
+        Some("app.bsky.embed.video#view") => embed.get("playlist").map(|_| Playable::Native),
         // A link card. Only counts if the link is one we'd classify as video
         // anyway, so the result list cannot fill with ordinary article cards.
-        Some("app.bsky.embed.external#view") => embed
-            .get("external")
-            .and_then(|e| e.get("uri"))
-            .and_then(|v| v.as_str())
-            .is_some_and(core_types::is_video_url),
+        Some("app.bsky.embed.external#view") => {
+            let external = embed.get("external")?;
+            let uri = external.get("uri").and_then(|v| v.as_str())?;
+            if !core_types::is_video_url(uri) {
+                return None;
+            }
+            Some(Playable::External {
+                uri,
+                title: external.get("title").and_then(|v| v.as_str()),
+            })
+        }
         // A quote post with media attached: the media half is a nested view of
         // one of the shapes above.
-        Some("app.bsky.embed.recordWithMedia#view") => carries_video(embed.get("media")),
-        _ => false,
+        Some("app.bsky.embed.recordWithMedia#view") => playable(embed.get("media")),
+        _ => None,
     }
 }
 
-/// `at://<did>/app.bsky.feed.post/<rkey>` -> `<rkey>`.
+/// `at://<did>/app.bsky.feed.post/<rkey>` -> `(<did>, <rkey>)`.
 ///
 /// Rejects anything that is not a post record, so a like or repost URI cannot
-/// become a broken `bsky.app/profile/.../post/...` link.
-fn post_rkey(uri: &str) -> Option<&str> {
+/// become a broken `bsky.app/profile/.../post/...` link, and requires the
+/// authority to be a real DID — the AppView always returns one there, and a
+/// handle in that position would build an embed URL Bluesky's player refuses.
+fn post_ref(uri: &str) -> Option<(&str, &str)> {
     let rest = uri.strip_prefix("at://")?;
-    let (_did, tail) = rest.split_once('/')?;
+    let (did, tail) = rest.split_once('/')?;
+    if !did.starts_with("did:") {
+        return None;
+    }
     let rkey = tail.strip_prefix("app.bsky.feed.post/")?;
     if rkey.is_empty() || rkey.contains('/') {
         None
     } else {
-        Some(rkey)
+        Some((did, rkey))
     }
 }
 
@@ -278,14 +338,36 @@ mod tests {
         assert_eq!(
             urls,
             vec![
-                "https://bsky.app/profile/reporter.example/post/rk1",
-                "https://bsky.app/profile/quoter.example/post/rk4",
+                // Native video: the post page, keyed by DID so Bluesky's own
+                // player will accept it.
+                "https://bsky.app/profile/did:plc:aaa/post/rk1",
+                // Link card: the video host's page the post itself named.
+                // Sending someone to the post widget would only show them the
+                // card again.
+                "https://youtu.be/abc",
             ]
         );
         assert_eq!(hits[0].title, "Quake damage in Bogota");
         assert_eq!(hits[0].origin, "@reporter.example");
         // A caption-less post still gets a readable label.
         assert_eq!(hits[1].title, "video posted by @quoter.example");
+    }
+
+    #[test]
+    fn a_link_card_hit_is_labelled_by_the_cards_own_headline() {
+        let body = r#"{"posts":[
+            {"uri":"at://did:plc:aaa/app.bsky.feed.post/rk1",
+             "author":{"handle":"linker.example"},
+             "record":{"text":"https://youtu.be/abc"},
+             "indexedAt":"2026-08-10T12:00:00Z",
+             "embed":{"$type":"app.bsky.embed.external#view",
+                      "external":{"uri":"https://youtu.be/abc","title":"Flooding in Cali"}}}
+        ]}"#;
+        let hits = hits(body).unwrap();
+        // The post's whole text is the bare link, which tells a reader nothing
+        // the card's headline does not tell them better.
+        assert_eq!(hits[0].title, "Flooding in Cali");
+        assert_eq!(hits[0].url, "https://youtu.be/abc");
     }
 
     #[test]
@@ -301,7 +383,16 @@ mod tests {
         // The whole point of returning the post URL: it maps to Bluesky's own
         // published player. The HLS playlist would not — WebView2 cannot
         // decode HLS natively.
-        assert!(core_types::embed_for(&hits[0].url).is_some());
+        //
+        // Asserted as the exact embed URL, not merely `is_some()`: a handle in
+        // the actor slot also maps to *an* embed URL, and that weaker
+        // assertion is what let a live "Invalid DID" error through once.
+        assert_eq!(
+            core_types::embed_for(&hits[0].url),
+            Some(core_types::Embed::Page(
+                "https://embed.bsky.app/embed/did:plc:aaa/app.bsky.feed.post/rk1".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -338,11 +429,17 @@ mod tests {
     #[test]
     fn a_non_post_uri_is_not_turned_into_a_broken_link() {
         assert_eq!(
-            post_rkey("at://did:plc:aaa/app.bsky.feed.post/rk1"),
-            Some("rk1")
+            post_ref("at://did:plc:aaa/app.bsky.feed.post/rk1"),
+            Some(("did:plc:aaa", "rk1"))
         );
-        assert_eq!(post_rkey("at://did:plc:aaa/app.bsky.feed.like/rk1"), None);
-        assert_eq!(post_rkey("https://bsky.app/profile/x/post/rk1"), None);
+        assert_eq!(post_ref("at://did:plc:aaa/app.bsky.feed.like/rk1"), None);
+        assert_eq!(post_ref("https://bsky.app/profile/x/post/rk1"), None);
+        // A handle where the DID belongs would build an embed URL Bluesky's
+        // player rejects outright, so it is not a post reference at all.
+        assert_eq!(
+            post_ref("at://reporter.example/app.bsky.feed.post/rk1"),
+            None
+        );
     }
 
     #[test]

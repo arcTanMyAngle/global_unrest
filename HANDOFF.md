@@ -4,6 +4,21 @@
 > preserve the state of their session and can mention work that is now shipped.
 > Use README.md, docs/ROADMAP.md, and docs/DEVELOPMENT.md for current behavior.
 
+## Current implementation correction (2026-08-14)
+
+The ninth-session entry below records an earlier Daily Events implementation.
+The current desktop uses Google Gemini with GEMINI_API_KEY and the
+gemini-live feature, not Anthropic. A generated digest is cached per UTC day
+and can be explicitly regenerated.
+
+The current desktop also has a user-directed Media page: an explicit
+place-scoped, time-bounded public-video lookup through GDELT and Bluesky,
+plus configured Telegram public channels. Results are session-memory only and
+never reach map ingest, storage, snapshots, the API, or Daily Events. Windows
+can use supported provider-published embeds; every unsupported path keeps a
+browser fallback. See README.md and docs/SAFETY_AND_PRIVACY.md for the current
+behavior and boundary.
+
 Last session: 2026-08-13 (**ninth** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
 

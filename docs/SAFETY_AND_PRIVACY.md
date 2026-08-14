@@ -24,10 +24,12 @@ claim, or establish that an area is safe.
 5. **Credentials stay local.** Keys and sessions come from environment
    variables or local, gitignored files. They are never committed, logged, or
    included in URLs.
-6. **Social chatter is aggregate-only.** Bluesky and Telegram normalize
-   completed place/topic windows into counts before storage. Post or message
-   text, author identity, handles, identifiers, and URLs are not stored,
-   logged, or exposed by the source adapters.
+6. **Social chatter ingestion is aggregate-only.** Bluesky and Telegram
+   normalize completed place/topic windows into counts before storage. The
+   ingest path does not store or log post/message text, author identity,
+   handles, identifiers, or URLs, and its normalized records never expose
+   them. The narrowly scoped, user-directed Media lookup exception is defined
+   below; it does not change the ingest, storage, map, or API boundary.
 7. **Generated text is labelled, bounded, and never the record.** Daily
    Events is an opt-in interpretation aid. Its response schema has two
    separate fields, media attention and event data, rather than a combined
@@ -35,7 +37,7 @@ claim, or establish that an area is safe.
    generation time. Generated prose is not a news report, forecast, severity
    rating, event source, or map caption.
 
-## Third-party processing (Anthropic API)
+## Third-party processing (Google Gemini API)
 
 Daily Events is the only feature that sends stored signals to a third party.
 The user must select a UTC day and explicitly click Generate digest. No digest
@@ -57,26 +59,62 @@ and cannot be sent through this path.
 
 ### Credential and cache behavior
 
-Anthropic access uses ANTHROPIC_API_KEY in an HTTP header, not a query string.
-The application reports a missing key without echoing its value. Treat every
-generation as a metered third-party API call and review the terms of the
-Anthropic account in use before enabling it.
+Google Gemini access uses GEMINI_API_KEY in the x-goog-api-key HTTP header,
+not a query string. The application reports a missing key without echoing its
+value. Treat every generation as a metered third-party API call and review the
+applicable Google API terms, quota, and billing for the account in use before
+enabling it.
 
 One local cache row exists per UTC day. A requested regeneration explicitly
 replaces that row; reopening a cached day makes no API request. The cache
 stores generated prose, model, generation time, and its two record counts, not
 the source rows that were considered.
 
+## On-demand media lookup
+
+The Media page is a deliberate, limited exception to hard rule 6. It supports
+researching public video after a user explicitly asks for one named place, an
+optional topic, and one bounded time window. It is not a SignalSource and does
+not broaden the map's aggregate-data model.
+
+The exception is constrained as follows:
+
+- **No background collection.** Nothing polls, prefetches, follows accounts,
+  or searches a place until the user clicks Search. There is no
+  everywhere/everything query, and the UI offers only 24-hour, 3-day, 7-day,
+  and 30-day windows with a 25-result per-provider cap.
+- **Public video only.** GDELT is queried for video-hosting results; Bluesky
+  public posts and configured Telegram public-channel posts must carry video.
+  Social results are visually marked as unverified public posts, not event
+  evidence.
+- **Minimal display fields.** A temporary hit may include its public URL, a
+  bounded one-line title/caption, timestamp, and public outlet, Bluesky
+  handle, or Telegram channel attribution. The Telegram lookup never reads or
+  exposes a message sender.
+- **No persistence or reuse.** Hits are held in process memory only until the
+  next search replaces them or the app exits. They are not written to DuckDB,
+  Parquet, a cache, logs, the services API, aggregate chatter rollups, or
+  Daily Events facts.
+- **No stream extraction.** The player uses a provider's published embed or a
+  direct public media URL. It does not turn watch pages into stream URLs or
+  scrape protected player data. In-app playback is available only where the
+  Windows WebView2 implementation and the URL support it; a browser link
+  remains available everywhere.
+
+Any widening of the query scope, result fields, provider access, retention, or
+playback mechanism requires a new privacy and terms review.
+
 ## Source licensing and handling
 
 | Source | Handling rule |
 |---|---|
-| GDELT | Public/keyless data used with attribution. Store metadata, not article bodies; treat coverage as a biased proxy. |
+| GDELT | Public/keyless data used with attribution. Ingest stores metadata, not article bodies; treat coverage as a biased proxy. The Media page may make an explicit, bounded GDELT video lookup and keeps the resulting link transient. |
 | ACLED | Requires authorized access. Do not store notes or redistribute raw ACLED data. Public worker/API deployments must not ingest or serve it. |
 | NOAA/NWS active alerts | US government public-domain alerts. US and territory coverage only; alerts without usable geometry do not get guessed coordinates. |
 | IODA | Keyless outage events from Georgia Tech's Internet Intelligence Research Lab. Country precision only; use as aggregate network signal, never person-level data. |
-| Bluesky Jetstream | Keyless public stream processed only into aggregate chatter windows. A disconnect may undercount; it never justifies backfilling person-level content. |
-| Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Aggregate before storage and do not crawl beyond that scope. |
+| Bluesky Jetstream | The ingest stream is processed only into aggregate chatter windows. The Media page may explicitly show a public video post's bounded label, URL, and visible handle transiently; it does not feed those fields back into ingest or storage. |
+| Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Ingest aggregates before storage. The explicit Media lookup uses the same allowlist and a read-only session, returning only temporary public video links, bounded labels, and channel attribution. |
+| Published video embeds | Use provider-published embeds or direct public media files only. Do not resolve a watch page into an underlying stream. |
 | Natural Earth | Public-domain basemap and gazetteer data, attributed in the application and README. |
 | OSM tiles | Not implemented. Any M8 tile layer needs a provider-policy, attribution, offline behavior, and user-control review before it lands. |
 | Fixtures | Fully synthetic test/service-smoke data using reserved example domains. Never loaded by the desktop. |
@@ -95,6 +133,9 @@ the source rows that were considered.
 - **Aggregate chatter matching:** place/topic keyword matching can miss or
   misclassify posts. It is media-attention data, not a claim about a person's
   location or a discrete event.
+- **Media lookup:** a public video or post is a lead, not verification. Search
+  results can be missing, removed, mislabelled, geographically ambiguous, or
+  misleading; public social posts are explicitly marked unverified.
 - **Generated prose:** a fluent model summary can sound more certain than its
   inputs. The page displays counts and keeps its two evidence sections
   separate so readers can inspect the underlying signal class.
@@ -108,6 +149,8 @@ the source rows that were considered.
 - Session Parquet exports are explicitly created local files.
 - Daily Events cache rows are local, one per UTC day, and are replaceable by
   explicit regeneration.
+- Media lookup hits are session-memory data, replaced by the next search and
+  discarded when the application exits.
 - Fixture data is a permanent deterministic regression harness, not runtime
   desktop data.
 
@@ -132,7 +175,9 @@ ask:
    data cannot support?
 4. Does it store, transmit, or expose content beyond the declared source
    terms and privacy boundary?
-5. Does it give a viewer more control over a contributor's disclosure than the
+5. Does it add a lookup, result field, retention behavior, or player access
+   path beyond the bounded Media exception?
+6. Does it give a viewer more control over a contributor's disclosure than the
    contributor has?
 
 If any answer is yes, redesign the feature or do not ship it.

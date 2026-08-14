@@ -13,11 +13,20 @@
 //! It prints URLs, which is the point: this is the on-demand, place-scoped
 //! lookup path, not the ingest path. Nothing here is written anywhere.
 
-use chrono::{Duration, Utc};
-use media_search::{MediaQuery, MediaSearch};
+// Same shape as the other crates' live probes: without the feature there is
+// no network half to run, and an ordinary `cargo test --workspace` still
+// builds every example.
+#[cfg(not(feature = "live"))]
+fn main() {
+    eprintln!("build with --features live");
+}
 
+#[cfg(feature = "live")]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use chrono::{Duration, Utc};
+    use media_search::{MediaQuery, MediaSearch};
+
     let mut args = std::env::args().skip(1);
     let place = args.next().unwrap_or_else(|| "Colombia".to_string());
     // `-` means "no topic": a shell that drops empty arguments (PowerShell

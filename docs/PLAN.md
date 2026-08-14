@@ -3,9 +3,9 @@
 > Historical planning record, not the current setup guide. It preserves the
 > original M0-M5 design decisions and acceptance criteria; for shipped
 > behavior use README.md, ROADMAP.md, ARCHITECTURE.md, and DEVELOPMENT.md.
-> M6, M7, V1-V3, the IODA/Bluesky/Telegram layers, and Daily Events have since
-> shipped. The desktop is now live-data-only; fixtures remain test and
-> service-smoke input.
+> M6, M7, V1-V3, the IODA/Bluesky/Telegram layers, Gemini-backed Daily Events,
+> and on-demand Media research have since shipped. The desktop is now
+> live-data-only; fixtures remain test and service-smoke input.
 
 > User-approved 2026-07-13 (original at
 > `~/.claude/plans/prompt-1-md-recursive-rossum.md`; brief at

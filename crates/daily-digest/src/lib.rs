@@ -1,5 +1,6 @@
-//! One plain-language digest per UTC calendar day, over the signals this
-//! project already stores.
+//! One cached plain-language digest per UTC calendar day, over the signals
+//! this project already stores. An explicit regeneration replaces that day's
+//! cached digest.
 //!
 //! Everything here except [`live`] is pure: the facts type storage fills in,
 //! the prompt rendered from it, the exact request body, and the response

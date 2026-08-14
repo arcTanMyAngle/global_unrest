@@ -14,11 +14,24 @@ project with no published crate API to stabilize against.
   digest for a selected UTC day only after an explicit user action. Digests
   have separate media-attention and event-data sections, display their record
   counts/model/generation time, and cache locally by day.
-- daily-digest: bounded fact construction and an optional Anthropic Messages
-  API transport, plus a local mock-server suite. ACLED and
+- daily-digest: bounded fact construction and an optional Google Gemini
+  generateContent transport, plus a local mock-server suite. ACLED and
   Bluesky/Telegram row-level data are withheld from third-party processing;
   only permitted aggregate counts reach the digest path.
 - Storage migration 0003 for the local daily_digest cache.
+- Chatter coverage widening: country-name aliases, selected unambiguous
+  demonyms, and small city-exonym mappings now resolve only through bundled
+  geography; the topic table also covers additional hazard, violence,
+  displacement, health, and crime terms. The output remains aggregate
+  place/topic/window counts, with no raw social content stored.
+- Media page: an explicit, place-scoped public-video lookup with optional
+  topic and 24-hour, 3-day, 7-day, or 30-day windows. Results are temporary,
+  split between news video and unverified public posts, and never enter map
+  ingest, DuckDB, Parquet snapshots, the API, a cache, or Daily Events.
+- media-search: feature-gated, on-demand GDELT and Bluesky video lookup,
+  with the configured Telegram allowlist as a read-only third leg. A Windows
+  WebView2 player can use supported providers' published embeds; every
+  platform and unsupported link retains a browser fallback.
 - M7 service hardening: request middleware, snapshot ETags and conditional
   GET, events pagination, OpenAPI, Prometheus metrics, health staleness, and
   committed integration snapshot coverage.
@@ -32,24 +45,25 @@ project with no published crate API to stabilize against.
   **streaming** source in the workspace. It publishes **aggregate chatter
   volume only**: counts of posts mentioning both a known place and a known
   topic in a 5-minute window, as a media-attention signal alongside GDELT's
-  article counts. No post text, author identity, post id, or URL is ever
-  stored, logged, or returned by any API in the crate
+  article counts. The ingest path stores and logs no post text, author
+  identity, post id, or URL, and exposes none in normalized source data
   (docs/SAFETY_AND_PRIVACY.md hard rule 6).
 - `chatter`: the shared aggregate-before-storage machinery both Bluesky and
-  Telegram use, unchanged between the two — gazetteer place matching, a
+  Telegram use — gazetteer place matching, a
   fixed topic keyword table, an in-memory accumulator, and `ChatterRollup`
-  normalization. Requires a place *and* a topic in the same post; matched
-  0.27% of a live 5,918-post sample.
+  normalization. Requires a place *and* a topic in the same post; a
+  pre-widening live sample matched 0.27% of 5,918 posts.
 - `source-telegram`: a new optional live source (feature `telegram-live`,
   credential-gated, desktop default) for public Telegram channels — the
   second aggregate-chatter source. MTProto (`grammers-client`, pure Rust) is
   the only mechanism that can read a third-party public channel's history
   without that channel's owner cooperating; poll-based (not streamed) like
-  NOAA/IODA, sweeping a small live-verified curated allowlist of 8 channels
+  NOAA/IODA, sweeping a small live-verified curated allowlist of 11 channels
   every 15 minutes. Login is a one-time interactive step
   (`examples/login_setup.rs`) that saves a local session file; the source
-  itself only ever opens it. Same **aggregate chatter volume only**
-  guarantee as Bluesky (docs/SAFETY_AND_PRIVACY.md hard rule 6).
+  itself only ever opens it. Its ingest path has the same **aggregate chatter
+  volume only** guarantee as Bluesky; the separate, explicit Media lookup is
+  the documented transient public-video exception.
 - `geo-utils`: bundles Natural Earth's 1:110m populated-places gazetteer
   (243 major cities) behind a new `CityIndex`, plus
   `CountryIndex::iter_with_centroid`.
@@ -76,8 +90,9 @@ project with no published crate API to stabilize against.
 ### Changed
 
 - The desktop default feature set now includes ACLED, NOAA, IODA, Bluesky,
-  Telegram, and the Daily Events Anthropic transport. Credentials still gate
-  ACLED, Telegram, and digest generation at runtime.
+  Telegram, Gemini-backed Daily Events, on-demand media search, and the
+  Windows video-embed path. Credentials still gate ACLED, Telegram, and
+  digest generation at runtime.
 
 - Desktop runtime is live-data-only: live polling defaults on, ACLED/NOAA are
   default features, `.env` is loaded automatically, and synthetic fixtures are

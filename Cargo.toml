@@ -132,9 +132,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # src/video.rs for the airspace caveat. Declared here for the pin only — the
 # member declares it under `[target.'cfg(windows)'.dependencies]`, because on
 # Linux wry needs webkit2gtk-4.1 dev packages that CI's ubuntu leg has not
-# got. `default-features = false` drops the custom-protocol/drag-drop/devtools
-# extras; we only ever call `WebViewBuilder::build_as_child` + `load_url`.
-wry = { version = "0.55", default-features = false }
+# got. `default-features = false` drops the Linux/GTK backend and the drag-drop
+# and devtools extras; `protocol` is kept on and is not optional — it is what
+# serves the player page from a real `http://` origin, without which YouTube's
+# embed refuses to start ("Error 153"). See apps/global-signal-desktop/
+# src/video.rs. The feature adds no dependencies of its own.
+wry = { version = "0.55", default-features = false, features = ["protocol"] }
 # M7 services/api hardening. tower supplies ServiceBuilder ("util") and the
 # concurrency cap ("limit"); tower-http supplies request tracing, CORS,
 # response compression, and a timeout layer that needs no extra crypto/TLS

@@ -113,16 +113,16 @@ method/data source flagged the outage) without any new schema.
 
 ## Chatter normalization (Bluesky, and any future social stream)
 
-Streaming social sources invert the usual pipeline. Every other source
+Streaming social sources invert the usual ingest pipeline. Every other source
 stores one `GeoTemporalEvent` per upstream record and lets
 `storage::score_buckets` aggregate later; chatter sources aggregate
 **before** storage and persist only the rollup. That inversion is required
 by hard rule 6 in [SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md), not chosen
-for performance.
+for performance. The separate, explicitly requested Media page is not part of
+this pipeline; see [Transient media research](#transient-media-research).
 
-`crates/chatter` owns the shared machinery (`source-bluesky` is its first
-user; `source-telegram` its second, unchanged — Telegram needed no changes
-to `chatter` at all):
+`crates/chatter` owns the shared machinery used by both `source-bluesky`
+and `source-telegram`:
 
 - **`ChatterRollup` is the privacy boundary.** It is a count for a
   `(place, topic, window)` triple — `place_name`, `country_iso`, lat/lon,
@@ -135,17 +135,29 @@ to `chatter` at all):
   lowercase words and scanned with a 1..=N word window against a place
   table (Natural Earth country names + aliases + the 1:110m populated-places
   gazetteer) and a fixed topic-keyword table (`chatter::topic::TOPICS`,
-  seeded from the same signal classes the GDELT DOC query tracks). Requiring
+  seeded from the same signal classes the GDELT DOC query tracks and widened
+  2026-08-13 to storm / volcano / landslide / drought / displacement /
+  explosion / outbreak / crime). Requiring
   both is the main false-positive defence — a place name alone matches
   recipes and given names. One place and one topic per post (leftmost,
   longest match), so a widely-shared multi-country post cannot inflate
-  several aggregates at once. Measured against the live firehose: 5,918
-  posts scanned, 16 matched (0.27%).
+  several aggregates at once. A pre-widening 5,918-post live sample matched
+  16 posts (0.27%); it is a historical sanity sample, not an expected rate
+  after vocabulary changes.
 - **Named judgment calls.** Countries beat cities on a token collision
   ("Panama" the country, not Panama City). `AMBIGUOUS_TOKENS` drops
   `male`/`chad`/`jordan`/`georgia` — real collisions with an English word
   and common given names. "us" is deliberately not a United States alias.
   Aliases add spellings only; coordinates always come from bundled geometry.
+  Three spelling tables feed the place side: `COUNTRY_ALIASES` (including the
+  names Natural Earth abbreviates for a map label — "S. Sudan", "Dem. Rep.
+  Congo", "Bosnia and Herz." — which no post ever writes that way),
+  `COUNTRY_ADJECTIVES` (demonyms, since chatter says "Sudanese army" more
+  often than "the army in Sudan"), and a deliberately tiny `CITY_ALIASES` of
+  exonyms. Demonyms that are also everyday English words, language or cuisine
+  labels, or ambiguous between two countries are excluded by name and reason.
+  Every entry in all three is pinned by a test, because an alias naming an ISO
+  the bundled file does not carry inserts nothing at all, silently.
 - **Chatter is attention, not an event.** Rollups normalize to
   `EventKind::NewsAttention` with `post_count` in `article_count`, so they
   count in the attention component and never in the unrest component —
@@ -199,9 +211,12 @@ never touches anything outside `ALLOWED_CHANNELS`.
   with `default-features = false`, and `source-telegram::file_session`
   implements the `Session` trait over a JSON file instead. The file holds a
   live login — treat it as a credential; it is gitignored.
-- **Same privacy boundary as Bluesky.** Message text goes straight into
-  `ChatterAccumulator::observe` and is dropped in the same call; nothing in
-  this crate returns message text, sender identity, or a message URL.
+- **Same ingest privacy boundary as Bluesky.** Message text goes straight into
+  `ChatterAccumulator::observe` and is dropped in the same call; the ingest
+  path returns no message text, sender identity, or message URL. The crate's
+  separate, user-directed media module is the documented exception: it can
+  return a public video-post URL, bounded label, and channel attribution to
+  the transient Media page, but never a sender identity or a normalized event.
 
 ## RegionBucket
 
@@ -244,6 +259,31 @@ There is intentionally no combined-summary column.
 
 The cache is not part of the worker-to-API snapshot contract. It belongs to
 the desktop's local analytics store and is never exposed by services/api.
+
+## Transient media research
+
+The Media page uses `media_search::MediaQuery` and `MediaHit`, not
+`GeoTemporalEvent` or `ChatterRollup`. It has no DuckDB table, migration,
+Parquet export, worker snapshot, or API representation.
+
+- A `MediaQuery` contains a required place, optional topic, start and end
+  timestamps, and a 25-result per-provider limit. The UI offers only
+  24-hour, 3-day, 7-day, and 30-day windows.
+- A `MediaHit` contains a public URL, bounded single-line display
+  title/caption, provider (`Gdelt`, `Bluesky`, or `Telegram`), publication
+  time, and public origin (outlet domain, Bluesky handle, or Telegram
+  channel). It is temporary display data, not source metadata for the map.
+- GDELT and Bluesky are queried only after the person presses Search. If a
+  Telegram session is configured, `source-telegram` supplies a third,
+  read-only allowlist leg. Its read-only session avoids a peer-cache writer
+  race with scheduled ingest.
+- Hits live only in desktop process memory until the next search replaces
+  them or the app exits. They are never written to storage, an ingest log,
+  Daily Events facts, a cache, or services/api.
+
+This is the narrow exception described in
+[SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md#on-demand-media-lookup). It does
+not relax aggregate-before-storage behavior for Bluesky or Telegram ingest.
 
 ## Parquet session export (M4 handoff layout)
 

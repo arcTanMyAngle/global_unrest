@@ -1,11 +1,12 @@
-# Visualization roadmap — original, detailed, honest
+# Visualization design record
 
 Direction (user, 2026-07-16): do **not** copy the source providers'
 visualizations (ACLED's dashboard etc.) — build something *more* original
 and detailed that "truly illustrates a clear and detailed picture." This
-doc is the design plan for that. Execute in batches (V1 → V3); each item
-lists implementation notes against the renderer architecture and its
-acceptance criteria.
+document preserves the original V1-V3 design rationale and acceptance
+criteria. All three batches are now shipped; the opening summary states the
+current behavior, while the detailed batch sections remain useful design
+history.
 
 ## Shipped status
 
@@ -24,6 +25,8 @@ applied directly.
 
 Daily Events is a separate interpretation page, not a visualization layer. It
 does not change the map's attention/event separation or rendering contract.
+The Media page is also outside the map pipeline: it is an explicit,
+session-only research action and never adds post-level data to a layer.
 
 ## Principles (non-negotiable, from the brief + SAFETY doc)
 
@@ -42,7 +45,7 @@ does not change the map's attention/event separation or rendering contract.
    animation uses a bounded number of cheap epaint overlay primitives
    (circles/lines/text) — **never** per-frame tessellation of layer meshes.
 
-## Current state (shipped M1–M5)
+## Baseline before V1-V3 (historical)
 
 Dark equirectangular world map (cached meshes, world-copy at ±180°); H3
 res-3 heatmap with three metrics (attention / events / diversity, log
@@ -241,14 +244,14 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
   (bold lead-in + sentence) because `egui::RichText` renders markdown markup
   literally — a test rejects any `*` that creeps back in.
 
-## Sequencing & guardrails
+## Historical sequencing and continuing guardrails
 
-- Order: V1 (one session) → V2 (one–two sessions) → V3 (one session);
-  M6 repo-hygiene items (docs/ROADMAP.md) can interleave freely.
-- Every item lands as its own PR-sized commit with the three gates plus the
-  perf smoke test; anything animated gets a frame-cost note in the commit.
-- Screenshots of each shipped view go into the README (portfolio value) via
-  the `.claude/skills/run` recipe.
+- V1, V2, and V3 completed in that order. Future visualization work belongs in
+  M8 planning and must retain the evidence and precision contracts above.
+- Every future visual change should run the project gates and the relevant
+  performance checks; anything animated needs a bounded frame-cost note.
+- Add a current visual asset to the README only when it represents the
+  shipping interface and can be maintained with the feature it depicts.
 - New constants (halo threshold, fade floor, ledger page size) are named in
   one place (`analytics::weights` or a new `ui::style` module), never
   inline magic numbers.

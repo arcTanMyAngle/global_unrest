@@ -15,6 +15,16 @@
 //! rect, never on top of it. `hide` is called whenever the player is not
 //! visible so the child window does not linger over a page that has moved on.
 //!
+//! **Origin matters.** The webview is never navigated straight at a provider's
+//! embed URL, and never fed the player page with `NavigateToString`. Both of
+//! those give the page an *opaque* origin, and YouTube's embed refuses to start
+//! from one — it shows "Error 153 / Video player configuration error". This was
+//! confirmed from both ends: the same embed URL in a plain `file://` page
+//! (opaque origin) fails in an ordinary browser too, and the same URL served
+//! over `http://127.0.0.1` plays. So the player page is served through a `wry`
+//! custom protocol, which WebView2 maps onto the real origin
+//! `http://<scheme>.localhost`, and the embed runs in an `<iframe>` inside it.
+//!
 //! **Windows only.** `wry` is declared under
 //! `[target.'cfg(windows)'.dependencies]` because WebView2 is preinstalled on
 //! Windows 11 while the Linux backend needs webkit2gtk-4.1 dev packages that
@@ -62,14 +72,7 @@ impl PlaybackRequest {
 /// unused function; the test cfg keeps the escaping test running everywhere.
 #[cfg(any(test, all(target_os = "windows", feature = "video-embed")))]
 fn file_player_html(url: &str) -> String {
-    // The URL is attribute-escaped rather than interpolated raw: it comes
-    // from a third-party API response, and a `"` in it would otherwise break
-    // out of the attribute.
-    let escaped = url
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    let escaped = escape_attr(url);
     format!(
         "<!doctype html><meta charset=\"utf-8\">\
          <style>html,body{{margin:0;height:100%;background:#000;\
@@ -79,14 +82,58 @@ fn file_player_html(url: &str) -> String {
     )
 }
 
+/// A player page that runs a provider's embed in an `<iframe>`.
+///
+/// The iframe is the whole point — see this module's "Origin matters" note.
+/// Navigating the webview at `url` directly would load it with an opaque
+/// origin and YouTube would refuse to play.
+#[cfg(any(test, all(target_os = "windows", feature = "video-embed")))]
+fn page_player_html(url: &str) -> String {
+    let escaped = escape_attr(url);
+    format!(
+        "<!doctype html><meta charset=\"utf-8\">\
+         <style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}\
+         iframe{{border:0;display:block;width:100%;height:100%}}</style>\
+         <iframe src=\"{escaped}\" \
+         allow=\"autoplay; encrypted-media; picture-in-picture; fullscreen\" \
+         referrerpolicy=\"strict-origin-when-cross-origin\" allowfullscreen></iframe>"
+    )
+}
+
+/// Escape a URL for use inside a double-quoted HTML attribute.
+///
+/// URLs here come from third-party API responses, so a `"` in one would
+/// otherwise break out of the attribute.
+#[cfg(any(test, all(target_os = "windows", feature = "video-embed")))]
+fn escape_attr(url: &str) -> String {
+    url.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[cfg(all(target_os = "windows", feature = "video-embed"))]
 mod imp {
+    use std::borrow::Cow;
+    use std::sync::{Arc, Mutex, PoisonError};
+
     use wry::dpi::{PhysicalPosition, PhysicalSize};
     use wry::raw_window_handle::HasWindowHandle;
     use wry::{Rect, WebView, WebViewBuilder};
 
-    use super::{PlaybackRequest, file_player_html};
+    use super::{PlaybackRequest, file_player_html, page_player_html};
     use core_types::Embed;
+
+    /// Custom-protocol name for the player page.
+    ///
+    /// WebView2 has no real custom-scheme support, so `wry` filters
+    /// `http://{SCHEME}.*` instead — which is what gives the page a genuine
+    /// http origin (`http://lesplay.localhost`) rather than an opaque one.
+    /// Navigation therefore uses that http form directly: the `scheme://`
+    /// rewrite only happens for the URL passed at *build* time, not for a
+    /// later `load_url`.
+    const PLAYER_SCHEME: &str = "lesplay";
+    const PLAYER_ORIGIN: &str = "http://lesplay.localhost";
 
     /// Owns the child webview for the lifetime of the app.
     ///
@@ -105,6 +152,14 @@ mod imp {
         /// Set when construction failed, so the failure is reported once
         /// instead of retried every frame.
         error: Option<String>,
+        /// The player page the custom protocol serves. Shared with the
+        /// protocol handler, which runs on the webview's own callback and so
+        /// cannot borrow from `self`.
+        page: Arc<Mutex<String>>,
+        /// Bumped for every load so each navigation has a distinct URL —
+        /// WebView2 would otherwise treat a repeat of the same address as a
+        /// no-op and keep showing the previous video.
+        nav: u64,
     }
 
     impl VideoPlayer {
@@ -143,7 +198,8 @@ mod imp {
             };
 
             if self.webview.is_none() {
-                match Self::build(frame, bounds, &embed) {
+                let nav = self.arm(&embed);
+                match Self::build(frame, bounds, &nav, Arc::clone(&self.page)) {
                     Ok(webview) => {
                         self.webview = Some(webview);
                         self.loaded = Some(embed_key(&embed));
@@ -161,19 +217,18 @@ mod imp {
                 }
             }
 
+            let key = embed_key(&embed);
+            let needs_load = self.loaded.as_deref() != Some(key.as_str());
+            let nav = needs_load.then(|| self.arm(&embed));
+
             let webview = self.webview.as_ref().expect("just checked");
             let _ = webview.set_bounds(bounds);
             if !self.visible {
                 let _ = webview.set_visible(true);
                 self.visible = true;
             }
-            let key = embed_key(&embed);
-            if self.loaded.as_deref() != Some(key.as_str()) {
-                let result = match &embed {
-                    Embed::Page(url) => webview.load_url(url),
-                    Embed::File(url) => webview.load_html(&file_player_html(url)),
-                };
-                if let Err(e) = result {
+            if let Some(nav) = nav {
+                if let Err(e) = webview.load_url(&nav) {
                     return Err(format!("could not load player: {e}"));
                 }
                 self.loaded = Some(key);
@@ -181,10 +236,26 @@ mod imp {
             Ok(())
         }
 
+        /// Put `embed`'s player page where the protocol handler will find it,
+        /// and return the one-shot URL that fetches it.
+        fn arm(&mut self, embed: &Embed) -> String {
+            let html = match embed {
+                Embed::Page(url) => page_player_html(url),
+                Embed::File(url) => file_player_html(url),
+            };
+            // A poisoned lock here would mean the handler panicked mid-serve;
+            // the page string is still perfectly usable, so recover rather
+            // than take the whole app down over a video.
+            *self.page.lock().unwrap_or_else(PoisonError::into_inner) = html;
+            self.nav += 1;
+            format!("{PLAYER_ORIGIN}/p{}", self.nav)
+        }
+
         fn build(
             frame: &eframe::Frame,
             bounds: Rect,
-            embed: &Embed,
+            nav_url: &str,
+            page: Arc<Mutex<String>>,
         ) -> Result<WebView, Box<dyn std::error::Error>> {
             let handle = frame.window_handle()?;
             let builder = WebViewBuilder::new()
@@ -196,11 +267,22 @@ mod imp {
                 // Nothing this webview loads should outlive the session:
                 // it renders third-party player pages, and we have no reason
                 // to keep their cookies on disk afterwards.
-                .with_incognito(true);
-            let builder = match embed {
-                Embed::Page(url) => builder.with_url(url),
-                Embed::File(url) => builder.with_html(file_player_html(url)),
-            };
+                .with_incognito(true)
+                // Serves whatever `arm` last put in `page`, at any path under
+                // the scheme. The path only ever varies to defeat WebView2's
+                // same-URL navigation shortcut, so it is not inspected.
+                .with_custom_protocol(PLAYER_SCHEME.to_string(), move |_id, _request| {
+                    let html = page
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone()
+                        .into_bytes();
+                    wry::http::Response::builder()
+                        .header(wry::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+                        .body(Cow::Owned(html))
+                        .unwrap_or_default()
+                })
+                .with_url(nav_url);
             Ok(builder.build_as_child(&handle)?)
         }
 
@@ -269,6 +351,16 @@ mod tests {
 
         let article = PlaybackRequest::new("https://news.example.org/story");
         assert!(!article.is_embeddable());
+    }
+
+    #[test]
+    fn page_player_frames_the_embed_rather_than_navigating_to_it() {
+        // The iframe is what gives the embed a real parent origin; a plain
+        // navigation is what produced YouTube's "Error 153".
+        let html = page_player_html("https://www.youtube-nocookie.com/embed/abc?a=1&b=2");
+        assert!(html.contains("<iframe"));
+        assert!(html.contains("src=\"https://www.youtube-nocookie.com/embed/abc?a=1&amp;b=2\""));
+        assert!(html.contains("allowfullscreen"));
     }
 
     #[test]

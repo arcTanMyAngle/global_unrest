@@ -19,6 +19,9 @@ duplicating storage's per-region headline/theme aggregation
 stays desktop-only (direct `StorageHandle` access) until a real need to
 serve it over HTTP shows up.
 
+Daily Events cache rows and Media-page lookup hits are also desktop-only. They
+never enter a worker snapshot and have no services API endpoint.
+
 ## Snapshot handoff layout (published by `services/workers`)
 
 ```
@@ -34,7 +37,8 @@ serve it over HTTP shows up.
 
 Produced by `storage::StorageHandle::publish_snapshot` (same hive-partitioned
 shape as the M2 session export). The worker publishes a new version after
-every ingest cycle (fixture load at startup, then every live GDELT cycle);
+fixture load at startup and after successful enabled live-source cycles that
+add records;
 `LATEST` is updated via write-temp-then-rename, which is atomic on both
 Windows and POSIX, so the api never observes a half-written pointer. Each
 version directory is immutable once published — the api can read it

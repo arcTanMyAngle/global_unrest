@@ -3,8 +3,8 @@
 //! **This crate is deliberately not a `SignalSource`.** It ingests nothing,
 //! stores nothing, and never writes to the database. It answers one question,
 //! only when a person asks it: *"show me footage published about this place in
-//! this time window."* The results live in the UI for as long as that panel is
-//! open and are gone when it closes.
+//! this time window."* The results stay in UI memory until the next search
+//! replaces them or the app exits; they are never persisted.
 //!
 //! # Why on-demand rather than stored
 //!
@@ -15,15 +15,14 @@
 //! alternative, bulk-collecting every post URL for every place on the chance
 //! someone looks, is the thing worth avoiding.
 //!
-//! This is a deliberate, user-directed relaxation of
-//! docs/SAFETY_AND_PRIVACY.md's hard rule 6, which forbade a post URL from
-//! Bluesky/Telegram existing anywhere in the process. The rule stands for the
+//! This is the deliberate, user-directed exception defined by
+//! docs/SAFETY_AND_PRIVACY.md's hard rule 6. The rule still governs the
 //! *ingest* path — `crates/chatter`'s `(place, topic, window) -> count`
-//! boundary has not moved, and `source-bluesky`/`source-telegram` still cannot
-//! see a URL. What changed is that a person may now pull a named place's
-//! public posts into a transient result list. Read that document's
-//! "On-demand media lookup" section before widening this further; in
-//! particular, nothing here may be persisted or aggregated across queries.
+//! boundary has not moved, and the `source-bluesky`/`source-telegram` ingest
+//! adapters still cannot expose a URL. What changed is that a person may pull
+//! a named place's public posts into a transient result list. Read that
+//! document's "On-demand media lookup" section before widening this further;
+//! in particular, nothing here may be persisted or aggregated across queries.
 //!
 //! # What is retrieved
 //!
@@ -80,7 +79,7 @@ impl Provider {
 ///
 /// Everything here is what a public page already shows to anyone who opens
 /// it. There is no field for anything the platform does not print on the post,
-/// and no field that survives the panel closing.
+/// and no field that persists beyond the desktop process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaHit {
     /// The link to open or embed. For social posts this is the *post* URL, not

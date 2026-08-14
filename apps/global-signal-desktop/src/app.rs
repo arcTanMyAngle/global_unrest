@@ -367,10 +367,9 @@ pub struct App {
     pub digest_error: Option<String>,
 
     // --- Media page (crate::media_page) ---
-    // Every field here is session-scoped by design: results are held for as
-    // long as the page shows them and are replaced by the next search. None of
-    // it reaches storage (docs/SAFETY_AND_PRIVACY.md, "On-demand media
-    // lookup").
+    // Every field here is session-scoped by design: results stay in process
+    // memory until the next search replaces them or the app exits. None of it
+    // reaches storage (docs/SAFETY_AND_PRIVACY.md, "On-demand media lookup").
     media_rx: Option<mpsc::Receiver<MediaMsg>>,
     pub media_handle: MediaHandle,
     pub media_place: String,

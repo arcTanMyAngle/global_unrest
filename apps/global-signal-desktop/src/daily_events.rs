@@ -1,4 +1,5 @@
-//! The "Daily Events" page: one model-written digest per UTC calendar day.
+//! The "Daily Events" page: one cached model-written digest per UTC calendar
+//! day, replaceable by an explicit regeneration.
 //!
 //! This is the project's only *interpretive* surface — everywhere else the UI
 //! paints stored records, here a language model writes prose about them. Two
