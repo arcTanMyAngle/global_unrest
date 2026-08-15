@@ -4,23 +4,166 @@
 > preserve the state of their session and can mention work that is now shipped.
 > Use README.md, docs/ROADMAP.md, and docs/DEVELOPMENT.md for current behavior.
 
-## Current implementation correction (2026-08-14)
-
-The ninth-session entry below records an earlier Daily Events implementation.
-The current desktop uses Google Gemini with GEMINI_API_KEY and the
-gemini-live feature, not Anthropic. A generated digest is cached per UTC day
-and can be explicitly regenerated.
-
-The current desktop also has a user-directed Media page: an explicit
-place-scoped, time-bounded public-video lookup through GDELT and Bluesky,
-plus configured Telegram public channels. Results are session-memory only and
-never reach map ingest, storage, snapshots, the API, or Daily Events. Windows
-can use supported provider-published embeds; every unsupported path keeps a
-browser fallback. See README.md and docs/SAFETY_AND_PRIVACY.md for the current
-behavior and boundary.
-
-Last session: 2026-08-13 (**ninth** session). Read this file, then
+Last session: 2026-08-14 (**tenth** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
+
+## Tenth session (2026-08-13 late – 2026-08-14): Gemini swap, Media page, chatter widening, Bluesky post-card fix
+
+**This entry is reconstructed from `git log`/`git diff` across seven commits
+(`65ef438`, `8aeacd4`, `c758bd0`, `1b00af8`, `2b2ad61`, `5208cdc`,
+`7049489`), not written live during the session.** The actual in-flight
+notes existed — `HANDOFF_INFLIGHT.md` — but `2b2ad61` deleted that file and
+replaced it with only the 15-line correction note that was sitting at the
+top of this file until now, instead of folding its content in as its own
+header instructed ("Fold this into `HANDOFF.md` once the work lands, then
+delete this file"). That gap is what this entry closes. `CHANGELOG.md`'s
+Unreleased section was kept current throughout and is the more authoritative
+source for *what shipped*; this entry adds the *why/how*, session
+boundaries, and the one fix (`5208cdc`) that never got a changelog line at
+all until this pass.
+
+**1. `65ef438` "model swap complete and more" — Daily Events moved from
+Anthropic Claude to Google Gemini.** `crates/daily-digest`'s
+`AnthropicDigester` became `GeminiDigester`: auth moved from an
+`anthropic-version` header + `x-api-key` to `x-goog-api-key`; the endpoint
+became a *base* URL with the model id and method appended by a new
+`api_url()` rather than one fixed constant, since Gemini's REST shape embeds
+the model in the path; 429 handling gained a fallback parse path because
+this API usually omits `Retry-After` and instead nests the delay as a
+duration string (`"41s"`) inside a `RetryInfo` error detail. Env var is now
+`GEMINI_API_KEY`, feature is `gemini-live` (was `anthropic-live`) — updated
+package-qualified through `.github/workflows/ci.yml`'s feature matrix and
+the `anthropic-live-mock` → `gemini-live-mock` job. `.env.example` gained a
+note that Google's free tier may use submitted prompts/responses to improve
+their products and that human reviewers may read them — worth knowing before
+assuming Gemini's terms mirror Anthropic's. `docs/SAFETY_AND_PRIVACY.md`'s
+"Third-party processing" section was updated to match. The two-field
+schema, the `row_level_permitted` withholding of ACLED/chatter rows, and the
+`MAX_PLACES`/`MAX_HEADLINES`/`MAX_NOTABLE` caps — the three structural rules
+the ninth session built — all carried over unchanged; only the transport
+and its auth/error shapes moved.
+
+**2. `8aeacd4` "thoughts" + `c758bd0` "feats" + `1b00af8` "update" — the
+Media page, built as `HANDOFF_INFLIGHT.md` scoped it.** This is Task 1
+("video playback in the app") and the start of Task 2 ("far more source
+coverage") from that in-flight doc, both landing for real:
+- **`core_types::media::{Embed, embed_for}`** (`c758bd0`): a pure URL →
+  playback mapping over each provider's *published* embed endpoint
+  (`youtube-nocookie.com/embed/…`, `player.vimeo.com`, `t.me/…?embed=1`,
+  originally also `embed.bsky.app` — see item 4 below for why that one was
+  wrong and got removed one commit later). `None` means "hand it to the OS
+  browser," which is the honest fallback for anything not on that list.
+- **`crates/media-search`** (new crate, `c758bd0` then widened in
+  `1b00af8`): `Provider {Gdelt, Bluesky, Telegram}`, `MediaQuery`,
+  `MediaHit`, `merge` (newest-first, dedup by URL), plus feature-gated live
+  legs for GDELT DOC 2.0 and Bluesky's keyless `searchPosts`
+  (`api.bsky.app`, not `public.api.bsky.app` — the latter 403s that one
+  endpoint specifically) with `BLOCKED_LABELS` filtering platform
+  moderation labels so hashtag-stuffed adult-content posts don't crowd out
+  real footage. `tests/live_mock.rs` (284 lines) and a new
+  `media-search-live-mock` CI job cover it against a local socket, no
+  network or credentials — same precedent as `source-acled`/`daily-digest`.
+- **`apps/global-signal-desktop/src/video.rs`** (`c758bd0`): the in-app
+  player. Windows-only real implementation behind `video-embed` builds a
+  `wry::WebView` as a child window (`build_as_child`), positioned in
+  physical pixels every frame; every other target/URL keeps the browser
+  fallback. The player page is served through a wry custom protocol
+  (`http://lesplay.localhost`) specifically so it has a real origin —
+  navigating the webview straight at an embed gives it an opaque origin and
+  YouTube refuses with "Error 153". This fact and the Bluesky non-embed fact
+  (item 4) are now both recorded in `CLAUDE.md`'s dependency guardrails so
+  neither gets undone by a future refactor.
+- **`apps/global-signal-desktop/src/{media.rs,media_page.rs}`** (`1b00af8`):
+  the Media page itself — no cadence, one search at a time, never opens
+  storage (same worker-isolation shape as `digest.rs`). Results are
+  session-memory only: they never reach map ingest, DuckDB, snapshots, the
+  API, or Daily Events.
+- **`crates/source-telegram/src/media.rs`** (`1b00af8`, 216 lines, new):
+  Task 2's Telegram leg, and the one deliberate exception to
+  `source-telegram`'s aggregate-only rule — bounded by no cadence, nothing
+  stored, the existing `ChannelSweep`/`chatter` boundary untouched, and no
+  per-sender attribution (a hit is attributed to the channel only).
+- **`crates/chatter/src/{place.rs,topic.rs}`** (`2b2ad61`, +309/+228 lines):
+  Task 2's coverage-widening leg — country aliases for Natural Earth's
+  abbreviated map-label spellings ("S. Sudan", "Dem. Rep. Congo", "Bosnia
+  and Herz." and similar, previously unreachable by anything a person would
+  actually type), a new `COUNTRY_ADJECTIVES` demonym table with an explicit
+  inclusion rule (only a demonym whose *sole* common English reading is the
+  nationality — "polish"/"danish"/"american"/"chinese" and similar stay
+  excluded on purpose, documented inline), and Gaza/West Bank resolving to
+  the Palestine centroid at Country precision since neither has separate
+  admin-0 geometry (coarse is the honest answer per hard rule 4, not a
+  fabricated coordinate). The `(place, topic, window) -> count` boundary
+  itself did not move — this widens what resolves into it, not what leaves
+  it.
+- **`.github/workflows/ci.yml`** (`1b00af8`): `media-live` and
+  `video-embed` added to the feature matrix, package-qualified same as
+  `gemini-live` since both are desktop-only; a note explaining why
+  `video-embed` on ubuntu is a deliberate no-op leg (`wry` is
+  `cfg(windows)`-gated) rather than dead weight — it exists to catch a
+  `#[cfg]` mistake that would leave `video.rs` failing `-D warnings` on the
+  stub path.
+
+**What is *not* independently confirmed by this reconstruction**: whether
+gates were actually run to green, whether a live app run happened, and any
+in-session testing narrative (rate-limit probes, DID-vs-handle bugs, and
+similar) that `HANDOFF_INFLIGHT.md` itself recorded before being deleted.
+**Re-run the full gate list in CLAUDE.md before trusting this state**,
+including the `--no-default-features` union with `gemini-live,media-live,
+video-embed` and `cargo test -p media-search --features live` — none of
+those legs have a confirmed-green record after `1b00af8`.
+
+**3. `2b2ad61` "update" — the fold-in commit, and the one that dropped the
+narrative.** Alongside the chatter widening above, this commit also rewrote
+`CHANGELOG.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`, and every
+`docs/*.md` file to describe the shipped Gemini/Media state (that content is
+accurate and is why `CHANGELOG.md`'s Unreleased section could be trusted as
+the source of *what* shipped for this entry), added the 15-line "Current
+implementation correction" note this file carried until this session, and
+deleted `HANDOFF_INFLIGHT.md` (312 lines) without moving its content here —
+that is the actual gap. **Lesson for next time**: when an in-flight handoff
+file's own header says "fold this in, then delete," treat that as a
+same-commit obligation, not a follow-up.
+
+**4. `5208cdc` "update" — the Bluesky post-card fix.** `embed_for`'s Bluesky
+arm (added one commit earlier in `c758bd0`) mapped a post URL to
+`embed.bsky.app/embed/<did>/app.bsky.feed.post/<rkey>` on the assumption
+that was Bluesky's published player, mirroring the Telegram/YouTube/Vimeo
+pattern. It is not a player — `embed.bsky.app` renders a post *card* with a
+play triangle that is itself a link back to `bsky.app/…?ref_src=embed`
+rather than starting playback (verified 2026-08-14, noted in the diff as
+checked in Firefox against the same iframe wrapper the desktop player
+uses). Inside the wry webview that navigation simply goes nowhere, which
+reads as a broken video rather than an unsupported one. Fix: `embed_for`
+now returns `None` for every `bsky.app` post URL, so the honest browser
+fallback handles it — `bsky.app` plays its own native HLS video correctly
+in a real browser, which WebView2 could not have decoded anyway even if the
+embed had worked. `crates/media-search/src/bluesky.rs`'s module doc,
+`core-types/src/media.rs`'s test suite, and `CLAUDE.md`'s dependency
+guardrails were all updated to state this as a fact not to re-decide (see
+item 2's `video.rs` bullet for the sibling fact about the player's
+`lesplay.localhost` origin, recorded in the same `CLAUDE.md` edit). **No
+CHANGELOG line existed for this fix before this session** — added under a
+new `### Fixed` heading in Unreleased.
+
+**5. `7049489` "wf fix" — two small, unrelated fixes.** `duckdb`'s Cargo
+feature gained `parquet` (was `bundled` only) — likely required for a
+snapshot-publish or export path to link; not otherwise explained by the
+diff alone, worth a quick grep for a Parquet call that was failing to
+compile before assuming it was unrelated cleanup. `VideoPlayer::new()`
+constructors were added to both the real and stub `video.rs`
+implementations, replacing a `VideoPlayer::default()` call in `app.rs` —
+cosmetic on the stub arm, but worth checking whether the real arm's `new()`
+does anything `default()` didn't (e.g., protocol registration) before
+assuming it's a pure rename.
+
+**Loose ends carried forward, still open, none touched this session**:
+branch protection on `main`, the release workflow (never exercised — no tag
+ever pushed), a Bluesky mock-server test (only source without one — same
+gap the ninth session's list already named), the stale README screenshot
+(README itself was rewritten in `1b00af8`, so re-check whether this is even
+still true before assuming it carries forward), Dependabot PRs open and
+unreviewed on origin.
 
 ## Ninth session (2026-08-13): the AI Daily Events digest — built, gated, safety-reviewed
 

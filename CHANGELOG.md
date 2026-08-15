@@ -8,6 +8,15 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+### Fixed
+
+- Media player: a Bluesky post's own page (not `embed.bsky.app`) is now the
+  hit URL and never claimed as an in-app embed. `embed.bsky.app` renders a
+  post card whose play button is a link back to `bsky.app` rather than a
+  player, so the previous mapping opened a dead click inside the webview;
+  affected native-video hits now open in the OS browser, where playback
+  works.
+
 ### Added
 
 - Daily Events: a separate, opt-in desktop page that writes a model-generated
