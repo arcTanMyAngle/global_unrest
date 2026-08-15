@@ -35,21 +35,37 @@ pub struct BlueskySource {
 }
 
 impl BlueskySource {
-    /// Build over the bundled gazetteers. `LES_BLUESKY_ENDPOINT` pins a
-    /// single endpoint (tests point this at a local server); unset means the
-    /// public [`JETSTREAM_ENDPOINTS`] are rotated.
+    /// Build over the bundled gazetteers with an explicit window. Endpoint
+    /// defaults to rotating the public [`JETSTREAM_ENDPOINTS`]; see
+    /// [`Self::with_endpoint`] to pin one (tests point this at a local
+    /// server).
+    pub fn new(window_secs: i64) -> Result<Self, SourceError> {
+        let accumulator = ChatterAccumulator::from_bundled(window_secs)
+            .map_err(|e| SourceError::Other(format!("building chatter matcher: {e}")))?;
+        Ok(Self {
+            endpoint: None,
+            accumulator: Arc::new(Mutex::new(accumulator)),
+        })
+    }
+
+    /// Pin a single endpoint instead of rotating [`JETSTREAM_ENDPOINTS`].
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Build from `LES_BLUESKY_WINDOW_SECS`/`LES_BLUESKY_ENDPOINT`.
     pub fn from_env() -> Result<Self, SourceError> {
         let window_secs = std::env::var("LES_BLUESKY_WINDOW_SECS")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_WINDOW_SECS);
-        let accumulator = ChatterAccumulator::from_bundled(window_secs)
-            .map_err(|e| SourceError::Other(format!("building chatter matcher: {e}")))?;
-        Ok(Self {
-            endpoint: std::env::var("LES_BLUESKY_ENDPOINT").ok(),
-            accumulator: Arc::new(Mutex::new(accumulator)),
-        })
+        let mut source = Self::new(window_secs)?;
+        if let Ok(endpoint) = std::env::var("LES_BLUESKY_ENDPOINT") {
+            source.endpoint = Some(endpoint);
+        }
+        Ok(source)
     }
 
     /// Endpoints this source will try, in order.

@@ -130,6 +130,20 @@ jobs:
       - name: media-search live mock suite
         run: cargo test -p media-search --features live
 
+  # source-bluesky's `live` feature carries its own mock-Jetstream-server
+  # suite (tests/live_mock.rs): a local WebSocket server feeds the real
+  # spawn_stream/fetch path scanned/matched/malformed frames and asserts a
+  # window stays pending until it completes. No real network, no keys — the
+  # firehose is keyless anyway, but the socket itself is still local-only.
+  bluesky-live-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: source-bluesky live mock suite
+        run: cargo test -p source-bluesky --features live
+
   # Closes the M4 verification gap: `docker compose up` was written but
   # never run locally (no docker CLI on the dev machine). Runs fixtures-only
   # (LES_ONLINE=0) so it needs no network or credentials.

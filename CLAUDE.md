@@ -57,6 +57,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p source-acled --features live
+cargo test -p source-bluesky --features live
 cargo test -p daily-digest --features live
 cargo test -p media-search --features live
 cargo deny check
@@ -69,8 +70,9 @@ cargo test -p global-signal-desktop -p workers --no-default-features --features 
 ~~~
 
 The CI workflow runs each source feature separately, the desktop-only
-gemini-live/media-live/video-embed features, their full union, ACLED/Gemini/
-Media mock suites, Compose smoke coverage, and workspace gates. UI-visible
+gemini-live/media-live/video-embed features, their full union, ACLED/
+Bluesky/Gemini/Media mock suites, Compose smoke coverage, and workspace
+gates. UI-visible
 changes need a live desktop run when feasible. A real cargo build of the
 desktop is useful after dependency/linking changes because check and clippy do
 not perform the final link.

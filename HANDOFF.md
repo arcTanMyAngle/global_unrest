@@ -4,8 +4,85 @@
 > preserve the state of their session and can mention work that is now shipped.
 > Use README.md, docs/ROADMAP.md, and docs/DEVELOPMENT.md for current behavior.
 
-Last session: 2026-08-14 (**tenth** session). Read this file, then
+Last session: 2026-08-15 (**eleventh** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
+
+## Eleventh session (2026-08-15): HANDOFF/CHANGELOG backfill, source-bluesky mock-server test
+
+Two small, doc-first pieces of carried-forward cleanup, both requested and
+approved explicitly rather than picked up silently.
+
+**1. Backfilled the tenth session's documentation gap.** The tenth-session
+entry above (Gemini swap, Media page, chatter widening, Bluesky post-card
+fix) did not exist until this session — it was reconstructed from
+`git log`/`git diff` after finding `HANDOFF_INFLIGHT.md` had been deleted in
+`2b2ad61` without being folded in. Added a `### Fixed` line to
+`CHANGELOG.md`'s Unreleased section for the Bluesky post-card fix (`5208cdc`),
+which had shipped with no changelog entry at all before this pass.
+
+**2. `source-bluesky` mock-server test — the actual gap, not quite as
+previously framed.** The carried-forward loose end (present since the
+seventh session, repeated through the tenth: "no Bluesky mock-server test,
+only source without one") undersold the real state: before this session,
+**ACLED was the only `source-*` crate with any `--features live` mock-server
+test at all** — NOAA, IODA, and Telegram had zero live-feature test coverage,
+not just Bluesky. That's still true for NOAA/IODA/Telegram after this
+session; only the Bluesky piece of the gap is closed here, because it was
+the one already scoped and named across three prior sessions' handoffs.
+Telegram remains the biggest remaining lift — it needs a mock MTProto
+server, materially more work than an HTTP or WebSocket mock (flagged
+correctly by the seventh session's notes). NOAA and IODA are unscoped but
+are plain polled-HTTP sources, so they're likely ACLED-shaped lifts whenever
+someone picks them up.
+
+Bluesky's `live.rs` is a WebSocket stream (Jetstream firehose), not
+request/response HTTP like ACLED's OAuth+paging, so the ACLED
+`tests/live_mock.rs` pattern (a raw `TcpListener` speaking hand-rolled
+HTTP/1.1) does not transfer directly. `crates/source-bluesky/tests/live_mock.rs`
+instead runs a local `tokio_tungstenite::accept_async` server over a
+`TcpListener` and drives the real `spawn_stream`/`fetch` path end to end:
+- Sends a mix of a matching post, an unrelated post, a malformed (non-JSON)
+  frame, and a wrong-collection commit down the socket; asserts `stats()`
+  only counts the two real post-creates as scanned (malformed/wrong-collection
+  frames are not), exactly one rollup drains, and its place/topic/count match.
+- Separately asserts the completed-vs-pending window boundary over the real
+  network path: a post landing in the *current* window is not returned by an
+  immediate `fetch`, but is returned after the window closes.
+- One request-target gotcha cost a debugging round: the endpoint URL handed
+  to the source must include a trailing `/` (`ws://{addr}/`) before
+  `subscribe_url` appends `?wantedCollections=...` — an origin-form
+  request-target with a query and no leading `/` fails `tungstenite`'s
+  server-side URI parsing on `accept_async` (`HttpFormat(InvalidUri(...))`,
+  visible only from inside the spawned mock-server task).
+
+`crates/source-bluesky/src/live.rs` gained two small builder-style methods
+so the test doesn't have to fight `LES_BLUESKY_ENDPOINT`/`LES_BLUESKY_WINDOW_SECS`
+env-var races across concurrently-run `#[tokio::test]`s — the same shape
+ACLED already uses (`with_token_url`/`with_read_url`) rather than a new
+pattern: `BlueskySource::new(window_secs)` (a bare constructor, no env
+reads) and `.with_endpoint(url)` (pins one endpoint instead of rotating
+`JETSTREAM_ENDPOINTS`). `from_env()` now just calls `new()` and layers the
+env vars on top; production behavior is unchanged.
+
+Wired a `bluesky-live-mock` CI job (same shape as `acled-live-mock`/
+`gemini-live-mock`/`media-search-live-mock`) and added
+`cargo test -p source-bluesky --features live` to `CLAUDE.md`'s quality-gate
+list. Full gate list re-run green this session: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, all four named `--features live` legs, the
+`--no-default-features` desktop/worker feature-union check, and
+`cargo deny check` (pre-existing duplicate-`windows_x86_64_*`-crate warnings
+only, no new advisory/license/ban failures).
+
+**Nothing committed — standing instruction, user does their own commits.**
+
+**Loose ends carried forward, still open, none touched this session**:
+branch protection on `main`, the release workflow (never exercised — no tag
+ever pushed), no live-feature mock-server test for NOAA/IODA/Telegram
+(Telegram needs a mock MTProto server; NOAA/IODA are unscoped but probably
+ACLED-shaped), the stale README screenshot (still unverified whether this is
+even still true post-`1b00af8`), Dependabot PRs open and unreviewed on
+origin.
 
 ## Tenth session (2026-08-13 late – 2026-08-14): Gemini swap, Media page, chatter widening, Bluesky post-card fix
 

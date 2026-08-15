@@ -56,7 +56,11 @@ project with no published crate API to stabilize against.
   topic in a 5-minute window, as a media-attention signal alongside GDELT's
   article counts. The ingest path stores and logs no post text, author
   identity, post id, or URL, and exposes none in normalized source data
-  (docs/SAFETY_AND_PRIVACY.md hard rule 6).
+  (docs/SAFETY_AND_PRIVACY.md hard rule 6). A local mock-Jetstream-server
+  suite (`tests/live_mock.rs`) drives the real `spawn_stream`/`fetch` path
+  over a WebSocket, covering scanned/matched counts, malformed-frame
+  tolerance, and the completed-vs-pending window boundary — no real network
+  or keys needed.
 - `chatter`: the shared aggregate-before-storage machinery both Bluesky and
   Telegram use — gazetteer place matching, a
   fixed topic keyword table, an in-memory accumulator, and `ChatterRollup`
