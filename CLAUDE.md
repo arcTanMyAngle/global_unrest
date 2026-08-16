@@ -57,6 +57,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p source-acled --features live
+cargo test -p source-noaa --features live
 cargo test -p source-bluesky --features live
 cargo test -p daily-digest --features live
 cargo test -p media-search --features live

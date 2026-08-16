@@ -144,6 +144,20 @@ jobs:
       - name: source-bluesky live mock suite
         run: cargo test -p source-bluesky --features live
 
+  # source-noaa's `live` feature carries its own mock-HTTP-server suite
+  # (tests/live_mock.rs): query params, GeoJSON `features` parsing, the
+  # empty/missing/non-array `features` cases, and 429 mapping — the same
+  # local raw-TcpListener HTTP mock pattern as source-acled, minus the OAuth
+  # leg since api.weather.gov is keyless. No real network.
+  noaa-live-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: source-noaa live mock suite
+        run: cargo test -p source-noaa --features live
+
   # Closes the M4 verification gap: `docker compose up` was written but
   # never run locally (no docker CLI on the dev machine). Runs fixtures-only
   # (LES_ONLINE=0) so it needs no network or credentials.
