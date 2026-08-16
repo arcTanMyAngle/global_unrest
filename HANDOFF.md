@@ -4,8 +4,67 @@
 > preserve the state of their session and can mention work that is now shipped.
 > Use README.md, docs/ROADMAP.md, and docs/DEVELOPMENT.md for current behavior.
 
-Last session: 2026-08-15 (**eleventh** session). Read this file, then
+Last session: 2026-08-15 (**thirteenth** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
+
+## Thirteenth session (2026-08-15): source-ioda mock-server test
+
+Closed the recommended next live-transport coverage gap. New
+`crates/source-ioda/tests/live_mock.rs` uses the same local raw-`TcpListener`
+HTTP pattern as `source-noaa` and drives IODA's real `fetch`/`normalize` path
+with no external network access. Six live-feature integration tests cover:
+- the exact country/CODF/window query parameters, `data[]` parsing, and one
+  fetched outage normalized through the bundled Natural Earth country index;
+- missing and null `data` as empty results, plus non-array `data` as an error;
+- IODA's successful-HTTP `error` response shape;
+- `429` plus `Retry-After` mapping to `SourceError::RateLimited`; and
+- non-success HTTP status mapping to `SourceError::Http`.
+
+`source-ioda` gained the Tokio dev-dependency the mock server needs. Added an
+`ioda-live-mock` CI job and the matching
+`cargo test -p source-ioda --features live` command to both `CLAUDE.md` and
+`docs/DEVELOPMENT.md`; `CLAUDE.md`'s CI summary now names the NOAA and IODA
+mock suites too. No production source behavior changed — `IodaSource` already
+had the `new().with_endpoint(...)` seam needed to avoid environment-variable
+races in concurrent tests.
+
+Full gate battery is green: fmt, workspace clippy, workspace tests, all six
+named live mock legs (ACLED, NOAA, IODA, Bluesky, Gemini, Media), the
+desktop/worker no-default-features full-union clippy and tests, and
+`cargo deny check`. One pre-existing Windows-only gate wrinkle was surfaced:
+the first parallel `cargo test --workspace` run raced because both
+`source-bluesky` and `media-search` have an example binary named `live_probe`
+and Cargo links both to `target/debug/examples/live_probe.exe`; it failed with
+`LNK1104`, then the same workspace suite passed with `-j 1`. Cargo still emits
+the duplicate-output warning even serially. This is unrelated to IODA but is
+worth fixing or remembering before treating that Windows linker race as a
+code regression.
+
+**Nothing committed — standing instruction, user does their own commits.**
+
+**Loose ends carried forward, still open**: no live-feature mock-server test
+for Telegram (materially larger because it needs mock MTProto; discuss scope
+before starting), branch protection on `main`, the never-exercised tag release
+workflow, README screenshot freshness after `1b00af8`, and unreviewed
+Dependabot PRs on origin.
+
+## Twelfth session (2026-08-15): source-noaa mock-server test
+
+This session happened after the eleventh entry below but was not folded into
+this journal at the time. It is committed as `c7729ca` and is present on both
+local `main` and `origin/main`.
+
+Added `crates/source-noaa/tests/live_mock.rs`, a local raw-`TcpListener` HTTP
+suite that drives the real NOAA `fetch`/`normalize` path under `--features
+live`: request query/header shape, GeoJSON `features` parsing and
+normalization, missing/non-array response cases, rate limiting, and server
+errors. Added Tokio as a `source-noaa` dev-dependency, a dedicated
+`noaa-live-mock` CI job, and the corresponding command in `CLAUDE.md` and
+`docs/DEVELOPMENT.md`; the latter also picked up its previously missing
+`source-bluesky` command. The full then-current gate list was re-run green.
+
+**Nothing remained uncommitted from that session when the thirteenth session
+started.**
 
 ## Eleventh session (2026-08-15): HANDOFF/CHANGELOG backfill, source-bluesky mock-server test
 

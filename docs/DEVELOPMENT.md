@@ -41,6 +41,7 @@ cargo test --workspace
 # Live source/transport paths against local mock servers
 cargo test -p source-acled --features live
 cargo test -p source-noaa --features live
+cargo test -p source-ioda --features live
 cargo test -p source-bluesky --features live
 cargo test -p daily-digest --features live
 cargo test -p media-search --features live

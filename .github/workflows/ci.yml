@@ -158,6 +158,19 @@ jobs:
       - name: source-noaa live mock suite
         run: cargo test -p source-noaa --features live
 
+  # source-ioda's `live` feature carries its own mock-HTTP-server suite
+  # (tests/live_mock.rs): country/window/CODF query params, `data` parsing,
+  # empty/missing/non-array/error response cases, and 429 mapping — the same
+  # local raw-TcpListener HTTP mock pattern as source-noaa. No real network.
+  ioda-live-mock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: source-ioda live mock suite
+        run: cargo test -p source-ioda --features live
+
   # Closes the M4 verification gap: `docker compose up` was written but
   # never run locally (no docker CLI on the dev machine). Runs fixtures-only
   # (LES_ONLINE=0) so it needs no network or credentials.
