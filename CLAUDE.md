@@ -149,6 +149,13 @@ worker and supports LES_API_BIND plus private-only LES_API_ALLOW_ACLED.
 - Keep renderer work cached. Do not add per-frame geometry tessellation,
   unbounded overlay loops, or UI queries that block a frame.
 
+## Model routing
+
+`.claude/MODEL_ROUTING.md` records which model each kind of task in this repo
+belongs to. Read it at the start of a work session: if the task you were given
+does not match the model you are running, say so before starting and name the
+model it belongs to.
+
 ## Documentation discipline
 
 Update docs in the same change as code:
