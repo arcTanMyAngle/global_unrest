@@ -55,7 +55,7 @@ diamond markers; 6-h-bucket time slider with playback; region inspector
 themes, headline metadata); theme/kind/confidence filters; per-source live
 status lines with attribution.
 
-## V1 — Timeline & anomaly reading ✅ shipped 2026-08-10 (see HANDOFF.md)
+## V1 — Timeline & anomaly reading ✅ shipped 2026-08-10
 
 The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
 
@@ -96,7 +96,7 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
    - *Accept:* pausing shows the same data at full detail; screenshots
      without playback are unaffected.
 
-## V2 — Signature analytical views ✅ shipped 2026-08-12 (see HANDOFF.md)
+## V2 — Signature analytical views ✅ shipped 2026-08-12
 
 5. **Attention ↔ unrest divergence layer.** A diverging heat metric:
    cells where *media attention outruns event data* (covered but quiet) vs
@@ -169,7 +169,7 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
   Paging orders by `(ts_epoch_s DESC, id DESC)` — without the id tiebreak,
   events sharing a timestamp would repeat or vanish across pages.
 
-## V3 — Layer identity & orientation ✅ shipped 2026-08-12 (see HANDOFF.md)
+## V3 — Layer identity & orientation ✅ shipped 2026-08-12
 
 8. **Per-source visual identity + real legend.** NOAA alerts render as
    translucent severity-tinted cell overlays with a distinct outline style

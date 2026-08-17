@@ -1,26 +1,36 @@
 # Roadmap
 
-This is the current forward-looking roadmap. The original approved plan is
-kept in [PLAN.md](PLAN.md) as a dated planning record; use the README and
-development docs for current behavior.
+This is the current forward-looking roadmap and the milestone record. Use the
+README and [DEVELOPMENT.md](DEVELOPMENT.md) for current behavior and commands,
+[CHANGELOG.md](../CHANGELOG.md) and `git log` for what changed when, and
+[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md) for build and source landmines.
 
 ## Shipped
 
 | Area | Status |
 |---|---|
-| M1-M3 | Complete: offline regression harness, transparent scoring, and live GDELT ingestion. |
-| M4 | Complete: worker-owned DuckDB, immutable Parquet snapshots, read-only API, and Docker Compose smoke coverage. |
-| M5 | Complete: authorized ACLED and keyless NOAA/NWS layers. |
-| M6 | Complete: CI, release workflow, cargo-deny, Dependabot, changelog, and contributor guidance. |
-| V1-V3 | Complete: timeline/anomaly reading, analytical views, layer identity, orientation, and reading guidance. |
-| IODA, Bluesky, Telegram | Complete: country-precision outages and two aggregate-only chatter sources. |
-| M7 | Complete: API hardening, conditional GET, pagination, OpenAPI, metrics, health staleness, integration fixtures, and full feature verification. |
+| M0 | Complete: workspace scaffold, CI, licensing, Natural Earth data, 35-day fixture generator, tracing, config directories. |
+| M1 | Complete: fully offline fixture pipeline — normalize, DuckDB, map, heatmap, precision-aware markers, time slider, inspector, headless E2E, perf smoke. |
+| M2 | Complete: transparent scoring components, baselines, spike detection, confidence badges, topic filters, Parquet export, golden tests, benches. |
+| M3 | Complete: live GDELT DOC JSON and Events CSV-zip ingestion, rate limiting and backoff, dedup, retention, online toggle and graceful degradation. |
+| M4 | Complete: worker-owned DuckDB, immutable Parquet snapshots, read-only API, Docker Compose. |
+| M5 | Complete: authorized ACLED (OAuth) and keyless NOAA/NWS layers. |
+| M6 | Complete: CI depth, release workflow, cargo-deny, Dependabot, changelog, contributor guidance. |
+| M7 | Complete: API hardening, conditional GET, pagination, OpenAPI, metrics, health staleness, integration fixtures, full feature verification. |
+| V1–V3 | Complete: timeline and anomaly reading, analytical views, layer identity, orientation, and reading guidance. |
+| IODA, Bluesky, Telegram | Complete: country-precision outages and two aggregate-only chatter sources, pulled forward from M8. |
 | Daily Events | Complete: opt-in, locally cached, Google Gemini-written day digests with the safety boundary reviewed and enforced. |
-| Media research and playback | Complete: user-directed, transient public-video lookup with an honest browser fallback and Windows published-embed player where supported. |
+| Media research and playback | Complete: user-directed, transient public-video lookup with an honest browser fallback and a Windows published-embed player. |
+
+The original approved M0–M5 plan and its acceptance criteria are preserved in
+version control; their substance is the table above plus the implementation
+docs. Design rationale that outlived the plan document lives in
+[ARCHITECTURE.md](ARCHITECTURE.md), [DATA_MODEL.md](DATA_MODEL.md),
+[SCORING.md](SCORING.md), and [VISUALIZATION.md](VISUALIZATION.md).
 
 ### M7 service hardening
 
-The API now has request tracing, a timeout, concurrency cap, per-IP rate limit,
+The API has request tracing, a timeout, concurrency cap, per-IP rate limit,
 GET-only CORS, gzip compression, and graceful shutdown. Snapshot versions are
 ETags; events are paginated; OpenAPI is available at /openapi.json; Prometheus
 metrics are available at /metrics; and /health reports snapshot age and
@@ -54,6 +64,40 @@ DuckDB, snapshots, services, cache, or Daily Events. Public social posts are
 labelled unverified. The Windows player uses only provider-published embeds;
 unsupported links and other platforms retain the browser fallback.
 
+## Open operational items
+
+Engineering is ahead of release and repository operations. These are the
+tracked gaps, none of which block development:
+
+- **No release has ever been cut.** There are no tags locally or on the
+  remote, GitHub has no releases, and `release.yml` has zero runs. Before a
+  first tag: the `v*` trigger accepts non-semver tags and does not verify the
+  tag against `workspace.package.version`, the CHANGELOG, or a commit on
+  `main`; Docker metadata strips the leading `v`, so the release body
+  advertises `:v0.6.0`-shaped tags while the real outputs are `:0.6.0`,
+  `:0.6`, and `:latest`; the CHANGELOG link points at moving `main`;
+  third-party actions are tag-pinned rather than SHA-pinned; the workflow has
+  no explicit read-only top-level token permission; GHCR images can publish
+  before all desktop artifacts pass; and there are no checksums or provenance
+  attestations.
+- **The workspace version is still 0.6.0** while substantial work sits under
+  Unreleased. The first real tag should be a newly chosen version, not a
+  retroactive v0.6.0.
+- **`main` is unprotected.** There is no CODEOWNERS file and recent commits
+  are unsigned. This is a manual GitHub settings step.
+- **Dependabot PRs are open and unmerged.** The current grouping bundles a
+  migration-sized eframe/egui 0.35 → 0.36 (transitively wgpu 29 → 30) with
+  routine patches, which makes review harder than it needs to be. Split
+  release-action upgrades from CI actions, and UI/zip/benchmark migrations
+  from routine Cargo patches, before merging.
+- **`compose-smoke` has never run on the development machine** (no local
+  Docker CLI). It is covered by CI.
+- **No mock-server suite for `source-telegram`.** ACLED, NOAA, IODA,
+  Bluesky, Gemini, and media-search all have one; Telegram's MTProto path is
+  covered only by unit tests over the extracted `ChannelSweep` state machine
+  and a manual login example. A mock MTProto server is a larger lift than the
+  others and has not been scoped.
+
 ## M8: platform and source polish
 
 The remaining platform work is intentionally scoped rather than a commitment
@@ -62,8 +106,12 @@ to add every possible feed:
 - Settings and About UI for source state and full attributions. Credentials
   stay in environment variables, never the settings database.
 - A slippy-tile basemap design pass before implementation: projection,
-  provider policy, offline behavior, and a clear user toggle.
+  provider policy, offline behavior, and a clear user toggle. This is the one
+  item deferred continuously since M3.
 - Criterion benchmarks in CI and a profiling pass toward higher retention.
+- Chatter coverage for unsegmented scripts. This is a **segmentation**
+  problem, not a keyword-list addition — see the correction in
+  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#correction-to-the-chatter-backlog-burmese-topic-tokens-will-not-work).
 - Optional moving-layer design work, such as CelesTrak satellites, only after
   its thinning, precision, and disclosure behavior are defined.
 - AIS or other high-volume streams only with a dedicated volume, privacy, and
@@ -90,20 +138,24 @@ safety-reviewed end-to-end prototype. It must provide:
 Voluntary publishing is in scope. Covert tracking, location inference, and
 tactical targeting are not.
 
+## Standing risks
+
+1. Bundled DuckDB MSVC builds are slow — mitigated by a workspace-level
+   dependency, CI caching, and crate boundaries.
+2. eframe/wgpu lockstep churn — mitigated by pins and dedicated upgrade PRs.
+3. The egui performance cliff — mitigated by cached meshes and a perf smoke
+   test.
+4. DuckDB cross-process locking — mitigated by the single-writer rule and the
+   Parquet handoff.
+5. Source geocoding to centroids — mitigated by the precision contract.
+6. No GPU in CI — mitigated by headless pipeline tests.
+7. Coverage bias being misread as ground truth — mitigated by component
+   separation, confidence badges, and in-app disclosure.
+
 ## Quality bar
 
-Every change should keep these green:
-
-~~~sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test -p source-acled --features live
-cargo test -p daily-digest --features live
-cargo test -p media-search --features live
-cargo deny check
-~~~
-
-Ingest or feature work also needs the source-feature matrix from
-.github/workflows/ci.yml. Fixtures remain the deterministic offline regression
-base; the desktop remains live-data-only.
+Every change must keep the gates in
+[DEVELOPMENT.md](DEVELOPMENT.md#common-commands) green, plus the source
+feature matrix in `.github/workflows/ci.yml` for ingest or feature work.
+Fixtures remain the deterministic offline regression base; the desktop
+remains live-data-only.

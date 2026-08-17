@@ -2,7 +2,7 @@
 //!
 //! GDELT is free with attribution and asks callers not to hammer it; its feeds
 //! refresh every 15 minutes. This module holds the source-agnostic *policy* the
-//! app's ingest worker drives (docs/PLAN.md §11 step 3):
+//! app's ingest worker drives (see "Ingest worker" in docs/ARCHITECTURE.md):
 //!
 //! - [`request_limiter`] — a `governor` rate limiter spacing live requests.
 //! - [`Backoff`] — exponential backoff with jitter that honors a server

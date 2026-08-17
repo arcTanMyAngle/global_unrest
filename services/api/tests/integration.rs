@@ -5,8 +5,8 @@
 //! the 7 hand-crafted events this suite's assertions are built around).
 //! Spawning the actual binary exercises real TCP/HTTP and the middleware
 //! stack end to end, matching this project's standing verification
-//! discipline (HANDOFF.md: "verify against a RUNNING api, not by reading
-//! code") in a form CI can run unattended.
+//! discipline (docs/ENGINEERING_NOTES.md: "verify against a running service,
+//! not by reading code") in a form CI can run unattended.
 
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;

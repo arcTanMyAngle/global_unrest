@@ -162,7 +162,13 @@ Update docs in the same change as code:
   processing, or the Media exception.
 - docs/DEVELOPMENT.md and CONTRIBUTING.md for commands, features, CI, and
   environment variables.
+- docs/ROADMAP.md for milestone status, open operational items, and planned
+  direction.
+- docs/ENGINEERING_NOTES.md for a build/tooling trap or source quirk that cost
+  real debugging time.
 - CHANGELOG.md for user-visible work under Unreleased.
 
-PLAN.md and HANDOFF.md are dated records. Do not use their old session state
-as a substitute for current implementation documentation.
+Read docs/ENGINEERING_NOTES.md before a dependency, linking, or live-source
+change; it records failures that repeat otherwise. Do not reintroduce a dated
+session journal — CHANGELOG.md and `git log` carry history, ROADMAP.md carries
+open items, and ENGINEERING_NOTES.md carries durable lessons.

@@ -20,36 +20,18 @@ precision rules.
 1. Keep one focused concern per pull request. Avoid mixing source behavior,
    rendering redesign, and documentation overhaul in a single change unless
    they are inseparable.
-2. Run the workspace gates before pushing:
+2. Run the quality gates before pushing. The canonical list — workspace
+   format/lint/test, the per-source and Daily Events/media mock suites,
+   cargo-deny, and no-default-features feature-wiring coverage — is in
+   [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#common-commands). Run the mock
+   suite for any credentialed or on-demand network path you touched, and the
+   no-default-features leg for any feature-wiring change.
 
-   ~~~sh
-   cargo fmt --all --check
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
-   cargo deny check
-   ~~~
+3. CI runs each source feature separately, the three desktop-only features,
+   and the complete union. Keep .github/workflows/ci.yml in sync if the
+   feature surface changes.
 
-3. Run the focused mock suite when changing a credentialed or on-demand
-   network path:
-
-   ~~~sh
-   cargo test -p source-acled --features live
-   cargo test -p daily-digest --features live
-   cargo test -p media-search --features live
-   ~~~
-
-4. When changing desktop or worker feature wiring, use no-default-features
-   coverage in addition to the normal desktop build:
-
-   ~~~sh
-   cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
-   ~~~
-
-   CI also runs each source feature separately, the three desktop-only
-   features, and the complete union. Keep .github/workflows/ci.yml in sync
-   if the feature surface changes.
-
-5. Regenerate fixtures only when changing the fixture generator, and commit
+4. Regenerate fixtures only when changing the fixture generator, and commit
    the deterministic result:
 
    ~~~sh
@@ -69,10 +51,8 @@ Update the relevant documentation in the same pull request:
 | Runtime topology, crate ownership, or handoff | docs/ARCHITECTURE.md |
 | Commands, environment variables, CI, or Docker | docs/DEVELOPMENT.md |
 | Visualization encoding or performance contract | docs/VISUALIZATION.md |
-
-The historical PLAN.md does not replace current documentation. Preserve it as
-a dated planning record; update README, ROADMAP, and the implementation docs
-for current behavior.
+| Milestone status, open operational item, or planned direction | docs/ROADMAP.md |
+| A build/tooling trap or source quirk that cost real debugging time | docs/ENGINEERING_NOTES.md |
 
 ## Source and safety rules
 

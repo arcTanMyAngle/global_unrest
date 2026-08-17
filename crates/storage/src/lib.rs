@@ -607,7 +607,8 @@ impl StorageHandle {
     /// Export the session to Parquet under `dir` (must not already contain
     /// data): `events/` and `region_buckets/` as hive `date=YYYY-MM-DD`
     /// partitions plus `baselines.parquet`. This layout is the M4 handoff
-    /// surface — the worker will publish the same shape (docs/PLAN.md §7).
+    /// surface — the worker publishes the same shape (see "Snapshot layout"
+    /// in docs/DATA_MODEL.md).
     pub fn export_parquet(&self, dir: PathBuf) -> Reply<ExportReport> {
         let (reply, rx) = mpsc::channel();
         self.send(Cmd::ExportParquet { dir, reply });

@@ -53,6 +53,19 @@ cargo run -p source-fixtures --bin generate-fixtures
 cargo deny check
 ~~~
 
+These are the canonical quality gates; every change must keep them green.
+Other documents link here rather than restating the list.
+
+Feature-wiring changes also need no-default-features coverage:
+
+~~~sh
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+~~~
+
+`cargo check` and `cargo clippy` do not link. After a dependency or linking
+change, build the real desktop binary — see
+[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#build-and-linking).
+
 ## Desktop environment variables
 
 The desktop loads .env during startup. Process environment variables take

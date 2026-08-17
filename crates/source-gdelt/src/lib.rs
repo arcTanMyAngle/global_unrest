@@ -1,7 +1,8 @@
 //! GDELT source adapter (M3). Live, keyless ingestion of global media
 //! attention and events.
 //!
-//! Two independent code paths, per the GDELT reality (docs/PLAN.md §5):
+//! Two independent code paths, per the GDELT reality (see "GDELT
+//! normalization" in docs/DATA_MODEL.md):
 //! - [`doc`] — the DOC 2.0 `artlist` **JSON API**: media-attention
 //!   observations, geocoded to the source country ([`GdeltSource::fetch`]).
 //! - [`events`] — the 15-minute Events **CSV-zip dumps**: discrete CAMEO

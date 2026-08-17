@@ -28,7 +28,8 @@ const DOC_LOOKBACK_MINS: i64 = 60;
 /// ACLED publishes weekly (plus corrections), so its loop polls twice a day —
 /// nowhere near the GDELT cadence — and each poll looks back far enough to
 /// absorb late additions. Dedup-by-id makes the overlap idempotent (revisions
-/// that reuse an id are deliberately not re-applied; see HANDOFF.md).
+/// that reuse an id are deliberately not re-applied; see
+/// docs/ENGINEERING_NOTES.md).
 const ACLED_POLL_SECS: u64 = 12 * 60 * 60;
 const ACLED_LOOKBACK_DAYS: i64 = 14;
 

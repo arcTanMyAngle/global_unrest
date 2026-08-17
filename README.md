@@ -185,17 +185,14 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-# Network-path mock suites; no real credentials required
-cargo test -p source-acled --features live
-cargo test -p daily-digest --features live
-
 # Fixture maintenance and service stack
 cargo run -p source-fixtures --bin generate-fixtures
 docker compose up
-
-# Advisory and license checks (requires cargo-deny)
-cargo deny check
 ~~~
+
+The complete gate list — including the per-source mock suites, cargo-deny, and
+no-default-features coverage — is in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#common-commands).
 
 CI runs the workspace gates on Windows and Linux; source-feature checks for
 ACLED, NOAA, IODA, Bluesky, Telegram, and the desktop-only gemini-live,
@@ -214,10 +211,10 @@ Tag-driven releases build desktop binaries and publish worker/API images.
 | [docs/SCORING.md](docs/SCORING.md) | Transparent scoring and baseline design. |
 | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) | Shipped V1-V3 visualization decisions and guardrails. |
 | [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) | Hard safety rules, licensing, bias, retention, and Daily Events/media boundaries. |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Completed work and the remaining M8/M9 direction. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Milestone record, open operational items, and the remaining M8/M9 direction. |
+| [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md) | Build/linking traps, source behavior that looks like a bug, and verification discipline. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and verification requirements. |
 | [CHANGELOG.md](CHANGELOG.md) | Milestone-tied release history. |
-| [HANDOFF.md](HANDOFF.md) | Dated engineering handoff notes and implementation history. |
 
 ## Status and direction
 

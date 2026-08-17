@@ -8,6 +8,17 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+### Changed
+
+- Documentation consolidation. `HANDOFF.md` and `docs/PLAN.md` are removed;
+  their durable content moved to a new `docs/ENGINEERING_NOTES.md` (build and
+  linking traps, source behavior that looks like a bug, verification
+  discipline) and to `docs/ROADMAP.md` (milestone record, standing risks, and
+  a new "Open operational items" section covering release-workflow defects,
+  branch protection, and pending dependency upgrades). The quality-gate
+  command list is now canonical in `docs/DEVELOPMENT.md`; README and
+  CONTRIBUTING link to it instead of restating a drifted copy.
+
 ### Fixed
 
 - Media player: a Bluesky post's own page (not `embed.bsky.app`) is now the
