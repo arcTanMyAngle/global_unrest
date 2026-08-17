@@ -50,6 +50,36 @@ The current SourceId enum includes Fixtures, Gdelt, Acled, Noaa, Ioda,
 Bluesky, and Telegram. Fixtures are test/service-smoke input only; the
 desktop removes legacy fixture rows and never loads them at runtime.
 
+### Source attribution (core-types)
+
+`AttributionSubject`/`SourceAttribution`/`attribution_for` in
+`crates/core-types/src/attribution.rs` are a static data table, not I/O: one
+row per `SourceId` ingest leg plus the non-source third-party legs that are
+not a `SignalSource` — the Daily Events Google Gemini call, and the Media
+page's on-demand GDELT/Bluesky/Telegram lookups, which run under different
+terms and bounds than those providers' ingest use.
+
+| Field | Type | Notes |
+|---|---|---|
+| `display_name` | `&'static str` | |
+| `homepage_url` | `Option<&'static str>` | `None` only for the internal Fixtures entry. |
+| `licence_label` | `&'static str` | Short human-readable terms summary. |
+| `attribution_text` | `Option<&'static str>` | Verbatim upstream citation string when one is mandated (GDELT, ACLED); `None` otherwise — never a paraphrase. |
+| `credentials_required` | `bool` | |
+| `env_vars` | `&'static [&'static str]` | Env var **names** the credentialed path reads — never a value (product rule 5). |
+| `feature_flag` | `Option<&'static str>` | Desktop Cargo feature gating the live network path (e.g. `acled-live`); `None` when unconditionally compiled. |
+
+`SourceAttribution::is_configured()` reports whether the required env vars
+are set and non-empty — the same check every live source's own `from_env`
+already performs, exposed as a query. It is distinct from "compiled": that is
+`feature_flag`, a build-time fact this type does not itself inspect. A
+keyless leg is always "configured".
+
+`attribution_for_source` matches every `SourceId` variant with no wildcard
+arm, so adding a variant without a row fails the build; `attribution.rs`'s
+tests additionally check the table stays populated, exactly-once per
+`SourceId`, and that no `env_vars` entry has a value's shape.
+
 ## GDELT normalization (M3)
 
 Two independent `source-gdelt` paths produce `GeoTemporalEvent`s (both keyless,
