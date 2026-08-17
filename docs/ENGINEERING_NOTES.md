@@ -154,6 +154,11 @@ Re-scope before starting.
 
 ### Scoping an MTProto mock for `source-telegram`
 
+**This mock was not built**, and nothing here is pending work — the
+orchestration is covered instead through the `ChannelReader` seam
+(see [ROADMAP.md](ROADMAP.md)). What follows is kept so that decision can be
+revisited without re-deriving it.
+
 Established by reading the vendored `grammers-*` 0.10 sources, so the next
 person does not re-derive it. Four facts decide the shape of any mock:
 

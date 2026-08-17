@@ -8,6 +8,28 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+### Added
+
+- `source-telegram`'s sweep and media-search orchestration is now tested
+  without a Telegram session. A `ChannelReader` trait seam in ungated
+  `lib.rs` covers the handful of grammers calls the two paths make, the
+  decision-making above it moved to an ungated `ChannelOrchestrator` /
+  `search_all`, and `crates/source-telegram/tests/orchestration.rs` drives it
+  through a fake: first-sweep-vs-incremental limits and offsets, a high-water
+  mark that advances and never regresses, one dead channel not degrading the
+  rest, `fetch` draining only completed chatter windows, server-filter false
+  positives dropped before a row promises a video, hits merging and
+  truncating to the query limit, every-channel-failed as an error against a
+  partial failure that still returns survivors, and a boundary test asserting
+  no raw message text reaches a rollup. Eleven tests, no features required.
+  Two shapes here are product rules rather than style: the ingest leg streams
+  through a per-message callback and returns no `Vec` (rule 2), and the media
+  leg's `ChannelVideo` carries no sender (rule 7). What is left in `live.rs`
+  is resolve, iterate, map — still uncovered by tests, and still verified
+  only by a live run. This closes the tracked "no mock-server suite for
+  `source-telegram`" gap; see [docs/ROADMAP.md](docs/ROADMAP.md) for why a
+  seam rather than a mock MTProto server.
+
 ### Changed
 
 - Upgraded `criterion` 0.7 → 0.8.2 for `analytics`' scoring benches. The

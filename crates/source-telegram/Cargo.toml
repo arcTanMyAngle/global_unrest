@@ -50,6 +50,10 @@ tokio = { workspace = true, optional = true }
 [dev-dependencies]
 # `login_setup` (one-time interactive login) only.
 dotenvy.workspace = true
+# `tests/orchestration.rs` drives the async `ChannelReader` seam. A dev
+# dependency, not the `live` one: the orchestration under test is ungated and
+# must keep running under a plain `cargo test -p source-telegram`.
+tokio = { workspace = true, features = ["rt", "macros"] }
 tracing-subscriber.workspace = true
 
 [lints]

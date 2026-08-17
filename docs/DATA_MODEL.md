@@ -217,6 +217,18 @@ never touches anything outside `ALLOWED_CHANNELS`.
   separate, user-directed media module is the documented exception: it can
   return a public video-post URL, bounded label, and channel attribution to
   the transient Media page, but never a sender identity or a normalized event.
+- **The boundary is a type signature, not a convention.** Both legs meet the
+  network through the `ChannelReader` seam, and the two legs are shaped
+  differently on purpose. The ingest leg's `sweep_history` hands each message
+  to a `FnMut(i32, &str, DateTime<Utc>)` callback and returns nothing, so
+  message text is borrowed and folded into the accumulator rather than
+  collected — a returned `Vec<String>` there would materialize up to
+  `PER_CYCLE_LIMIT` = 200 message bodies at once. The media leg's
+  `search_videos` may return a `Vec<ChannelVideo>` because materialized
+  results are already the documented exception; that struct carries id,
+  caption, date, MIME type, file name, and an attachment flag, and
+  deliberately no sender. Channel posts can carry a signing author, which is
+  a named individual this project has no reason to surface.
 
 ## RegionBucket
 

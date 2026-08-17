@@ -32,6 +32,28 @@
 use chrono::{DateTime, Utc};
 use media_search::{MediaHit, Provider, search_terms, short_title};
 
+/// One message Telegram's server-side video search returned, reduced to the
+/// fields this module reads.
+///
+/// This is the media leg's half of the [`crate::ChannelReader`] seam, and its
+/// shape is the bound: an id, the message's own caption, a date, and just
+/// enough about the attachment to tell playable video from a document the
+/// server miscounted. Notably absent, and to stay absent: anything about the
+/// sender. Channel posts can carry a signing author, and a named individual
+/// is not something this project surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelVideo {
+    pub id: i32,
+    /// The message's own text, used only as a one-line label.
+    pub caption: String,
+    pub date: DateTime<Utc>,
+    pub mime_type: Option<String>,
+    pub file_name: Option<String>,
+    /// Whether the message carried a document at all. A "video" result with
+    /// no document is a server-filter false positive.
+    pub has_document: bool,
+}
+
 /// How many hits one channel may contribute to a single search.
 ///
 /// Small on purpose. The allowlist is swept in full for every search, so this
@@ -130,6 +152,24 @@ pub fn hit(channel: &str, message_id: i32, caption: &str, date: DateTime<Utc>) -
     })
 }
 
+/// Turn one channel's search results into hits, dropping everything that is
+/// not actually playable video.
+///
+/// The server-side `InputMessagesFilterVideo` is treated as a first pass, not
+/// the answer: it counts some non-playable documents as video, and a result
+/// with no document at all is not something a reader can watch. Both are
+/// dropped here rather than promised in a row.
+pub fn playable_hits(channel: &str, videos: &[ChannelVideo]) -> Vec<MediaHit> {
+    videos
+        .iter()
+        .filter(|video| {
+            video.has_document
+                && is_video_attachment(video.mime_type.as_deref(), video.file_name.as_deref())
+        })
+        .filter_map(|video| hit(channel, video.id, &video.caption, video.date))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -198,6 +238,32 @@ mod tests {
                 "{channel} produced an unplayable URL: {url}"
             );
         }
+    }
+
+    fn video(id: i32, mime: Option<&str>, has_document: bool) -> ChannelVideo {
+        ChannelVideo {
+            id,
+            caption: "clip".into(),
+            date: ts(),
+            mime_type: mime.map(str::to_owned),
+            file_name: None,
+            has_document,
+        }
+    }
+
+    #[test]
+    fn the_server_filters_false_positives_never_become_hits() {
+        let hits = playable_hits(
+            "liveuamap",
+            &[
+                video(1, Some("video/mp4"), true),
+                video(2, Some("application/pdf"), true),
+                // "Video" per the server, but nothing attached to play.
+                video(3, Some("video/mp4"), false),
+            ],
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://t.me/liveuamap/1");
     }
 
     #[test]

@@ -110,67 +110,57 @@ tracked gaps, none of which block development:
   against the new groups.
 - **`compose-smoke` has never run on the development machine** (no local
   Docker CLI). It is covered by CI.
-- **No mock-server suite for `source-telegram`.** ACLED, NOAA, IODA,
-  Bluesky, Gemini, and media-search all have one; Telegram's MTProto path is
-  covered only by unit tests over the extracted `ChannelSweep` state machine
-  and `media`'s pure half, plus a manual login example. Scoped and decided —
-  a `ChannelReader` trait seam, not a mock MTProto server. See below.
-  Implementation is the next tracked piece of work.
+- **`source-telegram`'s orchestration is covered; its grammers glue is not.**
+  This was the "no mock-server suite" gap and it is closed — see below for
+  what that means and what stays uncovered.
 
-### Scoping the `source-telegram` coverage gap
+### The `source-telegram` coverage gap: closed, and what remains
 
-What is actually untested is not the protocol, it is the orchestration around
-it: `sweep_channel`'s first-sweep-vs-incremental `offset_id`/`reverse`/`limit`
-wiring, its per-channel error swallowing (one dead channel must not degrade
-the rest), `fetch`'s drain of completed windows, `search_channel`'s second
-video check after the server-side filter, and `search_media`'s
-every-channel-failed error. `ChannelSweep` and `media` already cover the pure
-logic below that.
+What was untested was never the protocol, it was the orchestration around it.
+That now lives behind a `ChannelReader` seam in ungated `lib.rs`
+(`ChannelOrchestrator` and `search_all`), driven by a fake in
+`crates/source-telegram/tests/orchestration.rs` — eleven tests that run under
+a plain `cargo test -p source-telegram`, no features and no session. Covered:
+the first-sweep-vs-incremental `offset_id`/`reverse`/`limit` wiring, the
+high-water mark advancing to the newest id and never regressing, per-channel
+error swallowing (one dead channel does not degrade the rest, and messages
+seen before a mid-sweep failure stay counted), `fetch` draining only completed
+chatter windows, the second video check that drops server-filter false
+positives, media hits merging and truncating to the query limit,
+every-channel-failed as an error against a partial failure that still returns
+survivors, and a boundary test asserting no raw message text reaches a rollup.
 
-Two ways to reach it, and they are not close in cost:
+**Still uncovered: the thin grammers glue in `live.rs`** — resolve, iterate,
+map — plus real MTProto itself. Only a live run exercises those, which is how
+this source has been verified all along. `cargo check -p source-telegram
+--features live` is what catches a type error there; it is worth running on
+any change to that module.
 
-**A. A real mock MTProto server** (`tests/live_mock.rs`, matching the other
-five suites). Feasible — the four enabling facts are recorded in
+Why a seam and not a mock MTProto server: a mock was feasible — the enabling
+facts are recorded in
 [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#scoping-an-mtproto-mock-for-source-telegram),
 the decisive one being that seeding a session's `DcOption.auth_key` skips the
-DH handshake entirely. But it still means writing server-side MTProto
-crypto (`grammers-crypto`'s public functions are the wrong direction),
-server-side message framing (`mtp::Encrypted` is client-only), and a small
-`grammers-tl-types` request router. Estimate ~600–900 lines of test-only
-infrastructure against 146 for Bluesky's, most of it protocol plumbing that
-tests grammers rather than this project, and all of it re-derivable against
-us on a `grammers-*` bump.
+DH handshake — but it meant ~600–900 lines of server-side MTProto crypto,
+framing, and a request router, against 146 for Bluesky's suite, most of it
+testing grammers rather than this project and all of it re-derivable against
+us on a `grammers-*` bump. The seam buys the coverage that matters at a
+fraction of that, and leaves untested only the part a mock would be least
+honest about, since it would assert against our own idea of Telegram's
+replies. The trade-off is accepted rather than hidden: the seam touched
+production code, and the "every source has a mock suite" symmetry is knowingly
+given up. Option A's enabling facts stay recorded so the decision can be
+revisited without re-deriving them.
 
-**B. A `ChannelReader` trait seam** over the handful of grammers calls the two
-paths make, with the sweep/search orchestration written against it. Covers
-every behavior listed above with an ordinary fake, in roughly the size of the
-existing suites, and leaves untested only the thin grammers glue — which is
-the part a mock would be least honest about anyway, since it would be
-asserting against our own idea of Telegram's replies.
+Two properties of the implemented seam are load-bearing rather than
+stylistic, and a later change should not quietly undo them:
 
-**Decided: B.** The mock server is deliberately not built. B buys the coverage
-that matters at a fraction of the cost and risk. The trade-off is accepted
-rather than hidden: B touches production code to introduce the seam, and
-neither option exercises real MTProto — only a live run does, which is how
-this source has been verified so far. The "every source has a mock suite"
-symmetry is knowingly given up for `source-telegram`, and option A's enabling
-facts stay recorded in ENGINEERING_NOTES.md so the decision can be revisited
-without re-deriving them.
-
-Implementation shape, settled during scoping:
-
-- The `ChannelReader` trait lives in **ungated** `lib.rs`; the real
-  `grammers_client::Client` impl stays behind `#[cfg(feature = "live")]` in
-  `live.rs`. `chatter`, `media-search`, `core-types`, and `chrono` are all
-  non-optional dependencies, so the orchestration and its fake-driven tests
-  compile and run under plain `cargo test -p source-telegram`.
-- The **ingest leg stays streaming** — a callback per message, not a returned
-  `Vec`. This is a product-rule constraint, not a style preference: observing
-  and dropping in the same call is what keeps up to `PER_CYCLE_LIMIT` = 200
-  message texts from being materialized at once.
-- The **media leg may return a `Vec`**, since materialized results are already
-  the documented Media exception, carrying the fields `search_channel` reads
-  so `is_video_attachment` and `media::hit` become testable orchestration.
+- The **ingest leg is streaming** — `sweep_history` takes a per-message
+  callback and returns no `Vec`. Observing and dropping in the same call is
+  what keeps up to `PER_CYCLE_LIMIT` = 200 message texts from being
+  materialized at once (product rule 2).
+- The **media leg returns a `Vec`** of `ChannelVideo`, which is allowed only
+  because materialized results are already the documented Media exception
+  (product rule 7). That struct deliberately carries no sender.
 
 ## M8: platform and source polish
 

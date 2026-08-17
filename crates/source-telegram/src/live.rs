@@ -11,34 +11,32 @@
 //! interaction. If the file is missing or not yet authorized, [`fetch`]
 //! returns a clear error naming the setup command rather than trying to
 //! prompt for input from inside a GUI app or headless worker.
+//!
+//! **This module is deliberately thin.** Everything that decides *what* to
+//! sweep, what to keep, and what to do when a channel fails lives in ungated
+//! [`crate::ChannelOrchestrator`] / [`crate::search_all`], behind the
+//! [`ChannelReader`] seam, where it is testable without a session. What is
+//! left here is resolve, iterate, map — the part no fake could honestly
+//! stand in for anyway.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
-use chatter::ChatterAccumulator;
+use chrono::{DateTime, Utc};
 use core_types::{
     GeoTemporalEvent, NormalizeError, RawRecord, SignalSource, SourceError, SourceFilters,
     SourceId, TimeWindow,
 };
 use grammers_client::Client;
 use grammers_client::media::Media;
+use grammers_client::session::types::PeerRef;
 use grammers_client::tl::enums::MessagesFilter;
 use grammers_mtsender::SenderPool;
 use media_search::{MediaHit, MediaQuery};
 use tokio::sync::OnceCell;
 
 use crate::file_session::FileSession;
-use crate::{ALLOWED_CHANNELS, ChannelSweep, media};
-
-/// Don't ingest a channel's entire history the first time it's swept — just
-/// the most recent handful, enough to prime the per-channel high-water mark.
-const FIRST_SWEEP_LIMIT: usize = 30;
-
-/// Bound on how many new messages one poll pulls per channel. At this
-/// source's poll cadence a channel would need to be extremely active to hit
-/// this; if it does, the remainder is picked up next cycle — undercounting,
-/// not overcounting, is the safe direction to bound in.
-const PER_CYCLE_LIMIT: usize = 200;
+use crate::media::ChannelVideo;
+use crate::{ChannelOrchestrator, ChannelReader, media};
 
 struct Conn {
     client: Client,
@@ -53,16 +51,7 @@ pub struct TelegramSource {
     api_id: i32,
     session_path: String,
     conn: OnceCell<Conn>,
-    accumulator: Mutex<ChatterAccumulator>,
-    /// Highest message id already processed per channel, so a poll only
-    /// walks messages newer than what was already counted. Deliberately
-    /// **not** persisted to disk: on restart each channel is swept from
-    /// scratch (bounded to [`FIRST_SWEEP_LIMIT`]), but any chatter window
-    /// that already published re-derives the same `source_event_id` and is
-    /// discarded by storage's dedup-by-id (the same corrections-reuse-ids
-    /// behavior ACLED relies on) — safe, just occasionally redundant work,
-    /// never double counted.
-    last_seen: Mutex<HashMap<String, i32>>,
+    ingest: ChannelOrchestrator,
     /// Open the session file without writing it back. See
     /// [`TelegramSource::read_only`].
     read_only: bool,
@@ -95,14 +84,11 @@ impl TelegramSource {
             .trim()
             .parse::<i32>()
             .map_err(|e| SourceError::Other(format!("TELEGRAM_API_ID must be an integer: {e}")))?;
-        let accumulator = ChatterAccumulator::from_bundled(chatter::DEFAULT_WINDOW_SECS)
-            .map_err(|e| SourceError::Other(format!("building chatter matcher: {e}")))?;
         Ok(Some(Self {
             api_id,
             session_path,
             conn: OnceCell::new(),
-            accumulator: Mutex::new(accumulator),
-            last_seen: Mutex::new(HashMap::new()),
+            ingest: ChannelOrchestrator::from_bundled(chatter::DEFAULT_WINDOW_SECS)?,
             read_only: false,
         }))
     }
@@ -162,190 +148,18 @@ impl TelegramSource {
         Ok(&conn.client)
     }
 
-    fn lock_last_seen(&self) -> MutexGuard<'_, HashMap<String, i32>> {
-        self.last_seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn lock_accumulator(&self) -> MutexGuard<'_, ChatterAccumulator> {
-        self.accumulator
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Sweep one channel: pull messages newer than its high-water mark (or,
-    /// on first contact, just the most recent [`FIRST_SWEEP_LIMIT`]), feed
-    /// matching text into the accumulator, and advance the mark. Failures
-    /// are logged and swallowed here rather than propagated — one
-    /// unreachable or renamed channel must not degrade the other seven.
-    async fn sweep_channel(&self, client: &Client, name: &str) {
-        let peer = match client.resolve_username(name).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                tracing::warn!(channel = name, "telegram channel not found; skipping");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(channel = name, error = %e, "telegram resolve_username failed");
-                return;
-            }
-        };
-        let peer_ref = match peer.to_ref().await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                tracing::warn!(
-                    channel = name,
-                    "telegram channel has no addressable peer; skipping"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(channel = name, error = %e, "telegram peer resolution failed");
-                return;
-            }
-        };
-
-        let last_id = self.lock_last_seen().get(name).copied();
-        let mut iter = client.iter_messages(peer_ref);
-        iter = match last_id {
-            Some(id) => iter.offset_id(id).reverse(true).limit(PER_CYCLE_LIMIT),
-            None => iter.limit(FIRST_SWEEP_LIMIT),
-        };
-
-        let mut sweep = ChannelSweep::new(last_id);
-        loop {
-            let msg = match iter.next().await {
-                Ok(Some(m)) => m,
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::warn!(channel = name, error = %e, "telegram iter_messages failed mid-sweep");
-                    break;
-                }
-            };
-            sweep.observe(
-                &mut self.lock_accumulator(),
-                msg.id(),
-                msg.text(),
-                msg.date(),
-            );
-        }
-        if let Some(newest) = sweep.finish() {
-            self.lock_last_seen().insert(name.to_owned(), newest);
-        }
-        tracing::info!(
-            channel = name,
-            scanned = sweep.scanned(),
-            "telegram channel swept"
-        );
-    }
-
-    /// On-demand video lookup across the same allowlist — the user-directed
-    /// exception to this crate's aggregate-only rule (see [`crate::media`]).
-    ///
-    /// **No cadence.** This runs only when a person presses search for a named
-    /// place; nothing here is scheduled, and nothing it returns is stored.
-    ///
-    /// Scope is deliberately narrow: uploaded video only
-    /// (`InputMessagesFilterVideo`). Posts that merely *link* a video host are
-    /// left to the GDELT and Bluesky legs in `media-search`, which already
-    /// cover exactly that and cover it across far more of the web than eight
-    /// channels could.
-    ///
-    /// One dead channel must not empty the panel, so per-channel failures are
-    /// logged and skipped; the whole search fails only when every channel did.
+    /// On-demand video lookup across the allowlist — the user-directed
+    /// exception to this crate's aggregate-only rule. The bounds, and why
+    /// they hold, are documented on [`crate::search_all`]; this only supplies
+    /// the connection.
     pub async fn search_media(&self, query: &MediaQuery) -> Result<Vec<MediaHit>, SourceError> {
-        if !query.is_valid() {
+        // `search_all` rejects these too, but checking before `ensure_conn`
+        // keeps an unusable query from opening a session for nothing.
+        if !query.is_valid() || media::query_text(&query.place, &query.topic).is_none() {
             return Ok(Vec::new());
         }
-        let Some(text) = media::query_text(&query.place, &query.topic) else {
-            return Ok(Vec::new());
-        };
-
         let client = self.ensure_conn().await?;
-        let mut hits = Vec::new();
-        let mut failed = 0usize;
-        for name in ALLOWED_CHANNELS {
-            match self.search_channel(client, name, &text, query).await {
-                Ok(found) => hits.extend(found),
-                Err(e) => {
-                    failed += 1;
-                    tracing::warn!(channel = name, error = %e, "telegram media search failed");
-                }
-            }
-        }
-        if failed == ALLOWED_CHANNELS.len() {
-            return Err(SourceError::Other(
-                "every telegram channel search failed — the session may have expired".to_string(),
-            ));
-        }
-
-        let mut hits = media_search::merge(hits);
-        hits.truncate(query.limit);
-        Ok(hits)
-    }
-
-    /// Search one channel for video matching `text` inside the query window.
-    ///
-    /// Only the message id, its own caption, and its date are read — never
-    /// `sender()`. Channel posts can carry a signing author, and a named
-    /// individual is not something this project surfaces.
-    async fn search_channel(
-        &self,
-        client: &Client,
-        name: &str,
-        text: &str,
-        query: &MediaQuery,
-    ) -> Result<Vec<MediaHit>, SourceError> {
-        let peer = client
-            .resolve_username(name)
-            .await
-            .map_err(|e| SourceError::Other(format!("resolving @{name}: {e}")))?;
-        let Some(peer) = peer else {
-            return Ok(Vec::new());
-        };
-        let peer_ref = peer
-            .to_ref()
-            .await
-            .map_err(|e| SourceError::Other(format!("addressing @{name}: {e}")))?;
-        let Some(peer_ref) = peer_ref else {
-            return Ok(Vec::new());
-        };
-
-        // `min_date`/`max_date` want a fixed-offset timestamp; the query
-        // carries UTC, so this is a representation change, not a shift.
-        let mut iter = client
-            .search_messages(peer_ref)
-            .query(text)
-            .filter(MessagesFilter::InputMessagesFilterVideo)
-            .min_date(&query.start.fixed_offset())
-            .max_date(&query.end.fixed_offset())
-            .limit(media::PER_CHANNEL_LIMIT);
-
-        let mut hits = Vec::new();
-        loop {
-            let msg = match iter.next().await {
-                Ok(Some(m)) => m,
-                Ok(None) => break,
-                Err(e) => return Err(SourceError::Other(format!("searching @{name}: {e}"))),
-            };
-            // The server-side filter counts some non-playable documents as
-            // video, so the attachment is checked again before a row promises
-            // the reader something to watch.
-            let playable = match msg.media() {
-                Some(Media::Document(doc)) => {
-                    media::is_video_attachment(doc.mime_type(), doc.name())
-                }
-                _ => false,
-            };
-            if !playable {
-                continue;
-            }
-            if let Some(hit) = media::hit(name, msg.id(), msg.text(), msg.date()) {
-                hits.push(hit);
-            }
-        }
-        Ok(hits)
+        crate::search_all(&GrammersReader { client }, query).await
     }
 }
 
@@ -364,12 +178,8 @@ impl SignalSource for TelegramSource {
         _filters: &SourceFilters,
     ) -> Result<Vec<RawRecord>, SourceError> {
         let client = self.ensure_conn().await?;
-        for name in ALLOWED_CHANNELS {
-            self.sweep_channel(client, name).await;
-        }
-        let rollups = self.lock_accumulator().drain_completed(chrono::Utc::now());
-        tracing::info!(rollups = rollups.len(), "telegram chatter rollups drained");
-        Ok(rollups.into_iter().map(RawRecord::ChatterRollup).collect())
+        self.ingest.sweep_all(&GrammersReader { client }).await;
+        Ok(self.ingest.drain_completed(chrono::Utc::now()))
     }
 
     fn normalize(&self, raw: &RawRecord) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
@@ -382,5 +192,119 @@ impl SignalSource for TelegramSource {
                 detail: format!("telegram source received a foreign record: {other:?}"),
             }),
         }
+    }
+}
+
+/// The grammers half of the seam.
+struct GrammersReader<'a> {
+    client: &'a Client,
+}
+
+impl GrammersReader<'_> {
+    /// Resolve a public username to something addressable.
+    ///
+    /// `Ok(None)` means the channel is not there — renamed, deleted, or never
+    /// public. That is absence, not failure, and the caller treats it as
+    /// such; only a real error gets counted against a channel.
+    async fn peer(&self, channel: &str) -> Result<Option<PeerRef>, SourceError> {
+        let peer = self
+            .client
+            .resolve_username(channel)
+            .await
+            .map_err(|e| SourceError::Other(format!("resolving @{channel}: {e}")))?;
+        let Some(peer) = peer else {
+            tracing::warn!(channel, "telegram channel not found; skipping");
+            return Ok(None);
+        };
+        let peer_ref = peer
+            .to_ref()
+            .await
+            .map_err(|e| SourceError::Other(format!("addressing @{channel}: {e}")))?;
+        if peer_ref.is_none() {
+            tracing::warn!(
+                channel,
+                "telegram channel has no addressable peer; skipping"
+            );
+        }
+        Ok(peer_ref)
+    }
+}
+
+impl ChannelReader for GrammersReader<'_> {
+    async fn sweep_history(
+        &self,
+        channel: &str,
+        after: Option<i32>,
+        limit: usize,
+        on_message: &mut dyn FnMut(i32, &str, DateTime<Utc>),
+    ) -> Result<(), SourceError> {
+        let Some(peer_ref) = self.peer(channel).await? else {
+            return Ok(());
+        };
+        let mut iter = self.client.iter_messages(peer_ref);
+        iter = match after {
+            Some(id) => iter.offset_id(id).reverse(true).limit(limit),
+            None => iter.limit(limit),
+        };
+        loop {
+            match iter.next().await {
+                // Borrowed, folded into the accumulator, and gone — nothing
+                // here accumulates message text.
+                Ok(Some(msg)) => on_message(msg.id(), msg.text(), msg.date()),
+                Ok(None) => return Ok(()),
+                Err(e) => return Err(SourceError::Other(format!("reading @{channel}: {e}"))),
+            }
+        }
+    }
+
+    async fn search_videos(
+        &self,
+        channel: &str,
+        text: &str,
+        query: &MediaQuery,
+    ) -> Result<Vec<ChannelVideo>, SourceError> {
+        let Some(peer_ref) = self.peer(channel).await? else {
+            return Ok(Vec::new());
+        };
+
+        // `min_date`/`max_date` want a fixed-offset timestamp; the query
+        // carries UTC, so this is a representation change, not a shift.
+        let mut iter = self
+            .client
+            .search_messages(peer_ref)
+            .query(text)
+            .filter(MessagesFilter::InputMessagesFilterVideo)
+            .min_date(&query.start.fixed_offset())
+            .max_date(&query.end.fixed_offset())
+            .limit(media::PER_CHANNEL_LIMIT);
+
+        let mut found = Vec::new();
+        loop {
+            let msg = match iter.next().await {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(e) => return Err(SourceError::Other(format!("searching @{channel}: {e}"))),
+            };
+            // Only the message id, its own caption, and its date are read —
+            // never `sender()`.
+            let document = match msg.media() {
+                Some(Media::Document(doc)) => Some((
+                    doc.mime_type().map(str::to_owned),
+                    doc.name().map(str::to_owned),
+                )),
+                _ => None,
+            };
+            let has_document = document.is_some();
+            let (mime_type, file_name) = document.unwrap_or((None, None));
+            found.push(ChannelVideo {
+                id: msg.id(),
+                caption: msg.text().to_owned(),
+                date: msg.date(),
+                mime_type,
+                file_name,
+                has_document,
+            });
+        }
+        Ok(found)
     }
 }

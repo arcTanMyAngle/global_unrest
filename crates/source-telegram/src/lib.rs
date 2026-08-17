@@ -24,6 +24,22 @@
 //! and it never reads a message's sender. That module's docs and
 //! docs/SAFETY_AND_PRIVACY.md's "On-demand media lookup" section state the
 //! full bounds — read both, plus hard rule 6, before changing either path.
+//!
+//! # Where the network stops
+//!
+//! [`ChannelReader`] is the seam between "what Telegram said" and "what this
+//! crate does about it". Everything above it — the per-channel high-water
+//! marks, the first-sweep-vs-incremental decision, the error swallowing that
+//! keeps one dead channel from degrading the rest, the drain of completed
+//! chatter windows, and the media leg's second video check — lives in
+//! [`ChannelOrchestrator`] and [`search_all`] here, ungated, and is exercised
+//! by `tests/orchestration.rs` against a fake reader under plain
+//! `cargo test -p source-telegram`. Below it, `live.rs` holds only the
+//! grammers glue: resolve, iterate, map.
+//!
+//! Keep it that way. If a change to [`ChannelReader`]'s signature needs a
+//! grammers type, the signature is wrong — the seam exists precisely so the
+//! layer above it never has to name one.
 
 #[cfg(feature = "live")]
 pub mod file_session;
@@ -34,6 +50,238 @@ pub mod media;
 pub use file_session::FileSession;
 #[cfg(feature = "live")]
 pub use live::TelegramSource;
+
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
+
+use chatter::ChatterAccumulator;
+use chrono::{DateTime, Utc};
+use core_types::{RawRecord, SourceError};
+use media_search::{MediaHit, MediaQuery};
+
+use crate::media::ChannelVideo;
+
+/// Don't ingest a channel's entire history the first time it's swept — just
+/// the most recent handful, enough to prime the per-channel high-water mark.
+pub const FIRST_SWEEP_LIMIT: usize = 30;
+
+/// Bound on how many new messages one poll pulls per channel. At this
+/// source's poll cadence a channel would need to be extremely active to hit
+/// this; if it does, the remainder is picked up next cycle — undercounting,
+/// not overcounting, is the safe direction to bound in.
+pub const PER_CYCLE_LIMIT: usize = 200;
+
+/// The two reads this crate makes of a Telegram channel, with every grammers
+/// type kept on the far side.
+///
+/// Implemented for real by `live.rs` over `grammers_client::Client`, and by a
+/// fake in `tests/orchestration.rs`. Callers take `&impl ChannelReader`, so
+/// the futures need no `Send` bound — same reasoning as
+/// [`core_types::SignalSource`], and the grammers futures underneath are not
+/// `Send` anyway.
+#[allow(async_fn_in_trait)]
+pub trait ChannelReader {
+    /// Stream one channel's history, newest-first from the top when `after`
+    /// is `None` and oldest-first from just past `after` when it is `Some`,
+    /// stopping at `limit` messages.
+    ///
+    /// **Each message is handed to `on_message` and dropped; this must never
+    /// return the messages.** That is a product-rule constraint, not a style
+    /// preference (CLAUDE.md rule 2): observing and dropping in the same call
+    /// is what keeps up to [`PER_CYCLE_LIMIT`] message texts from being
+    /// materialized at once. A `Vec<String>` here would be a chatter-boundary
+    /// regression even if nothing ever read it.
+    ///
+    /// A channel that cannot be resolved is `Ok(())` with nothing delivered,
+    /// not an error — it is absent, not broken. Errors are for a read that
+    /// actually failed, and messages already handed over before one stay
+    /// counted.
+    async fn sweep_history(
+        &self,
+        channel: &str,
+        after: Option<i32>,
+        limit: usize,
+        on_message: &mut dyn FnMut(i32, &str, DateTime<Utc>),
+    ) -> Result<(), SourceError>;
+
+    /// Server-side video search over one channel, bounded to `query`'s window
+    /// and [`media::PER_CHANNEL_LIMIT`].
+    ///
+    /// Returning a `Vec` is allowed here and only here: materialized results
+    /// are the documented Media exception (CLAUDE.md rule 7). The server-side
+    /// filter is not trusted on its own, so the caller re-checks each
+    /// attachment — see [`media::playable_hits`].
+    async fn search_videos(
+        &self,
+        channel: &str,
+        text: &str,
+        query: &MediaQuery,
+    ) -> Result<Vec<ChannelVideo>, SourceError>;
+}
+
+/// The ingest leg's state and orchestration: one accumulator, one high-water
+/// mark per channel, and the sweep loop over [`ALLOWED_CHANNELS`].
+///
+/// Ungated on purpose. `TelegramSource` owns one of these and delegates to it;
+/// the tests own one and drive it with a fake [`ChannelReader`].
+pub struct ChannelOrchestrator {
+    accumulator: Mutex<ChatterAccumulator>,
+    /// Highest message id already processed per channel, so a poll only
+    /// walks messages newer than what was already counted. Deliberately
+    /// **not** persisted to disk: on restart each channel is swept from
+    /// scratch (bounded to [`FIRST_SWEEP_LIMIT`]), but any chatter window
+    /// that already published re-derives the same `source_event_id` and is
+    /// discarded by storage's dedup-by-id (the same corrections-reuse-ids
+    /// behavior ACLED relies on) — safe, just occasionally redundant work,
+    /// never double counted.
+    last_seen: Mutex<HashMap<String, i32>>,
+}
+
+impl ChannelOrchestrator {
+    #[must_use]
+    pub fn new(accumulator: ChatterAccumulator) -> Self {
+        Self {
+            accumulator: Mutex::new(accumulator),
+            last_seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Build over the bundled gazetteer/topic lists.
+    pub fn from_bundled(window_secs: i64) -> Result<Self, SourceError> {
+        let accumulator = ChatterAccumulator::from_bundled(window_secs)
+            .map_err(|e| SourceError::Other(format!("building chatter matcher: {e}")))?;
+        Ok(Self::new(accumulator))
+    }
+
+    fn lock_accumulator(&self) -> MutexGuard<'_, ChatterAccumulator> {
+        self.accumulator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_last_seen(&self) -> MutexGuard<'_, HashMap<String, i32>> {
+        self.last_seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The high-water mark currently held for `channel`, if it has been swept.
+    ///
+    /// Read-only bookkeeping: a message id, never a message.
+    #[must_use]
+    pub fn mark(&self, channel: &str) -> Option<i32> {
+        self.lock_last_seen().get(channel).copied()
+    }
+
+    /// Sweep every allowlisted channel in order.
+    pub async fn sweep_all(&self, reader: &impl ChannelReader) {
+        for name in ALLOWED_CHANNELS {
+            self.sweep_channel(reader, name).await;
+        }
+    }
+
+    /// Sweep one channel: pull messages newer than its high-water mark (or,
+    /// on first contact, just the most recent [`FIRST_SWEEP_LIMIT`]), feed
+    /// matching text into the accumulator, and advance the mark.
+    ///
+    /// Failures are logged and swallowed rather than propagated — one
+    /// unreachable or renamed channel must not degrade the rest of
+    /// [`ALLOWED_CHANNELS`]. Whatever arrived before a mid-sweep failure is
+    /// still counted and still advances the mark; re-reading it next cycle
+    /// would double-count it.
+    async fn sweep_channel(&self, reader: &impl ChannelReader, name: &str) {
+        let last_id = self.mark(name);
+        let limit = if last_id.is_some() {
+            PER_CYCLE_LIMIT
+        } else {
+            FIRST_SWEEP_LIMIT
+        };
+
+        let mut sweep = ChannelSweep::new(last_id);
+        let outcome = {
+            // The closure is the whole point: text is borrowed, folded into
+            // the accumulator, and gone before the next message arrives.
+            let mut on_message = |id: i32, text: &str, date: DateTime<Utc>| {
+                sweep.observe(&mut self.lock_accumulator(), id, text, date);
+            };
+            reader
+                .sweep_history(name, last_id, limit, &mut on_message)
+                .await
+        };
+        if let Err(e) = outcome {
+            tracing::warn!(channel = name, error = %e, "telegram channel sweep failed; skipping");
+        }
+        if let Some(newest) = sweep.finish() {
+            self.lock_last_seen().insert(name.to_owned(), newest);
+        }
+        tracing::info!(
+            channel = name,
+            scanned = sweep.scanned(),
+            "telegram channel swept"
+        );
+    }
+
+    /// Drain the chatter windows that had closed by `now` into raw records.
+    ///
+    /// A window still in progress stays pending, so a count is published once,
+    /// complete, rather than repeatedly as it grows.
+    pub fn drain_completed(&self, now: DateTime<Utc>) -> Vec<RawRecord> {
+        let rollups = self.lock_accumulator().drain_completed(now);
+        tracing::info!(rollups = rollups.len(), "telegram chatter rollups drained");
+        rollups.into_iter().map(RawRecord::ChatterRollup).collect()
+    }
+}
+
+/// On-demand video lookup across the same allowlist — the user-directed
+/// exception to this crate's aggregate-only rule (see [`media`]).
+///
+/// **No cadence.** This runs only when a person presses search for a named
+/// place; nothing here is scheduled, and nothing it returns is stored.
+///
+/// A free function rather than a [`ChannelOrchestrator`] method because it
+/// genuinely holds no state — that is the rule-7 bound made structural. It
+/// keeps no marks, touches no accumulator, and leaves nothing behind between
+/// searches.
+///
+/// Scope is deliberately narrow: uploaded video only. Posts that merely *link*
+/// a video host are left to the GDELT and Bluesky legs in `media-search`,
+/// which already cover exactly that and cover it across far more of the web
+/// than a dozen channels could.
+///
+/// One dead channel must not empty the panel, so per-channel failures are
+/// logged and skipped; the whole search fails only when every channel did.
+pub async fn search_all(
+    reader: &impl ChannelReader,
+    query: &MediaQuery,
+) -> Result<Vec<MediaHit>, SourceError> {
+    if !query.is_valid() {
+        return Ok(Vec::new());
+    }
+    let Some(text) = media::query_text(&query.place, &query.topic) else {
+        return Ok(Vec::new());
+    };
+
+    let mut hits = Vec::new();
+    let mut failed = 0usize;
+    for name in ALLOWED_CHANNELS {
+        match reader.search_videos(name, &text, query).await {
+            Ok(found) => hits.extend(media::playable_hits(name, &found)),
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(channel = name, error = %e, "telegram media search failed");
+            }
+        }
+    }
+    if failed == ALLOWED_CHANNELS.len() {
+        return Err(SourceError::Other(
+            "every telegram channel search failed — the session may have expired".to_string(),
+        ));
+    }
+
+    let mut hits = media_search::merge(hits);
+    hits.truncate(query.limit);
+    Ok(hits)
+}
 
 /// Per-channel bookkeeping for one history sweep.
 ///
