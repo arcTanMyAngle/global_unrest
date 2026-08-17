@@ -18,8 +18,20 @@ project with no published crate API to stabilize against.
   branch protection, and pending dependency upgrades). The quality-gate
   command list is now canonical in `docs/DEVELOPMENT.md`; README and
   CONTRIBUTING link to it instead of restating a drifted copy.
+- `workspace.package.version` bumped from 0.6.0 to 0.7.0.
 
 ### Fixed
+
+- `release.yml`: added a `validate-tag` job that rejects a non-semver `v*`
+  tag and checks it against `workspace.package.version`, a matching
+  CHANGELOG heading, and ancestry from `main`; fixed the release body to
+  reference the real unprefixed image tags; pointed the CHANGELOG link at
+  the tagged ref instead of moving `main`; SHA-pinned every third-party
+  action; added a top-level read-only `permissions: contents: read` with
+  jobs escalating only what they use; made `ghcr-images` wait on
+  `desktop-binaries` so GHCR publishing can't outrun a failing platform
+  build; and added a `.sha256` checksum plus a build provenance attestation
+  per desktop archive, with `provenance: true` on the GHCR image builds.
 
 - Media player: a Bluesky post's own page (not `embed.bsky.app`) is now the
   hit URL and never claimed as an in-app embed. `embed.bsky.app` renders a

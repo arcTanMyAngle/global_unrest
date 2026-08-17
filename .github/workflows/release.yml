@@ -1,6 +1,6 @@
 name: Release
 
-# Tag-driven: push a `v*` tag (e.g. `v0.6.0`, matching the CHANGELOG entry
+# Tag-driven: push a `v*` tag (e.g. `v0.7.0`, matching the CHANGELOG entry
 # and workspace.package.version) to build desktop binaries for every
 # platform and push worker/api images to GHCR. Nothing here runs on a
 # normal branch push — see ci.yml for that.
@@ -11,8 +11,54 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
+  # A `v*` push trigger accepts any tag shape and does not by itself mean
+  # the tag matches the crate version, has a CHANGELOG entry, or was cut
+  # from main. This job makes those three things a hard requirement before
+  # any build or publish work starts.
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Validate tag against workspace version, CHANGELOG, and main
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$tag' is not a semver 'vX.Y.Z' tag."
+            exit 1
+          fi
+          version="${tag#v}"
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [[ "$version" != "$cargo_version" ]]; then
+            echo "::error::Tag version $version does not match workspace.package.version $cargo_version."
+            exit 1
+          fi
+          if ! grep -qE "^## \[$version\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$version]' entry."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tagged commit $GITHUB_SHA is not reachable from main."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   desktop-binaries:
+    needs: validate-tag
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -28,9 +74,9 @@ jobs:
             asset: live-earth-signals-desktop-macos-aarch64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable, pinned to a specific commit on the moving `stable` branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build (release)
         run: cargo build --release -p global-signal-desktop
 # Fixtures remain useful for regression and service troubleshooting, so the
@@ -50,12 +96,29 @@ jobs:
           cp target/release/${{ matrix.bin }} dist/
           cp -r fixtures dist/fixtures
           tar -czf ${{ matrix.asset }} -C dist .
-      - uses: actions/upload-artifact@v4
+      - name: Checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 -Path ${{ matrix.asset }}).Hash.ToLower()
+          "$hash  ${{ matrix.asset }}" | Out-File -Encoding ascii -NoNewline ${{ matrix.asset }}.sha256
+      - name: Checksum (Unix)
+        if: runner.os != 'Windows'
+        # shasum (not sha256sum) is the one guaranteed present on both the
+        # macOS and Linux GitHub-hosted runner images.
+        run: shasum -a 256 ${{ matrix.asset }} > ${{ matrix.asset }}.sha256
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: ${{ matrix.asset }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
 
   ghcr-images:
+    needs: [validate-tag, desktop-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,43 +127,49 @@ jobs:
       matrix:
         service: [workers, api]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         id: meta
         with:
           images: ghcr.io/${{ github.repository_owner }}/global-unrest-${{ matrix.service }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: services/${{ matrix.service }}/Dockerfile
           push: true
+          provenance: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
   github-release:
-    needs: [desktop-binaries, ghcr-images]
+    needs: [validate-tag, desktop-binaries, ghcr-images]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           # CHANGELOG.md is hand-maintained per tag; this just points
-          # release-readers at it rather than duplicating the text.
+          # release-readers at the tagged copy rather than duplicating the
+          # text or linking a version that will drift once main moves on.
           body: |
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for details.
 
-            Worker/api images: `ghcr.io/${{ github.repository_owner }}/global-unrest-workers:${{ github.ref_name }}`, `ghcr.io/${{ github.repository_owner }}/global-unrest-api:${{ github.ref_name }}`
+            Worker/api images (also tagged with the `major.minor` shorthand and `latest`): `ghcr.io/${{ github.repository_owner }}/global-unrest-workers:${{ needs.validate-tag.outputs.version }}`, `ghcr.io/${{ github.repository_owner }}/global-unrest-api:${{ needs.validate-tag.outputs.version }}`
+
+            Each desktop archive ships with a `.sha256` checksum file and a
+            build provenance attestation verifiable with
+            `gh attestation verify <file> -R ${{ github.repository }}`.
           files: artifacts/*/*
           generate_release_notes: true

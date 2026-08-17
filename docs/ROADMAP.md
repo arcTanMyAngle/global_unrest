@@ -70,19 +70,27 @@ Engineering is ahead of release and repository operations. These are the
 tracked gaps, none of which block development:
 
 - **No release has ever been cut.** There are no tags locally or on the
-  remote, GitHub has no releases, and `release.yml` has zero runs. Before a
-  first tag: the `v*` trigger accepts non-semver tags and does not verify the
-  tag against `workspace.package.version`, the CHANGELOG, or a commit on
-  `main`; Docker metadata strips the leading `v`, so the release body
-  advertises `:v0.6.0`-shaped tags while the real outputs are `:0.6.0`,
-  `:0.6`, and `:latest`; the CHANGELOG link points at moving `main`;
-  third-party actions are tag-pinned rather than SHA-pinned; the workflow has
-  no explicit read-only top-level token permission; GHCR images can publish
-  before all desktop artifacts pass; and there are no checksums or provenance
-  attestations.
-- **The workspace version is still 0.6.0** while substantial work sits under
-  Unreleased. The first real tag should be a newly chosen version, not a
-  retroactive v0.6.0.
+  remote, GitHub has no releases, and `release.yml` has zero runs. The
+  workflow defects that previously blocked a first tag are now fixed: a
+  `validate-tag` job rejects a non-semver `v*` tag and checks it against
+  `workspace.package.version`, a matching `## [x.y.z]` CHANGELOG heading, and
+  ancestry from `main` before anything else runs; the release body now
+  references the real (unprefixed) image tags instead of a `v`-prefixed
+  string Docker metadata never produces; the CHANGELOG link points at the
+  tagged ref instead of moving `main`; third-party actions are SHA-pinned
+  with a version comment; the workflow has a top-level read-only
+  `permissions: contents: read` with jobs escalating only what they need;
+  `ghcr-images` now `needs: [validate-tag, desktop-binaries]` so GHCR
+  publishing waits on every desktop artifact passing; and desktop archives
+  ship a `.sha256` checksum plus a build provenance attestation
+  (`actions/attest-build-provenance`), with `provenance: true` on the GHCR
+  image builds. What's still a manual step: actually pushing a `vX.Y.Z` tag,
+  which requires a matching CHANGELOG heading to exist first (see
+  workspace-version item below).
+- **The workspace version is 0.7.0** (bumped from 0.6.0) with substantial
+  work sitting under Unreleased. Cutting the first real tag still requires
+  turning that Unreleased section into a `## [0.7.0] — <date>` heading (or
+  bumping again) so `validate-tag` has something to match.
 - **`main` is unprotected.** There is no CODEOWNERS file and recent commits
   are unsigned. This is a manual GitHub settings step.
 - **Dependabot PRs are open and unmerged.** The current grouping bundles a
