@@ -1,7 +1,7 @@
 //! Manual check against the real public APIs — never part of `cargo test`.
 //!
 //! ```sh
-//! cargo run -p media-search --features live --example live_probe -- Colombia earthquake 72
+//! cargo run -p media-search --features live --example media_live_probe -- Colombia earthquake 72
 //! ```
 //!
 //! Exists because both legs fail *quietly* in ways an offline golden test

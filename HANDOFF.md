@@ -4,8 +4,113 @@
 > preserve the state of their session and can mention work that is now shipped.
 > Use README.md, docs/ROADMAP.md, and docs/DEVELOPMENT.md for current behavior.
 
-Last session: 2026-08-15 (**thirteenth** session). Read this file, then
+Last session: 2026-08-15 (**fifteenth** session). Read this file, then
 [CLAUDE.md](CLAUDE.md).
+
+## Fifteenth session (2026-08-15): repository readiness audits
+
+Completed the five read-only follow-ups requested after the Windows example
+collision fix. No GitHub state was changed.
+
+**README screenshot:** this loose end was obsolete. The current README has no
+screenshot reference and the repository contains no raster screenshot asset,
+so there is nothing stale to refresh. Adding a new screenshot would be a new
+feature rather than maintenance of an existing one.
+
+**Dependabot:** two PRs are open and were reviewed without merging. PR #6
+groups seven major GitHub Action updates and changes only `ci.yml` and
+`release.yml`; checkout is exercised by CI, but the release-only action bumps
+cannot be exercised by the tag-only workflow's normal PR checks. PR #7 groups
+twelve Cargo updates, including migration-sized eframe/egui 0.35 -> 0.36
+(transitively wgpu 29 -> 30), zip 6 -> 8, and criterion 0.7 -> 0.8 alongside
+routine patches. The current Dependabot grouping makes that PR unnecessarily
+hard to review, and ignoring only direct `wgpu` does not prevent eframe from
+updating it transitively. Recommendation: merge neither as-is; let CI finish,
+then split release-action upgrades from CI actions and split the UI/zip/
+benchmark migrations from routine Cargo patches. At the final check, PR #6
+had 18 queued jobs and one running; PR #7 had 17 queued, one running, and one
+successful. Neither had reviews or comments.
+
+**Release workflow:** local and remote have no tags, GitHub has no releases,
+and `release.yml` has zero runs. Concrete pre-tag findings:
+- the `v*` trigger accepts non-semver tags and does not verify that the tag
+  matches `workspace.package.version`, CHANGELOG, or a commit on `main`;
+- workspace version is still 0.6.0 while substantial work sits under
+  Unreleased, so the first real tag should be a newly chosen version (likely
+  0.7.0), not a retroactive v0.6.0 tag;
+- docker metadata strips the leading `v`, so the release body incorrectly
+  advertises `:v0.6.0`-shaped image tags; actual stable outputs are
+  `:0.6.0`, `:0.6`, and `:latest`;
+- the CHANGELOG link points at moving `main`, third-party actions are tag-
+  pinned rather than full-SHA-pinned, and the workflow has no explicit
+  read-only top-level token permission;
+- GHCR images can be partially published before all desktop artifacts pass,
+  and there are no checksums or provenance attestations.
+
+Safe first-tag order: fix/validate the workflow; select and apply the version
+and CHANGELOG release heading; run the full gate plus release builds and image
+builds on the exact `main` commit; require green CI; create one annotated (or
+signed) tag on that exact commit and push only that tag; monitor all jobs; do
+not delete/reuse a failed published tag (fix forward with the next patch);
+then extract/smoke each desktop asset, pull/smoke both image tags, verify image
+visibility and the generated release notes, and record checksums/provenance.
+
+**Branch protection:** GitHub's public branch API reports `main` is
+unprotected. There is no CODEOWNERS file and the latest twelve commits are
+unsigned. Recommended solo-maintainer baseline: require pull requests but no
+external approval until a second reviewer exists; require strict/up-to-date
+CI and conversation resolution; require linear history; block force pushes
+and deletion. Add one stable terminal CI aggregator before protection rather
+than selecting nineteen volatile matrix contexts individually. Do not enable
+signed-commit, code-owner, deployment, or merge-queue requirements yet.
+Initially retain an administrator recovery bypass until the rule is proven,
+then decide whether to disable bypass as a separate hardening step.
+
+**Telegram mock MTProto scope:** a real local mock is feasible but materially
+larger than every HTTP/WebSocket live suite. A test session can preload a
+256-byte auth key and point its datacenter at localhost, avoiding login and
+Diffie-Hellman. Grammers has no server implementation, though, so test support
+must implement full-transport framing, MTProto 2.0 server-direction crypto,
+RPC result envelopes/acks, `initConnection/getConfig`, `updates.getState`,
+eight `contacts.resolveUsername` calls, and paged `messages.getHistory` with
+realistic TL channel/message objects. The on-demand media path is a separate
+phase adding `messages.search` and document/video objects. Expect roughly
+1,000-1,500 lines and multiple focused days, plus a bare constructor seam,
+test-only protocol dependencies, CI job, and docs. A smaller injected client
+trait/fake would cover source policy and high-water behavior but must not be
+described as transport or mock-server coverage. Recommendation: choose that
+coverage goal explicitly before implementation.
+
+**Nothing committed — standing instruction, user does their own commits.**
+
+**Loose ends now:** the two reviewed Dependabot PRs remain open with CI
+pending; release-workflow corrections and its first tag remain undone; branch
+protection remains disabled; and Telegram needs a choice between the smaller
+client-fake suite and the full mock-MTProto project. README screenshot
+freshness and the Windows `live_probe` collision are closed.
+
+## Fourteenth session (2026-08-15): Windows example-output collision fix
+
+Closed the pre-existing Windows-only `cargo test --workspace` race surfaced
+in the thirteenth session. `source-bluesky` and `media-search` both had an
+auto-discovered example target named `live_probe`, so Cargo linked both to
+`target/debug/examples/live_probe.exe`; parallel builds could collide with
+`LNK1104`. Renamed only the less-established media-search target to
+`media_live_probe` and updated its usage comment and the nearby source note.
+The Bluesky probe and its documented command remain unchanged.
+
+Verification is green: `cargo fmt --all --check`, all-target/all-feature
+clippy and live-feature tests for `source-bluesky` and `media-search`, and
+parallel `cargo test --workspace`. The workspace run emitted neither the
+duplicate-output warning nor `LNK1104`.
+
+**Nothing committed — standing instruction, user does their own commits.**
+
+**Loose ends carried forward, still open**: Telegram remains the only source
+without a live-feature mock-server test (materially larger because it needs a
+mock MTProto server; discuss scope before starting), branch protection on
+`main`, the never-exercised tag release workflow, README screenshot freshness,
+and unreviewed Dependabot PRs on origin.
 
 ## Thirteenth session (2026-08-15): source-ioda mock-server test
 

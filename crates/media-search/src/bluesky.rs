@@ -34,7 +34,7 @@ use crate::{MediaHit, Provider, search_terms, short_title};
 /// `public.api.bsky.app` is `200` while `searchPosts` on the same host is
 /// `403`, and `api.bsky.app` serves `searchPosts` unauthenticated. Neither
 /// host needs a session, so this is a routing quirk, not an auth requirement;
-/// `examples/live_probe.rs` is what re-checks it.
+/// `examples/media_live_probe.rs` is what re-checks it.
 pub const SEARCH_ENDPOINT: &str = "https://api.bsky.app/xrpc/app.bsky.feed.searchPosts";
 
 /// `searchPosts` caps `limit` at 100.
