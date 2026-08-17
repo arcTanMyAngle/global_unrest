@@ -57,7 +57,7 @@ anyhow = "1"
 # M4/M7 services/api only.
 axum = "0.8"
 chrono = { version = "0.4.45", features = ["serde"] }
-criterion = "0.7"
+criterion = "0.8"
 directories = "6"
 dotenvy = "0.15"
 duckdb = { version = "1.10504.0", features = ["bundled", "parquet"] }
