@@ -8,6 +8,19 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded `zip` 6 → 8.6 in `source-gdelt`'s Events CSV-zip dump path. The
+  migration this was budgeted for did not materialize: `deflate-flate2` is
+  spelled identically in both majors and still pulls `flate2` without a
+  backend, so the workspace's default `rust_backend` (miniz_oxide) keeps
+  selecting it, and the reader calls `unzip_csv` makes — `ZipArchive::new`,
+  `is_empty`, `by_index`, `size`, `read_to_end` — all carried over unchanged.
+  No source edits. `typed-path` is the one new transitive dependency and is
+  pure Rust. Note that `libduckdb-sys` keeps a `zip` 6 **build**-dependency,
+  so two `zip` majors legitimately coexist in `Cargo.lock` and `cargo tree -i
+  zip` is ambiguous; cargo-deny's `bans` check is fine with it.
+
 ## [0.7.0] — 2026-08-17 — M7: service hardening, Daily Events, Media, and aggregate chatter
 
 ### Changed

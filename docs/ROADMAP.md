@@ -99,15 +99,13 @@ tracked gaps, none of which block development:
   `archive`, `benchmarks`, and a `cargo-dependencies` catch-all, and Actions
   updates as `release-actions` and `ci-actions`. The eframe/egui 0.35 → 0.36
   and wgpu 29 → 30 half of the old cargo PR is done on `main`, so that PR now
-  carries only criterion 0.7 → 0.8 and zip 6 → 8, both still open work that
-  the new `benchmarks` and `archive` groups will re-propose on their own. The
-  Actions PR is based on a commit predating the `release.yml` hardening above
-  and would revert the SHA pins. Closing both and letting the next scheduled
-  run regenerate them is a manual GitHub step.
-- **`zip` 6 → 8 and `criterion` 0.7 → 0.8 are unreviewed.** Each is a
-  migration in its own right — `zip` majors move the reader API and the
-  DEFLATE backend feature names that `source-gdelt`'s dump path depends on,
-  and criterion 0.8 changes the benchmark harness. Neither is started.
+  carries only criterion 0.7 → 0.8, still open work that the new `benchmarks`
+  group will re-propose on its own; the zip 6 → 8 half is done on `main` too.
+  The Actions PR is based on a commit predating the `release.yml` hardening
+  above and would revert the SHA pins. Closing both and letting the next
+  scheduled run regenerate them is a manual GitHub step.
+- **`criterion` 0.7 → 0.8 is unreviewed.** It changes the benchmark harness
+  and is not started.
 - **`compose-smoke` has never run on the development machine** (no local
   Docker CLI). It is covered by CI.
 - **No mock-server suite for `source-telegram`.** ACLED, NOAA, IODA,
