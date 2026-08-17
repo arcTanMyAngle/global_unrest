@@ -152,6 +152,48 @@ substring matching restricted to Burmese script runs — not a keyword-list
 addition. The same applies to Thai, Khmer, Lao, Japanese, and Chinese.
 Re-scope before starting.
 
+### Scoping an MTProto mock for `source-telegram`
+
+Established by reading the vendored `grammers-*` 0.10 sources, so the next
+person does not re-derive it. Four facts decide the shape of any mock:
+
+1. **The DH handshake can be skipped entirely.**
+   `SenderPool::connect_sender` (`grammers-mtsender-0.10.0/src/sender_pool.rs`,
+   the `if let Some(auth_key) = dc_option.auth_key` branch) calls
+   `connect_with_auth` when the session already carries a key, and only falls
+   back to `connect` + `generate_auth_key` when it does not. A test can write
+   a `FileSession` whose home `DcOption` has any 256-byte `auth_key` and a
+   `127.0.0.1:<port>` `ipv4`, and the client will connect straight into the
+   encrypted layer. No RSA, no factorization, no `authentication.rs`. This is
+   the single fact that makes a mock feasible at all.
+2. **The transport is free.** `connect_sender` hardcodes `transport::Full` —
+   not negotiated, not obfuscated. `Full` is public, `Transport::pack`/
+   `unpack` are public trait methods, and one instance tracks each direction's
+   sequence number separately, so a server can reuse it as-is for framing.
+3. **`grammers-crypto` cannot be reused for the server side.**
+   `encrypt_data_v2` hardcodes `Side::Client` and `decrypt_data_v2` hardcodes
+   `Side::Server`; `Side` itself is private. A server needs exactly the
+   inverse pair (decrypt with `x = 0`, encrypt with `x = 8`), so both public
+   functions are the wrong direction. `aes::ige_encrypt`/`ige_decrypt` *are*
+   public, so what has to be written is only the `msg_key`/KDF half — SHA-256
+   over `auth_key[88 + x .. 120 + x]` — around 40 lines. Budget debugging time
+   for it anyway: a wrong `x` produces garbage plaintext and a client-side
+   error that names neither.
+4. **The message layer has to be hand-rolled, but the TL bodies do not.**
+   `mtp::Encrypted` is client-only, so salt/session-id/`msg_id`/`seq_no`
+   framing and `rpc_result` are the mock's job, and it must *parse*
+   `msg_container` and `gzip_packed` because the client batches and compresses.
+   It can be permissive in its own direction (never ack, never compress, never
+   send `bad_msg_notification`). Above that, `grammers-tl-types` is already in
+   the tree and its `Serializable`/`Deserializable` work both ways, so no
+   request or response body needs hand-encoding.
+
+The call surface both Telegram paths actually need is small and closed:
+`InvokeWithLayer{InitConnection{help.GetConfig}}` on connect, `updates.GetState`
+(what `Client::is_authorized` invokes), `contacts.ResolveUsername`,
+`channels.GetChannels`/`users.GetUsers` for peer refs, `messages.GetHistory`
+for the ingest sweep, and `messages.Search` for the media leg.
+
 ## Verification discipline
 
 These rules exist because each one caught a wrong answer that a cheaper

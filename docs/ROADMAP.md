@@ -85,34 +85,92 @@ tracked gaps, none of which block development:
   ship a `.sha256` checksum plus a build provenance attestation
   (`actions/attest-build-provenance`), with `provenance: true` on the GHCR
   image builds. **The workspace version is 0.7.0** and CHANGELOG.md now has
-  a matching `## [0.7.0] — 2026-08-17` heading (Unreleased is empty above
-  it), so `validate-tag` has something to match. What's still a manual step:
-  actually pushing the `v0.7.0` tag, after branch protection lands (see the
-  next item).
-- **`main` is unprotected.** A CODEOWNERS file now exists
-  (`.github/CODEOWNERS`), but branch protection itself — required reviews,
-  required status checks, blocking force-push — is still a manual GitHub
-  settings step, and recent commits remain unsigned.
-- **The open Dependabot PRs are now stale and should be closed, not
-  merged.** The grouping that produced them has been split
-  (`.github/dependabot.yml`): Cargo updates now land as `egui-stack`,
-  `archive`, `benchmarks`, and a `cargo-dependencies` catch-all, and Actions
-  updates as `release-actions` and `ci-actions`. The eframe/egui 0.35 → 0.36
-  and wgpu 29 → 30 half of the old cargo PR is done on `main`, so that PR now
-  carries only criterion 0.7 → 0.8, still open work that the new `benchmarks`
-  group will re-propose on its own; the zip 6 → 8 half is done on `main` too.
-  The Actions PR is based on a commit predating the `release.yml` hardening
-  above and would revert the SHA pins. Closing both and letting the next
-  scheduled run regenerate them is a manual GitHub step.
-- **`criterion` 0.7 → 0.8 is unreviewed.** It changes the benchmark harness
-  and is not started.
+  a matching `## [0.7.0] — 2026-08-17` heading, so `validate-tag` has
+  something to match. What's still a manual step: actually pushing the
+  `v0.7.0` tag. Branch protection has since landed and brought a signing
+  prerequisite with it — see the next item.
+- **`main` branch protection is configured, including required signed
+  commits**; `.github/CODEOWNERS` is in place. **Local signing is not set up
+  yet**, which is now a blocker rather than a note: `commit.gpgsign` and
+  `user.signingkey` are both unset, `gpg.format` is unset, and the tip commit
+  verifies as `N` (unsigned). Every commit already on `main` is unsigned, so
+  the protection rule only applies going forward — but the next push will be
+  rejected until a signing key is configured. SSH signing is the least
+  ceremony here (`gpg.format = ssh`, `user.signingkey` pointing at a public
+  key also registered on GitHub as a *signing* key, `commit.gpgsign = true`);
+  GPG works equally well if a key already exists.
+- **The stale Dependabot PRs are closed** (done manually on GitHub). The
+  grouping that produced them has been split (`.github/dependabot.yml`):
+  Cargo updates now land as `egui-stack`, `archive`, `benchmarks`, and a
+  `cargo-dependencies` catch-all, and Actions updates as `release-actions`
+  and `ci-actions`. Every part of the old cargo PR — eframe/egui 0.35 → 0.36
+  with wgpu 29 → 30, zip 6 → 8, and criterion 0.7 → 0.8 — had already landed
+  on `main`, and the Actions PR would have reverted the `release.yml` SHA
+  pins. The next scheduled run regenerates anything genuinely outstanding
+  against the new groups.
 - **`compose-smoke` has never run on the development machine** (no local
   Docker CLI). It is covered by CI.
 - **No mock-server suite for `source-telegram`.** ACLED, NOAA, IODA,
   Bluesky, Gemini, and media-search all have one; Telegram's MTProto path is
   covered only by unit tests over the extracted `ChannelSweep` state machine
-  and a manual login example. A mock MTProto server is a larger lift than the
-  others and has not been scoped.
+  and `media`'s pure half, plus a manual login example. Scoped and decided —
+  a `ChannelReader` trait seam, not a mock MTProto server. See below.
+  Implementation is the next tracked piece of work.
+
+### Scoping the `source-telegram` coverage gap
+
+What is actually untested is not the protocol, it is the orchestration around
+it: `sweep_channel`'s first-sweep-vs-incremental `offset_id`/`reverse`/`limit`
+wiring, its per-channel error swallowing (one dead channel must not degrade
+the rest), `fetch`'s drain of completed windows, `search_channel`'s second
+video check after the server-side filter, and `search_media`'s
+every-channel-failed error. `ChannelSweep` and `media` already cover the pure
+logic below that.
+
+Two ways to reach it, and they are not close in cost:
+
+**A. A real mock MTProto server** (`tests/live_mock.rs`, matching the other
+five suites). Feasible — the four enabling facts are recorded in
+[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#scoping-an-mtproto-mock-for-source-telegram),
+the decisive one being that seeding a session's `DcOption.auth_key` skips the
+DH handshake entirely. But it still means writing server-side MTProto
+crypto (`grammers-crypto`'s public functions are the wrong direction),
+server-side message framing (`mtp::Encrypted` is client-only), and a small
+`grammers-tl-types` request router. Estimate ~600–900 lines of test-only
+infrastructure against 146 for Bluesky's, most of it protocol plumbing that
+tests grammers rather than this project, and all of it re-derivable against
+us on a `grammers-*` bump.
+
+**B. A `ChannelReader` trait seam** over the handful of grammers calls the two
+paths make, with the sweep/search orchestration written against it. Covers
+every behavior listed above with an ordinary fake, in roughly the size of the
+existing suites, and leaves untested only the thin grammers glue — which is
+the part a mock would be least honest about anyway, since it would be
+asserting against our own idea of Telegram's replies.
+
+**Decided: B.** The mock server is deliberately not built. B buys the coverage
+that matters at a fraction of the cost and risk. The trade-off is accepted
+rather than hidden: B touches production code to introduce the seam, and
+neither option exercises real MTProto — only a live run does, which is how
+this source has been verified so far. The "every source has a mock suite"
+symmetry is knowingly given up for `source-telegram`, and option A's enabling
+facts stay recorded in ENGINEERING_NOTES.md so the decision can be revisited
+without re-deriving them.
+
+Implementation shape, settled during scoping:
+
+- The `ChannelReader` trait lives in **ungated** `lib.rs`; the real
+  `grammers_client::Client` impl stays behind `#[cfg(feature = "live")]` in
+  `live.rs`. `chatter`, `media-search`, `core-types`, and `chrono` are all
+  non-optional dependencies, so the orchestration and its fake-driven tests
+  compile and run under plain `cargo test -p source-telegram`.
+- The **ingest leg stays streaming** — a callback per message, not a returned
+  `Vec`. This is a product-rule constraint, not a style preference: observing
+  and dropping in the same call is what keeps up to `PER_CYCLE_LIMIT` = 200
+  message texts from being materialized at once.
+- The **media leg may return a `Vec`**, since materialized results are already
+  the documented Media exception, carrying the fields `search_channel` reads
+  so `is_video_attachment` and `media::hit` become testable orchestration.
 
 ## M8: platform and source polish
 

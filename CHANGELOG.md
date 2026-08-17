@@ -10,6 +10,17 @@ project with no published crate API to stabilize against.
 
 ### Changed
 
+- Upgraded `criterion` 0.7 → 0.8.2 for `analytics`' scoring benches. The
+  budgeted harness migration did not materialize either: 0.8's breaking
+  changes are the removal of `criterion::black_box` (the bench already used
+  `std::hint::black_box`, stable since 1.66) and the `async`/`plotters`
+  feature reshuffle (neither used here). `criterion_group!`,
+  `criterion_main!`, `benchmark_group`, `sample_size`, `bench_function`, and
+  `iter` all carried over unchanged, and the saved baselines in
+  `target/criterion` still compare. No source edits. Verified by running the
+  benches, not just `--no-run` — `score_buckets` 10k ≈ 11 ms, 100k ≈ 57 ms,
+  `compose_window_7d` ≈ 291 ns.
+
 - Upgraded `zip` 6 → 8.6 in `source-gdelt`'s Events CSV-zip dump path. The
   migration this was budgeted for did not materialize: `deflate-flate2` is
   spelled identically in both majors and still pulls `flate2` without a
@@ -20,6 +31,15 @@ project with no published crate API to stabilize against.
   pure Rust. Note that `libduckdb-sys` keeps a `zip` 6 **build**-dependency,
   so two `zip` majors legitimately coexist in `Cargo.lock` and `cargo tree -i
   zip` is ambiguous; cargo-deny's `bans` check is fine with it.
+
+### Fixed
+
+- `analytics` now sets `[lib] bench = false`. Cargo was building the lib's
+  own (empty) libtest bench target and running it first, so any criterion
+  flag — `cargo bench -p analytics -- --quick` being the obvious one — died
+  on the lib target with `Unrecognized option` before `scoring` ever ran.
+  Working around it needed `--bench scoring`; now the package-level command
+  works.
 
 ## [0.7.0] — 2026-08-17 — M7: service hardening, Daily Events, Media, and aggregate chatter
 

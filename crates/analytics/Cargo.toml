@@ -6,6 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# `cargo bench -p analytics` would otherwise run the lib's (empty) libtest
+# bench target first, and libtest rejects criterion's own flags — `-- --quick`
+# fails on the lib target before `scoring` ever starts.
+[lib]
+bench = false
+
 [dependencies]
 chrono.workspace = true
 core-types.workspace = true
