@@ -157,10 +157,19 @@ The exact per-feature matrix and mock suites live in .github/workflows/ci.yml.
 
 - Shared dependency versions are pinned once in the workspace Cargo.toml.
   Member crates use workspace dependencies.
-- eframe/egui and wgpu move in lockstep. eframe 0.35 uses wgpu 29; do not
+- eframe/egui and wgpu move in lockstep. eframe 0.36 uses wgpu 30; do not
   bump wgpu independently.
 - reqwest uses rustls, and the GDELT ZIP path uses the pure-Rust miniz_oxide
   backend, keeping CI free of OpenSSL and system zlib requirements.
 - The development profile optimizes dependencies to keep map rendering and
   geospatial math responsive while workspace crates retain fast incremental
   builds. If cold builds are painful, use sccache through RUSTC_WRAPPER.
+- Dependabot keeps migrations out of routine-patch PRs
+  (`.github/dependabot.yml`). Cargo updates arrive as `egui-stack`
+  (eframe/egui/epaint/wgpu, which move together), `archive` (zip/flate2),
+  `benchmarks` (criterion), and a `cargo-dependencies` catch-all; Actions
+  updates as `release-actions` and `ci-actions`. Add a new group rather than
+  widening the catch-all whenever an upgrade would need its own review — and
+  for an `egui-stack` PR, merging requires a real desktop build plus a live
+  run, because clippy accepts a renderer that draws nothing (see
+  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#build-and-linking)).

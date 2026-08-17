@@ -176,7 +176,7 @@ ledger, source-shaped markers, NOAA alert overlay, legend, orientation aids,
 and a reading guide. The precision contract and attention/event separation
 apply to every layer.
 
-eframe 0.35 and wgpu 29 move together. Do not upgrade wgpu independently.
+eframe 0.36 and wgpu 30 move together. Do not upgrade wgpu independently.
 
 ## Runtime invariants
 

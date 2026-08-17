@@ -33,9 +33,24 @@ read [ROADMAP.md](ROADMAP.md); for what changed read
   boundary, a background task may report `stopped` with a mid-compile log
   rather than a real result — check for a live `cargo`/`rustc` process before
   trusting it, and prefer rerunning clean.
-- eframe 0.35 rides **wgpu 29**. Do not bump wgpu independently. The
+- eframe 0.36 rides **wgpu 30**. Do not bump wgpu independently. The
   `duckdb` crate `1.10504.0` is DuckDB 1.5.4; `Connection` is `!Sync`, which
   is why exactly one thread owns it.
+- **A successful link does not prove the app draws.** The 0.35 → 0.36 egui
+  upgrade needed no source changes at all — `cargo check`, clippy at
+  `-D warnings`, 45 test binaries, and a real desktop link were green on the
+  first try — yet that leg of the verification says nothing about pixels. The
+  specific hazard is `MapView::ensure_labels`, which lays country labels out
+  **once** and blits the same `Arc<Galley>` forever; a galley carries UV
+  coordinates into the font atlas, so a text-stack change that reshapes or
+  re-atlases glyphs would render garbage or nothing while compiling
+  perfectly. 0.36 replaced egui's shaping backend outright (harfrust, skrifa,
+  glifo, plus vello_cpu), so this was a real risk and was cleared only by
+  screenshotting a live run. Bump egui, then look at the map.
+- The Vulkan `ERROR wgpu_hal::vulkan::instance: loader_get_json: Failed to
+  open JSON file …EOSOverlayVkLayer-Win64.json` at startup on this machine is
+  a stale Epic Online Services overlay layer, not a graphics fault. wgpu logs
+  it during adapter enumeration and then picks an adapter normally.
 
 ## Shell and tooling traps
 
@@ -69,8 +84,8 @@ read [ROADMAP.md](ROADMAP.md); for what changed read
 - **`egui::RichText` does not parse markdown** — `**bold**` renders its
   asterisks. Style per span instead; `how_to_read.rs` keeps its copy as
   structured data with a test guarding the regression.
-- egui 0.35's context method is `egui_wants_keyboard_input()`, not
-  `wants_keyboard_input()`.
+- egui's context method is `egui_wants_keyboard_input()`, not
+  `wants_keyboard_input()` — still true through 0.36.
 - **DPI-unaware screenshots look like missing content, not scaled content.**
   `SetProcessDPIAware()` must be called in the same process that captures,
   every time. The GUI recipe for this machine is in

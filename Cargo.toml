@@ -52,7 +52,7 @@ source-telegram = { path = "crates/source-telegram" }
 storage = { path = "crates/storage" }
 
 # External crates — pinned at the workspace level; do not re-declare versions
-# in member crates. eframe 0.35 rides wgpu 29; do not bump wgpu independently.
+# in member crates. eframe 0.36 rides wgpu 30; do not bump wgpu independently.
 anyhow = "1"
 # M4/M7 services/api only.
 axum = "0.8"
@@ -62,8 +62,8 @@ directories = "6"
 dotenvy = "0.15"
 duckdb = { version = "1.10504.0", features = ["bundled", "parquet"] }
 earcutr = "0.5"
-eframe = "0.35"
-egui = "0.35"
+eframe = "0.36"
+egui = "0.36"
 # Selects `zip`'s DEFLATE backend: flate2's default rust_backend (miniz_oxide,
 # pure Rust). `zip`'s deflate-flate2 feature pulls flate2 but not a backend.
 flate2 = "1"

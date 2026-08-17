@@ -3,25 +3,84 @@ updates:
   # Root workspace: all crate versions are pinned in the root Cargo.toml
   # ([workspace.dependencies]) — this is the only place Dependabot needs to
   # open PRs against.
+  #
+  # Grouping rule: a migration never rides in the same PR as a routine patch.
+  # One bundled group forces a false choice — either a chrono patch waits on
+  # an eframe migration, or the migration is merged with the patch's level of
+  # review. Each migration-sized family therefore gets its own PR and
+  # everything else is batched. Dependabot assigns a dependency to the first
+  # matching group; the catch-all also excludes the specific patterns so the
+  # split does not silently depend on declaration order.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
     groups:
+      # eframe/egui/epaint/wgpu are one version-locked family (eframe 0.36
+      # rides wgpu 30 — see docs/ENGINEERING_NOTES.md "Build and linking").
+      # Bumping it is a migration that has to build the real desktop binary
+      # and be run live, because clippy happily accepts a renderer that
+      # compiles and draws nothing. Grouping the family together is also what
+      # keeps wgpu from moving on its own, which is why this entry replaced
+      # the old `ignore: wgpu`.
+      egui-stack:
+        patterns:
+          - "eframe"
+          - "egui*"
+          - "epaint*"
+          - "ecolor*"
+          - "emath"
+          - "wgpu*"
+      # `zip` majors move the reader/writer API and rename the features that
+      # select the DEFLATE backend, so source-gdelt's dump path needs a real
+      # read each time. flate2 supplies that backend and moves with it.
+      archive:
+        patterns:
+          - "zip"
+          - "flate2"
+      # criterion majors change the benchmark harness API.
+      benchmarks:
+        patterns:
+          - "criterion"
+      # Routine patches: safe to batch and review as one.
       cargo-dependencies:
         patterns:
           - "*"
-    # eframe/egui/wgpu are version-locked together (see CLAUDE.md: eframe
-    # 0.35 rides wgpu 29 — do not bump wgpu independently); bump that trio
-    # by hand, not via an automated PR that only touches one of them.
-    ignore:
-      - dependency-name: "wgpu"
+        exclude-patterns:
+          - "eframe"
+          - "egui*"
+          - "epaint*"
+          - "ecolor*"
+          - "emath"
+          - "wgpu*"
+          - "zip"
+          - "flate2"
+          - "criterion"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     groups:
-      actions-dependencies:
+      # release.yml's actions gate publishing: GHCR pushes, desktop artifact
+      # upload/download, build provenance, and the release body. A bad bump
+      # here surfaces only when a tag is pushed — never in a pull request's
+      # own CI — so they are reviewed separately from actions that every PR
+      # already exercises.
+      release-actions:
+        patterns:
+          - "docker/*"
+          - "softprops/action-gh-release"
+          - "actions/upload-artifact"
+          - "actions/download-artifact"
+          - "actions/attest-build-provenance"
+      # Everything else runs on every PR, so CI reviews the bump itself.
+      ci-actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "docker/*"
+          - "softprops/action-gh-release"
+          - "actions/upload-artifact"
+          - "actions/download-artifact"
+          - "actions/attest-build-provenance"

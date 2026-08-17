@@ -132,7 +132,7 @@ worker and supports LES_API_BIND plus private-only LES_API_ALLOW_ACLED.
 
 - Pin shared versions in the workspace Cargo.toml; do not declare divergent
   member versions.
-- Keep eframe/egui and wgpu in lockstep. eframe 0.35 uses wgpu 29.
+- Keep eframe/egui and wgpu in lockstep. eframe 0.36 uses wgpu 30.
 - Preserve the pure-Rust/rustls dependency posture where it is intentional.
 - The Telegram stack deliberately disables the default grammers session
   storage to avoid linking a second static SQLite implementation. Do not

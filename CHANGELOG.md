@@ -10,6 +10,20 @@ project with no published crate API to stabilize against.
 
 ### Changed
 
+- Upgraded eframe/egui 0.35 → 0.36.1, which moves wgpu 29 → 30 transitively
+  along with egui's text stack (harfrust, skrifa, glifo). No workspace source
+  changes were needed; `Context::egui_wants_keyboard_input`, `Painter::galley`
+  and the cached-galley country labels all carried over unchanged. Verified by
+  a real desktop link and a live run, not just `cargo check` — see
+  `docs/ENGINEERING_NOTES.md`.
+- Dependabot no longer bundles migrations with routine patches. Cargo updates
+  are split into `egui-stack` (eframe/egui/epaint/wgpu, version-locked and
+  migration-sized), `archive` (zip/flate2), `benchmarks` (criterion), and a
+  `cargo-dependencies` catch-all; GitHub Actions updates are split into
+  `release-actions` (GHCR push, artifact up/download, provenance, release
+  body — none of which a pull request's own CI exercises) and `ci-actions`.
+  The inert `ignore: wgpu` entry is gone: grouping wgpu with eframe enforces
+  the lockstep rule that the ignore only approximated.
 - Documentation consolidation. `HANDOFF.md` and `docs/PLAN.md` are removed;
   their durable content moved to a new `docs/ENGINEERING_NOTES.md` (build and
   linking traps, source behavior that looks like a bug, verification
