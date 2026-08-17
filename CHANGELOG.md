@@ -8,6 +8,8 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-17 — M7: service hardening, Daily Events, Media, and aggregate chatter
+
 ### Changed
 
 - Upgraded eframe/egui 0.35 → 0.36.1, which moves wgpu 29 → 30 transitively
@@ -252,10 +254,5 @@ project with no published crate API to stabilize against.
 - eframe desktop shell: cached-mesh basemap/heatmap/marker layers, time
   slider, region inspector, E2E pipeline test.
 
-[Unreleased]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.6.0
-[0.5.0]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.1.0
+[Unreleased]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.7.0

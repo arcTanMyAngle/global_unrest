@@ -69,30 +69,30 @@ unsupported links and other platforms retain the browser fallback.
 Engineering is ahead of release and repository operations. These are the
 tracked gaps, none of which block development:
 
-- **No release has ever been cut.** There are no tags locally or on the
-  remote, GitHub has no releases, and `release.yml` has zero runs. The
-  workflow defects that previously blocked a first tag are now fixed: a
-  `validate-tag` job rejects a non-semver `v*` tag and checks it against
-  `workspace.package.version`, a matching `## [x.y.z]` CHANGELOG heading, and
-  ancestry from `main` before anything else runs; the release body now
-  references the real (unprefixed) image tags instead of a `v`-prefixed
-  string Docker metadata never produces; the CHANGELOG link points at the
-  tagged ref instead of moving `main`; third-party actions are SHA-pinned
-  with a version comment; the workflow has a top-level read-only
+- **No release has ever been cut**, but the blockers are now cleared. There
+  are no tags locally or on the remote, GitHub has no releases, and
+  `release.yml` has zero runs. The workflow defects that previously blocked a
+  first tag are fixed: a `validate-tag` job rejects a non-semver `v*` tag and
+  checks it against `workspace.package.version`, a matching `## [x.y.z]`
+  CHANGELOG heading, and ancestry from `main` before anything else runs; the
+  release body references the real (unprefixed) image tags instead of a
+  `v`-prefixed string Docker metadata never produces; the CHANGELOG link
+  points at the tagged ref instead of moving `main`; third-party actions are
+  SHA-pinned with a version comment; the workflow has a top-level read-only
   `permissions: contents: read` with jobs escalating only what they need;
   `ghcr-images` now `needs: [validate-tag, desktop-binaries]` so GHCR
   publishing waits on every desktop artifact passing; and desktop archives
   ship a `.sha256` checksum plus a build provenance attestation
   (`actions/attest-build-provenance`), with `provenance: true` on the GHCR
-  image builds. What's still a manual step: actually pushing a `vX.Y.Z` tag,
-  which requires a matching CHANGELOG heading to exist first (see
-  workspace-version item below).
-- **The workspace version is 0.7.0** (bumped from 0.6.0) with substantial
-  work sitting under Unreleased. Cutting the first real tag still requires
-  turning that Unreleased section into a `## [0.7.0] — <date>` heading (or
-  bumping again) so `validate-tag` has something to match.
-- **`main` is unprotected.** There is no CODEOWNERS file and recent commits
-  are unsigned. This is a manual GitHub settings step.
+  image builds. **The workspace version is 0.7.0** and CHANGELOG.md now has
+  a matching `## [0.7.0] — 2026-08-17` heading (Unreleased is empty above
+  it), so `validate-tag` has something to match. What's still a manual step:
+  actually pushing the `v0.7.0` tag, after branch protection lands (see the
+  next item).
+- **`main` is unprotected.** A CODEOWNERS file now exists
+  (`.github/CODEOWNERS`), but branch protection itself — required reviews,
+  required status checks, blocking force-push — is still a manual GitHub
+  settings step, and recent commits remain unsigned.
 - **The open Dependabot PRs are now stale and should be closed, not
   merged.** The grouping that produced them has been split
   (`.github/dependabot.yml`): Cargo updates now land as `egui-stack`,
