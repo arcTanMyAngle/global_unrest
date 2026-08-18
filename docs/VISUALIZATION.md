@@ -180,8 +180,12 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
 9. **Basemap & orientation polish (offline-first).** Subtle graticule,
    country-border hierarchy (selected/hover emphasis), region labels at low
    zoom (cached egui text galleys), focus dimming outside a selected cell.
-   No online tiles here — the walkers slippy-tile basemap remains the M8
-   stretch (Web-Mercator projection decision + OSM tile policy first).
+   No online tiles here — the slippy-tile basemap was deferred pending a
+   projection and provider decision, now settled in
+   [BASEMAP.md](BASEMAP.md): keep the equirectangular projection, consume
+   EPSG:4326 tiles so nothing reprojects, composite them over the vector
+   basemap, and ship it off by default. `walkers` is rejected there, as is
+   Web Mercator.
 10. **"How to read this map" overlay.** First-run (and `?`-key) overlay
     explaining the precision contract, attention/event separation, badges,
     and biases in plain language — the SAFETY doc's honesty, surfaced in

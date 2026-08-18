@@ -169,9 +169,12 @@ to add every possible feed:
 
 - Settings and About UI for source state and full attributions. Credentials
   stay in environment variables, never the settings database.
-- A slippy-tile basemap design pass before implementation: projection,
-  provider policy, offline behavior, and a clear user toggle. This is the one
-  item deferred continuously since M3.
+- A slippy-tile basemap. The design pass deferred continuously since M3 is
+  done and lives in [BASEMAP.md](BASEMAP.md): equirectangular kept, EPSG:4326
+  tiles from NASA GIBS so nothing reprojects, tiles composited over the vector
+  basemap so a missing tile degrades to today's map, a bounded cache outside
+  the DuckDB store, and a toggle that is off by default. Implementation is
+  phased there and not yet started.
 - Criterion benchmarks in CI and a profiling pass toward higher retention.
 - Chatter coverage for unsegmented scripts. This is a **segmentation**
   problem, not a keyword-list addition — see the correction in
