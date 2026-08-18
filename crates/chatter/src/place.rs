@@ -267,10 +267,60 @@ const CITY_ALIASES: &[(&str, &str)] = &[
 /// built from posts about someone named Chad is worse than no signal.
 const AMBIGUOUS_TOKENS: &[&str] = &["male", "chad", "jordan", "georgia"];
 
-/// Word-window lookup from place tokens to [`Place`].
+/// Country names written in a script that does not delimit words, mapped the
+/// same way as [`COUNTRY_ALIASES`]: a spelling only, with the coordinate still
+/// coming from the bundled geometry. Matched as substrings inside a script run
+/// — see [`crate::script`].
+///
+/// Only the countries whose own language uses one of these scripts are here.
+/// A Chinese-language post about Ukraine is not reachable and is not meant to
+/// be: the endonym table is the honest, auditable half of this, and a full
+/// exonym table (every country's name in six scripts) is a gazetteer this
+/// crate does not have and will not hand-type.
+///
+/// Notable exclusion, exactly parallel to "us" not meaning the United States:
+/// bare ລາວ is both "Laos" and the everyday Lao pronoun "he/she", so only the
+/// explicit ປະເທດລາວ ("the country Laos") is a token.
+const SCRIPT_COUNTRY_TOKENS: &[(&str, &str)] = &[
+    ("မြန်မာ", "MMR"),
+    ("ไทย", "THA"),
+    ("កម្ពុជា", "KHM"),
+    ("ປະເທດລາວ", "LAO"),
+    ("日本", "JPN"),
+    ("中国", "CHN"),
+    ("中國", "CHN"),
+    ("台湾", "TWN"),
+    ("台灣", "TWN"),
+    ("臺灣", "TWN"),
+];
+
+/// City names in the same scripts, mapped to the **Natural Earth city name**
+/// they refer to, exactly like [`CITY_ALIASES`].
+///
+/// As short as that table and for the same reason: the bundled 1:110m
+/// gazetteer is 243 places, so Mandalay, Chiang Mai, and Osaka are simply not
+/// in it and cannot be added here without hand-typing a coordinate.
+const SCRIPT_CITY_TOKENS: &[(&str, &str)] = &[
+    ("ရန်ကုန်", "Yangon"),
+    ("နေပြည်တော်", "Naypyidaw"),
+    ("กรุงเทพ", "Bangkok"),
+    ("ភ្នំពេញ", "Phnom Penh"),
+    ("ວຽງຈັນ", "Vientiane"),
+    ("東京", "Tokyo"),
+    ("京都", "Kyoto"),
+    ("北京", "Beijing"),
+    ("上海", "Shanghai"),
+    ("香港", "Hong Kong"),
+    ("台北", "Taipei"),
+    ("臺北", "Taipei"),
+];
+
+/// Word-window lookup from place tokens to [`Place`], plus substring lookup
+/// over the script tables for text the word path cannot tokenize.
 pub struct PlaceMatcher {
     places: Vec<Place>,
     by_token: HashMap<Vec<String>, usize>,
+    scripts: crate::script::ScriptMatcher,
     max_words: usize,
 }
 
@@ -284,6 +334,7 @@ impl PlaceMatcher {
     pub fn from_indexes(countries: &CountryIndex, cities: &CityIndex) -> Self {
         let mut places: Vec<Place> = Vec::new();
         let mut by_token: HashMap<Vec<String>, usize> = HashMap::new();
+        let mut scripts = crate::script::ScriptMatcher::new();
         let mut max_words = 1usize;
 
         // `is_country` decides collisions without re-reading `places`, so the
@@ -324,6 +375,11 @@ impl PlaceMatcher {
                     insert(alias, idx, false);
                 }
             }
+            for (token, city_name) in SCRIPT_CITY_TOKENS {
+                if *city_name == city.name {
+                    scripts.insert(token, idx);
+                }
+            }
         }
 
         for (info, (lon, lat)) in countries.iter_with_centroid() {
@@ -341,6 +397,11 @@ impl PlaceMatcher {
                     insert(alias, idx, true);
                 }
             }
+            for (token, iso_a3) in SCRIPT_COUNTRY_TOKENS {
+                if *iso_a3 == info.iso_a3 {
+                    scripts.insert(token, idx);
+                }
+            }
         }
 
         for token in AMBIGUOUS_TOKENS {
@@ -350,6 +411,7 @@ impl PlaceMatcher {
         Self {
             places,
             by_token,
+            scripts,
             max_words,
         }
     }
@@ -370,6 +432,13 @@ impl PlaceMatcher {
     /// that a widely-shared multi-country post touches.
     pub fn find(&self, words: &[String]) -> Option<usize> {
         crate::find_window(words, self.max_words, |w| self.by_token.get(w).copied())
+    }
+
+    /// First place named inside an unsegmented-script run. Tried only after
+    /// [`PlaceMatcher::find`] fails, so a post that names a place in Latin
+    /// keeps the same answer it had before this path existed.
+    pub fn find_in_runs(&self, runs: &[crate::script::Run<'_>]) -> Option<usize> {
+        self.scripts.find(runs)
     }
 
     pub fn place(&self, idx: usize) -> &Place {
@@ -459,6 +528,76 @@ mod tests {
         for word in ["polish", "danish", "american", "indian", "congolese"] {
             assert!(place_of(word).is_none(), "`{word}` should not be a place");
         }
+    }
+
+    fn script_place_of(text: &str) -> Option<&'static Place> {
+        let m = matcher();
+        m.find_in_runs(&crate::script::runs(text))
+            .map(|i| m.place(i))
+    }
+
+    /// Same silent-no-op failure mode as the Latin alias tables: a script
+    /// token naming an ISO or a city the bundled file does not carry inserts
+    /// nothing at all, and the only symptom is a source that never matches.
+    #[test]
+    fn every_script_token_resolves_to_a_bundled_place() {
+        for (token, iso_a3) in SCRIPT_COUNTRY_TOKENS {
+            let place = script_place_of(token)
+                .unwrap_or_else(|| panic!("script token `{token}` -> {iso_a3} matched nothing"));
+            assert_eq!(place.country_iso, *iso_a3, "`{token}` landed wrong");
+            assert_eq!(place.precision, LocationPrecision::Country);
+            assert!(place.lat.abs() <= 90.0 && place.lon.abs() <= 180.0);
+        }
+        for (token, city_name) in SCRIPT_CITY_TOKENS {
+            let place = script_place_of(token)
+                .unwrap_or_else(|| panic!("script token `{token}` -> {city_name} matched nothing"));
+            assert_eq!(place.name, *city_name, "`{token}` landed wrong");
+            assert_eq!(place.precision, LocationPrecision::City);
+        }
+    }
+
+    /// A token in both tables would be inserted twice with different payloads
+    /// and resolve by keyword length rather than by the country-beats-city
+    /// rule the word path uses. Keep them disjoint instead.
+    #[test]
+    fn no_script_token_is_both_a_country_and_a_city() {
+        let countries: HashSet<&str> = SCRIPT_COUNTRY_TOKENS.iter().map(|(t, _)| *t).collect();
+        for (token, _) in SCRIPT_CITY_TOKENS {
+            assert!(!countries.contains(token), "`{token}` is in both tables");
+        }
+        for (token, _) in SCRIPT_COUNTRY_TOKENS.iter().chain(SCRIPT_CITY_TOKENS) {
+            assert!(
+                crate::script::keyword_class(token).is_some(),
+                "`{token}` is empty or mixes scripts and would be ignored"
+            );
+        }
+    }
+
+    /// Places inside real undelimited sentences, which is the whole point.
+    #[test]
+    fn places_are_found_in_undelimited_sentences() {
+        // Burmese: "in Yangon" — the postposition is glued to the name.
+        assert_eq!(script_place_of("ရန်ကုန်မြို့မှာ").unwrap().name, "Yangon");
+        assert_eq!(script_place_of("မြန်မာနိုင်ငံ").unwrap().country_iso, "MMR");
+        // Thai: "the country Thailand", "in Bangkok".
+        assert_eq!(script_place_of("ประเทศไทย").unwrap().country_iso, "THA");
+        assert_eq!(script_place_of("ที่กรุงเทพมหานคร").unwrap().name, "Bangkok");
+        // Khmer, Lao.
+        assert_eq!(script_place_of("នៅកម្ពុជា").unwrap().country_iso, "KHM");
+        assert_eq!(script_place_of("ປະເທດລາວ").unwrap().country_iso, "LAO");
+        // Chinese and Japanese, with no spaces anywhere in the sentence.
+        assert_eq!(script_place_of("中国北部で").unwrap().country_iso, "CHN");
+        assert_eq!(script_place_of("東京都内").unwrap().name, "Tokyo");
+        assert_eq!(script_place_of("香港の街").unwrap().name, "Hong Kong");
+    }
+
+    /// The Lao pronoun problem, and the general rule it stands for: a script
+    /// token that is also an everyday word is excluded, exactly as "us" is.
+    #[test]
+    fn the_bare_lao_pronoun_is_not_a_place() {
+        // ລາວ alone means "he/she" at least as often as "Laos".
+        assert!(script_place_of("ລາວເວົ້າວ່າ").is_none());
+        assert!(script_place_of("ປະເທດລາວ").is_some());
     }
 
     /// Natural Earth spells these for a map label, not for prose, so the

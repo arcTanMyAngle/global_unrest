@@ -188,6 +188,43 @@ and `source-telegram`:
   several aggregates at once. A pre-widening 5,918-post live sample matched
   16 posts (0.27%); it is a historical sanity sample, not an expected rate
   after vocabulary changes.
+- **Scripts that do not delimit words get a second matcher.** Burmese, Thai,
+  Lao, Khmer, Japanese, and Chinese put no spaces between words, so the word
+  window above sees whole phrases and can never produce a token to match
+  (12.1 Myanmar codepoints per whitespace token, measured — see
+  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md)). `chatter::script` fixes this
+  without a dictionary, a model file, or any new dependency: it splits text
+  into maximal runs of one script class and substring-matches native-script
+  keywords inside a run, leftmost-longest, exactly like the word path.
+  `SCRIPT_TOPIC_KEYWORDS`, `SCRIPT_COUNTRY_TOKENS`, and `SCRIPT_CITY_TOKENS`
+  hold the vocabulary; the word path is tried first and the script path only
+  runs when it found nothing. `runs()` returns an empty, non-allocating vec
+  for Latin/Cyrillic/Hangul text, which is the common case.
+  - **A false hit is a wrong count, never a wrong place.** Substring matching
+    in an unsegmented script can match across a word boundary — 中国 inside
+    美中国际 ("US-China international") is a real cross-word hit and stays.
+    Two things bound it. A cluster-boundary check rejects the large cheap
+    class, a keyword that is a prefix or suffix of a longer cluster: ရေ
+    ("water") does not match inside ရေး, and a subjoined consonant cannot
+    start a match, so ဒ does not match inside ဆန္ဒ. And a post still needs a
+    place *and* a topic, so a stray hit only counts if a second stray hit
+    lands too. What survives inflates a `post_count` in a rollup already
+    labelled attention volume with `location_confidence` 0.5; it cannot
+    invent a place or move a point, because coordinates still come from the
+    bundled gazetteer.
+  - **What it deliberately does not catch.** Endonyms only — a Chinese post
+    about Ukraine is unreachable, since a full CJK gazetteer is a different
+    project. No Hangul, Tibetan, Dzongkha, or Javanese. No transliteration,
+    no romanized Burmese, no misspellings. The topic table holds only terms
+    whose common reading *is* the topic, not a translation of every
+    `TOPICS` label. Syllable segmentation was considered and rejected: for a
+    per-script keyword rule set it matches the same sequences the run scan
+    already does, at more cost and more code.
+  - **Cost, measured** (release, `chatter::tests::observe_cost`): the script
+    path adds 0.5–2.6µs per post, worst case a CJK post that matches nothing
+    and so is scanned end to end by both matchers. That is small next to
+    `observe` as a whole (4–63µs, dominated by the word window's per-window
+    `Vec<String>`), and small next to any chatter source's arrival rate.
 - **Named judgment calls.** Countries beat cities on a token collision
   ("Panama" the country, not Panama City). `AMBIGUOUS_TOKENS` drops
   `male`/`chad`/`jordan`/`georgia` — real collisions with an English word
@@ -201,7 +238,10 @@ and `source-telegram`:
   exonyms. Demonyms that are also everyday English words, language or cuisine
   labels, or ambiguous between two countries are excluded by name and reason.
   Every entry in all three is pinned by a test, because an alias naming an ISO
-  the bundled file does not carry inserts nothing at all, silently.
+  the bundled file does not carry inserts nothing at all, silently. The
+  native-script tables follow the same rules and are pinned the same way:
+  bare ລາວ is not a Laos token because it is also the everyday Lao pronoun
+  "he/she", the direct parallel to "us" not being a United States alias.
 - **Chatter is attention, not an event.** Rollups normalize to
   `EventKind::NewsAttention` with `post_count` in `article_count`, so they
   count in the attention component and never in the unrest component —

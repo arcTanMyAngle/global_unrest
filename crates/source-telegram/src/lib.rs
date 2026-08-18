@@ -426,9 +426,10 @@ pub const ALLOWED_CHANNELS: &[&str] = &[
     // Underreported/"forgotten story" beats, deliberately included even
     // though smaller than the aggregators above.
     "borderlandbeat", // Mexican cartel violence, citizen journalism since 2009
-    // The three Myanmar outlets post mostly in Burmese, so expect little
-    // ingest signal from them until chatter's topic tokens gain Burmese
-    // equivalents (see chatter::TopicMatcher). They earn their place on the
+    // The three Myanmar outlets post mostly in Burmese. `chatter::script` can
+    // now read Burmese place and topic tokens, so they register ingest signal,
+    // but only for the terms in those tables — a Burmese post about anywhere
+    // outside Myanmar is still unreachable. They also earn their place on the
     // media side, where the search term is usually a Latin-script place name.
     "MyanmarWitness", // human-rights reporting, geolocation-led
     "DVBTV",          // Democratic Voice of Burma — exile outlet, junta-banned

@@ -158,7 +158,18 @@ tokens are whole phrases.
 The real task is a segmentation strategy — syllable-level matching, or
 substring matching restricted to Burmese script runs — not a keyword-list
 addition. The same applies to Thai, Khmer, Lao, Japanese, and Chinese.
-Re-scope before starting.
+
+**Resolved.** `chatter::script` now takes the second option: maximal runs of
+one script class, substring matching inside a run, plus a cluster-boundary
+check so a keyword cannot match as a fragment of a longer cluster (ရေ inside
+ရေး, a subjoined ဒ inside ဆန္ဒ). Syllable segmentation was rejected on the
+way — for a keyword rule set it matches the same sequences at more cost. It
+needs no dependency, no dictionary, and no model file; the cluster rules are
+per-script codepoint ranges in `script.rs`. Native-script *place* tokens had
+to ship in the same change: the bundled gazetteer is Latin-only, and a post
+needs a place as well as a topic, so Burmese topic tokens alone would still
+have counted nothing. See [DATA_MODEL.md](DATA_MODEL.md) for the false-hit
+bound and the coverage this deliberately leaves out.
 
 ### Scoping an MTProto mock for `source-telegram`
 

@@ -23,6 +23,7 @@
 //! See docs/SAFETY_AND_PRIVACY.md.
 
 pub mod place;
+pub mod script;
 pub mod topic;
 
 use chrono::{DateTime, Utc};
@@ -138,13 +139,26 @@ impl ChatterAccumulator {
     pub fn observe(&mut self, text: &str, ts: DateTime<Utc>) -> bool {
         self.scanned += 1;
         let words = tokenize(text);
-        if words.is_empty() {
+        // Scripts that do not delimit words arrive as one whitespace token per
+        // clause, so the word path above cannot see inside them; `runs` is
+        // empty (and allocates nothing) for everything else. Both borrow
+        // `text` for this call only — see the module docs.
+        let runs = script::runs(text);
+        if words.is_empty() && runs.is_empty() {
             return false;
         }
-        let Some(place_idx) = self.places.find(&words) else {
+        let Some(place_idx) = self
+            .places
+            .find(&words)
+            .or_else(|| self.places.find_in_runs(&runs))
+        else {
             return false;
         };
-        let Some(topic_idx) = self.topics.find(&words) else {
+        let Some(topic_idx) = self
+            .topics
+            .find(&words)
+            .or_else(|| self.topics.find_in_runs(&runs))
+        else {
             return false;
         };
         let window = window_start(ts.timestamp(), self.window_secs);
@@ -427,6 +441,45 @@ mod tests {
         assert_eq!(second[0].post_count, 2, "both posts in that window");
     }
 
+    /// The end-to-end reason `script` exists: a post in an unsegmented script
+    /// counts, and it produces the same `(place, topic, window)` rollup a
+    /// Latin post would. The output contract does not move.
+    #[test]
+    fn posts_in_unsegmented_scripts_count() {
+        let mut acc = accumulator();
+        // Burmese: "an earthquake struck in Yangon".
+        assert!(acc.observe("ရန်ကုန်မြို့မှာ ငလျင်လှုပ်ခဲ့သည်", ts(0)));
+        // Japanese, no spaces at all: "residents evacuated for the typhoon".
+        assert!(acc.observe("東京で台風のため住民が避難した", ts(0)));
+        // Thai: "flooding in Bangkok".
+        assert!(acc.observe("น้ำท่วมกรุงเทพมหานคร", ts(0)));
+        // A place with no topic still does not count, in any script.
+        assert!(!acc.observe("東京の天気はいいですね", ts(0)));
+
+        let rollups = acc.drain_all();
+        assert_eq!(rollups.len(), 3);
+        let yangon = rollups.iter().find(|r| r.place_name == "Yangon").unwrap();
+        assert_eq!(yangon.topic, "earthquake");
+        assert_eq!(yangon.post_count, 1);
+        // The rollup carries gazetteer values, never anything from the post.
+        assert_eq!(yangon.country_iso, "MMR");
+        assert_eq!(yangon.precision, LocationPrecision::City);
+    }
+
+    /// A mixed-script post prefers the word path, so adding the script tables
+    /// cannot change which place an existing post resolved to.
+    #[test]
+    fn the_word_path_wins_on_a_mixed_post() {
+        let m = matcher();
+        let text = "protest in Kyiv, reported from 東京";
+        let words = tokenize(text);
+        let idx = m
+            .find(&words)
+            .or_else(|| m.find_in_runs(&script::runs(text)))
+            .unwrap();
+        assert_eq!(m.place(idx).name, "Kyiv");
+    }
+
     #[test]
     fn one_place_and_one_topic_per_post() {
         let mut acc = accumulator();
@@ -435,6 +488,57 @@ mod tests {
         let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].post_count, 1);
+    }
+
+    /// What one post costs, against the real tables. Not a gate — CI has no
+    /// stable performance floor — so it is `#[ignore]`d and run by hand:
+    /// `cargo test -p chatter --release observe_cost -- --ignored --nocapture`.
+    /// The numbers this printed are recorded in docs/DATA_MODEL.md.
+    #[test]
+    #[ignore = "timing measurement, not a correctness gate"]
+    fn observe_cost() {
+        let mut acc = accumulator();
+        let cases = [
+            (
+                "latin, no match",
+                "an ordinary english post about lunch and the weather today ".repeat(4),
+            ),
+            ("latin, match", "big protest in Kyiv right now ".repeat(8)),
+            (
+                "cjk, no match",
+                "今日はとてもいい天気で、公園を歩いてきました。".repeat(4),
+            ),
+            (
+                "cjk, match",
+                "東京で台風のため住民が避難しています。".repeat(4),
+            ),
+            ("burmese, match", "ရန်ကုန်မြို့မှာ ငလျင်လှုပ်ခဲ့သည် ".repeat(4)),
+        ];
+        let places = matcher();
+        let topics = TopicMatcher::new();
+        let iterations = 50_000;
+        for (label, text) in &cases {
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                std::hint::black_box(acc.observe(std::hint::black_box(text), ts(0)));
+            }
+            let whole = start.elapsed() / iterations;
+
+            // The script path on its own, to separate what segmentation costs
+            // from what the pre-existing word-window path already cost.
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                let runs = script::runs(std::hint::black_box(text));
+                std::hint::black_box(places.find_in_runs(&runs));
+                std::hint::black_box(topics.find_in_runs(&runs));
+            }
+            let scripts = start.elapsed() / iterations;
+
+            println!(
+                "{label}: {} chars, {whole:?}/post observe, of which {scripts:?} is the script path",
+                text.chars().count()
+            );
+        }
     }
 
     #[test]

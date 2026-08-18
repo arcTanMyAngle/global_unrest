@@ -10,6 +10,18 @@ project with no published crate API to stabilize against.
 
 ### Added
 
+- Aggregate chatter now reads scripts that do not put spaces between words —
+  Burmese, Thai, Lao, Khmer, Japanese, Chinese. The word-window matcher could
+  never see inside them (a whitespace token there is a whole phrase), so
+  `crates/chatter/src/script.rs` adds a second matcher: text is split into
+  maximal runs of one script class and native-script keywords are matched as
+  substrings inside a run, leftmost-longest, rejected when they would land
+  mid-cluster. Native-script place tokens ship with it — the bundled
+  gazetteer is Latin-only, and a post needs a place as well as a topic.
+  Endonyms and common topic words only; a post in one of these scripts about
+  a place elsewhere still does not count. No new dependency, no dictionary or
+  model file, and no change to the `(place, topic, window)` rollup: text is
+  still borrowed for one `observe` call and dropped.
 - Settings and About screens, reachable from the top bar on every page
   (`apps/global-signal-desktop/src/settings_screen.rs`,
   `apps/global-signal-desktop/src/about.rs`). Settings shows, per source,

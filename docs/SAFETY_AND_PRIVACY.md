@@ -132,7 +132,14 @@ playback mechanism requires a new privacy and terms review.
   normalizations, not a universal taxonomy.
 - **Aggregate chatter matching:** place/topic keyword matching can miss or
   misclassify posts. It is media-attention data, not a claim about a person's
-  location or a discrete event.
+  location or a discrete event. Coverage is uneven by language: most of the
+  vocabulary is English, and the native-script tables for Burmese, Thai, Lao,
+  Khmer, Japanese, and Chinese carry endonyms and common topic words only, so
+  a post in one of those scripts about a place elsewhere in the world does
+  not count. In those scripts, where words are not space-separated, matching
+  is substring-based within a script run and can occasionally match across a
+  word boundary — that inflates a count, and cannot invent a place, since
+  coordinates always come from the bundled gazetteer.
 - **Media lookup:** a public video or post is a lead, not verification. Search
   results can be missing, removed, mislabelled, geographically ambiguous, or
   misleading; public social posts are explicitly marked unverified.
