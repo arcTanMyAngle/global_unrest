@@ -8,8 +8,22 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-17 — M8: source attribution, Settings and About, CI benches, retention profiling, and chatter segmentation
+
 ### Added
 
+- `core-types::attribution`: an exhaustive `SourceAttribution` table (one row
+  per source: mandated citation, licence, upstream terms link, the Cargo
+  feature and environment variable that gate it) that the Settings and About
+  screens below and the live-source panel's attribution line all read from
+  instead of each keeping its own copy.
+- `docs/BASEMAP.md`: a design-only pass settling the slippy-tile basemap's
+  open questions — the existing equirectangular/affine projection stays, NASA
+  GIBS' keyless EPSG:4326 WMTS tiles composite over the current vector
+  basemap so a missing tile degrades to today's map, the tile cache is
+  bounded and lives outside the DuckDB store, and the toggle defaults off
+  with its network cost stated. Ends with a phased, independently-shippable
+  implementation plan; none of the phases has started.
 - Aggregate chatter now reads scripts that do not put spaces between words —
   Burmese, Thai, Lao, Khmer, Japanese, Chinese. The word-window matcher could
   never see inside them (a whitespace token there is a whole phrase), so
@@ -47,7 +61,6 @@ project with no published crate API to stabilize against.
   form — not a value, not a masked prefix, not a length; only the
   environment variable's name and a configured yes/no, pinned by a test that
   fails if `credential_line` ever renders anything else.
-
 - A per-source on/off switch, persisted as `disabled_sources_v1` in the
   settings database and replayed to the ingest worker before it goes online,
   so a disabled source never gets one fetch in first. It is distinct from
@@ -57,8 +70,6 @@ project with no published crate API to stabilize against.
   the `SourceStatus` lines the UI already polls, so it issues no query and
   blocks no frame. The set stored is the *off* set, so a source added in a
   later release starts enabled rather than silently dark.
-
-
 - CI now runs `analytics`' criterion benches as a compile-and-smoke gate
   (`.github/workflows/ci.yml`, `analytics-bench`). It is deliberately not a
   performance gate — the runner has no stable perf baseline and no GPU, so a
@@ -408,5 +419,6 @@ project with no published crate API to stabilize against.
 - eframe desktop shell: cached-mesh basemap/heatmap/marker layers, time
   slider, region inspector, E2E pipeline test.
 
-[Unreleased]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.8.0
 [0.7.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.7.0

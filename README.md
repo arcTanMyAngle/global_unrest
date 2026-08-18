@@ -11,11 +11,14 @@ signals without treating attention as truth. It keeps media attention,
 structured event data, official alerts, and aggregate chatter visibly
 separate; preserves provenance; and avoids person-level tracking.
 
-The current build includes the completed M1-M7 work and visualization batches
+The current build includes the completed M1-M8 work and visualization batches
 V1-V3. The desktop ingests live GDELT, NOAA/NWS, IODA, Bluesky aggregate
-chatter, optional ACLED, and optional Telegram aggregate chatter. Synthetic
-fixtures are never loaded by the desktop; they remain regression data and the
-fixtures-only service smoke-test path.
+chatter, optional ACLED, and optional Telegram aggregate chatter, with a
+Settings screen for per-source state and an About screen for attribution. Only
+the slippy-tile basemap named in M8 is design-only so far; see
+[docs/ROADMAP.md](docs/ROADMAP.md). Synthetic fixtures are never loaded by the
+desktop; they remain regression data and the fixtures-only service
+smoke-test path.
 
 ## Read the evidence, not a single score
 
@@ -239,17 +242,20 @@ Tag-driven releases build desktop binaries and publish worker/API images.
 | [docs/SCORING.md](docs/SCORING.md) | Transparent scoring and baseline design. |
 | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) | Shipped V1-V3 visualization decisions and guardrails. |
 | [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) | Hard safety rules, licensing, bias, retention, and Daily Events/media boundaries. |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Milestone record, open operational items, and the remaining M8/M9 direction. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Milestone record, open operational items, and the remaining basemap and M9 direction. |
 | [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md) | Build/linking traps, source behavior that looks like a bug, and verification discipline. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution workflow and verification requirements. |
 | [CHANGELOG.md](CHANGELOG.md) | Milestone-tied release history. |
 
 ## Status and direction
 
-Completed: M1-M7, visualization V1-V3, and the IODA, Bluesky, Telegram,
-Daily Events, and on-demand media-research layers.
+Completed: M1-M8, visualization V1-V3, and the IODA, Bluesky, Telegram,
+Daily Events, and on-demand media-research layers. M8 added source
+attribution, the Settings and About screens, CI benches, an ingest-tick
+profiling pass, and chatter segmentation for unsegmented scripts.
 
-Next: remaining M8 platform/source polish and safety-gated M9 voluntary
+Next: implementing the slippy-tile basemap from its M8 design pass
+([docs/BASEMAP.md](docs/BASEMAP.md)), and safety-gated M9 voluntary
 on-scene publishing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the current
 plan.
 

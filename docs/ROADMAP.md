@@ -21,6 +21,7 @@ README and [DEVELOPMENT.md](DEVELOPMENT.md) for current behavior and commands,
 | IODA, Bluesky, Telegram | Complete: country-precision outages and two aggregate-only chatter sources, pulled forward from M8. |
 | Daily Events | Complete: opt-in, locally cached, Google Gemini-written day digests with the safety boundary reviewed and enforced. |
 | Media research and playback | Complete: user-directed, transient public-video lookup with an honest browser fallback and a Windows published-embed player. |
+| M8 | Complete: source-attribution table, Settings and About UI, criterion benches in CI, an ingest-tick profiling pass, and chatter segmentation for unsegmented scripts. Partial: the slippy-tile basemap design pass is done and phased ([BASEMAP.md](BASEMAP.md)); implementation has not started. |
 
 The original approved M0–M5 plan and its acceptance criteria are preserved in
 version control; their substance is the table above plus the implementation
@@ -64,6 +65,43 @@ DuckDB, snapshots, services, cache, or Daily Events. Public social posts are
 labelled unverified. The Windows player uses only provider-published embeds;
 unsupported links and other platforms retain the browser fallback.
 
+### M8: platform and source polish
+
+Four of the five scoped items are complete. `core-types` carries an
+exhaustive `SourceAttribution` table, consumed by a Settings screen (per-source
+compiled/configured/enabled state, cadence, last fetch, next poll, and a
+per-source on/off switch) and an About screen (verbatim mandated citations,
+licence, version). `analytics`' criterion benches run in CI as a
+compile-and-smoke gate. A profiling pass found the retention ceiling was
+ingest-tick query time, not memory, frame time, or disk, and fixed it by
+bounding rescoring to the buckets an ingest tick can have changed — measured
+at 10x retention, a quiet tick 397 ms → 8 ms (see
+[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#profiling-the-store-and-what-the-retention-ceiling-actually-was)
+for the full phase breakdown). Two costs were measured and deliberately left
+open rather than fixed: theme-filtered `query_buckets` still reads the whole
+events table (1.4 s at 1M events, since the cheap fix would silently change
+spike cold-start semantics for young themes), and the 28-day baseline window
+is the remaining per-tick floor (~4 s/tick at 100k events/day), fixable only
+by seeding the baseline index from `region_buckets` instead of raw events, an
+`analytics` API change rather than a storage one. Aggregate chatter now
+segments unsegmented scripts — Burmese, Thai, Lao, Khmer, Japanese, Chinese — via
+script-run substring matching rather than the keyword-list approach that
+cannot work in those scripts (see the correction in
+[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#correction-to-the-chatter-backlog-burmese-topic-tokens-will-not-work)).
+
+The fifth item, the slippy-tile basemap, is **design only**: the deferred
+policy questions are settled in [BASEMAP.md](BASEMAP.md) (equirectangular
+projection kept, NASA GIBS EPSG:4326 tiles composited over the existing vector
+basemap so a missing tile degrades to today's map, a bounded cache outside the
+DuckDB store, and a toggle off by default), and it ends with a phased,
+independently-shippable implementation plan. None of those phases has started.
+
+Deliberately never scoped into M8, and still gated rather than started:
+optional moving-layer design work such as CelesTrak satellites, pending a
+thinning, precision, and disclosure design that does not exist yet; and AIS or
+other high-volume streams, pending a dedicated volume, privacy, and licensing
+design.
+
 ## Open operational items
 
 Engineering is ahead of release and repository operations. These are the
@@ -84,11 +122,12 @@ tracked gaps, none of which block development:
   publishing waits on every desktop artifact passing; and desktop archives
   ship a `.sha256` checksum plus a build provenance attestation
   (`actions/attest-build-provenance`), with `provenance: true` on the GHCR
-  image builds. **The workspace version is 0.7.0** and CHANGELOG.md now has
-  a matching `## [0.7.0] — 2026-08-17` heading, so `validate-tag` has
-  something to match. What's still a manual step: actually pushing the
-  `v0.7.0` tag. Branch protection has since landed and brought a signing
-  prerequisite with it — see the next item.
+  image builds. **The workspace version is now 0.8.0** and CHANGELOG.md has
+  matching `## [0.7.0]` and `## [0.8.0]` headings from the M7 and M8
+  close-outs, so `validate-tag` has something to match against either. What's
+  still a manual step: no tag has ever been pushed, for either milestone.
+  Branch protection has since landed and brought a signing prerequisite with
+  it — see the next item.
 - **`main` branch protection is configured, including required signed
   commits**; `.github/CODEOWNERS` is in place. **Local signing is not set up
   yet**, which is now a blocker rather than a note: `commit.gpgsign` and
@@ -161,46 +200,6 @@ stylistic, and a later change should not quietly undo them:
 - The **media leg returns a `Vec`** of `ChannelVideo`, which is allowed only
   because materialized results are already the documented Media exception
   (product rule 7). That struct deliberately carries no sender.
-
-## M8: platform and source polish
-
-The remaining platform work is intentionally scoped rather than a commitment
-to add every possible feed:
-
-- Settings and About UI for source state and full attributions. Credentials
-  stay in environment variables, never the settings database.
-- A slippy-tile basemap. The design pass deferred continuously since M3 is
-  done and lives in [BASEMAP.md](BASEMAP.md): equirectangular kept, EPSG:4326
-  tiles from NASA GIBS so nothing reprojects, tiles composited over the vector
-  basemap so a missing tile degrades to today's map, a bounded cache outside
-  the DuckDB store, and a toggle that is off by default. Implementation is
-  phased there and not yet started.
-- Criterion benchmarks in CI and a profiling pass toward higher retention.
-  **Done.** The benches run as a compile-and-smoke gate, and the profiling
-  pass found the ceiling was ingest-tick query time, not memory, frame time,
-  or disk (see
-  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#profiling-the-store-and-what-the-retention-ceiling-actually-was)).
-  Rescoring is now bounded to the buckets an ingest can have changed, so a
-  tick costs what arrived plus the 28-day baseline window rather than the
-  whole retained table. Two levers were measured and deliberately left open:
-  - *Theme-filtered `query_buckets` still reads the whole events table*
-    (1.4 s at 1M events). Bounding it needs a theme-aware tail leg; the
-    cheap version would silently change spike cold-start semantics for young
-    themes, which is a product decision rather than a perf fix.
-  - *The 28-day baseline window is the remaining per-tick floor* (~2.8M rows,
-    ~4 s/tick at 100k events/day). Removing it means seeding the baseline
-    index from `region_buckets` instead of from raw events — an `analytics`
-    API change, not a storage one.
-- Chatter coverage for unsegmented scripts. This is a **segmentation**
-  problem, not a keyword-list addition — see the correction in
-  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#correction-to-the-chatter-backlog-burmese-topic-tokens-will-not-work).
-- Optional moving-layer design work, such as CelesTrak satellites, only after
-  its thinning, precision, and disclosure behavior are defined.
-- AIS or other high-volume streams only with a dedicated volume, privacy, and
-  licensing design.
-
-M8 items must preserve cached rendering, the point-vs-region precision rule,
-and the attention/event separation.
 
 ## M9: voluntary on-scene channels
 
