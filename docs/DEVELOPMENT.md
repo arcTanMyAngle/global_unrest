@@ -66,6 +66,20 @@ cargo test -p global-signal-desktop -p workers --no-default-features --features 
 change, build the real desktop binary — see
 [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#build-and-linking).
 
+CI also runs the `analytics` criterion benches as a compile-and-smoke gate,
+not a performance gate — there is no stable perf baseline or GPU on the
+runner, so it fails only if the bench harness stops compiling or a bench
+panics, never on timing:
+
+~~~sh
+cargo bench -p analytics -- --quick
+~~~
+
+`crates/analytics/Cargo.toml` sets `[lib] bench = false` so this
+package-level form works; running `--bench scoring` directly hits the lib's
+own empty libtest bench target first, which rejects criterion's `--quick`
+flag.
+
 ## Desktop environment variables
 
 The desktop loads .env during startup. Process environment variables take

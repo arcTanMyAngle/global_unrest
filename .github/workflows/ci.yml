@@ -91,6 +91,25 @@ jobs:
           cargo test -p global-signal-desktop -p workers \
             --no-default-features --features "${{ matrix.features }}"
 
+  # `analytics` has criterion benches (benches/scoring.rs) but no wall-clock
+  # performance floor here: this runner has no stable perf baseline and no
+  # GPU, so a timing threshold would flake and get ignored. This job is a
+  # compile-and-smoke gate instead — it fails if the bench harness stops
+  # compiling or a bench itself panics, not on how long it takes.
+  # `[lib] bench = false` in crates/analytics/Cargo.toml is what lets the
+  # package-level `cargo bench -p analytics` work at all: without it, the
+  # lib's own (empty) libtest bench target runs first and rejects criterion's
+  # `--quick` flag before `scoring` ever starts. Do not add `--bench scoring`
+  # back — that reintroduces the same failure.
+  analytics-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bench smoke (analytics)
+        run: cargo bench -p analytics -- --quick
+
   # source-acled's `live` feature carries its own mock-OAuth-server suite
   # (tests/live_mock.rs) — real credentials are never needed for this.
   acled-live-mock:

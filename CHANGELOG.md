@@ -10,6 +10,15 @@ project with no published crate API to stabilize against.
 
 ### Added
 
+- CI now runs `analytics`' criterion benches as a compile-and-smoke gate
+  (`.github/workflows/ci.yml`, `analytics-bench`). It is deliberately not a
+  performance gate — the runner has no stable perf baseline and no GPU, so a
+  wall-clock threshold would flake and get ignored — so it only fails if the
+  bench harness stops compiling or a bench panics, via `cargo bench -p
+  analytics -- --quick`. Verified locally: build 7.8s, `score_buckets` 10k ≈
+  11.2 ms, 100k ≈ 58.3 ms, `compose_window_7d` ≈ 297 ns, full job ≈ 15.3s
+  warm. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the command.
+
 - `source-telegram`'s sweep and media-search orchestration is now tested
   without a Telegram session. A `ChannelReader` trait seam in ungated
   `lib.rs` covers the handful of grammers calls the two paths make, the
