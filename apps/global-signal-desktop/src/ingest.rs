@@ -252,10 +252,15 @@ mod bluesky {
     }
 }
 
-/// Live-source status surfaced in the UI — one per source, keyed by `name`.
+/// Live-source status surfaced in the UI — one per source, keyed by `source`.
 #[derive(Debug, Clone)]
 pub struct SourceStatus {
-    /// Which live source this line describes ("GDELT", "ACLED").
+    /// Which live source this line describes. The Settings screen joins on
+    /// this rather than on `name`: `core_types::attribution` is keyed by
+    /// `SourceId`, and matching display strings across two crates is exactly
+    /// the drift this field exists to prevent.
+    pub source: SourceId,
+    /// Display label for this source ("GDELT", "ACLED").
     pub name: &'static str,
     pub online: bool,
     pub last_attempt_epoch_s: Option<i64>,
@@ -267,11 +272,17 @@ pub struct SourceStatus {
     pub degraded: bool,
     /// One part of a multi-feed source failed while another succeeded.
     pub partial: bool,
+    /// The user has this source switched on in Settings. Distinct from
+    /// `online` (global live-updates pause), from being compiled in, and from
+    /// being credentialed — a source can be enabled and still never fetch
+    /// because one of those three is false.
+    pub enabled: bool,
 }
 
 impl SourceStatus {
-    fn offline(name: &'static str) -> Self {
+    fn offline(source: SourceId, name: &'static str) -> Self {
         Self {
+            source,
             name,
             online: false,
             last_attempt_epoch_s: None,
@@ -280,6 +291,69 @@ impl SourceStatus {
             detail: "live updates paused — cached real data only".into(),
             degraded: false,
             partial: false,
+            enabled: true,
+        }
+    }
+}
+
+/// Nominal poll interval for a source, in seconds — what the Settings screen
+/// shows as its cadence. `None` for a source the desktop never schedules
+/// (fixtures are not a desktop runtime source at all). These are the
+/// *nominal* intervals: a failing source is on `sched::Backoff`'s longer
+/// retry delay instead, which is why the Settings screen shows the live
+/// "next fetch" beside this rather than in place of it.
+pub fn cadence_secs(source: SourceId) -> Option<u64> {
+    match source {
+        SourceId::Gdelt => Some(sched::FEED_INTERVAL_SECS as u64),
+        SourceId::Acled => Some(ACLED_POLL_SECS),
+        SourceId::Noaa => Some(NOAA_POLL_SECS),
+        SourceId::Ioda => Some(IODA_POLL_SECS),
+        SourceId::Bluesky => Some(BLUESKY_POLL_SECS),
+        SourceId::Telegram => Some(TELEGRAM_POLL_SECS),
+        SourceId::Fixtures => None,
+    }
+}
+
+/// Per-source on/off switches owned by the ingest worker. The UI holds the
+/// user's intent and replays it over [`Ctl`]; the worker holds this copy and
+/// gates its `select!` arms on it. Nothing else moves — the worker still owns
+/// every source, limiter, and backoff exactly as before.
+#[derive(Debug, Clone, Copy)]
+struct Enabled {
+    gdelt: bool,
+    acled: bool,
+    noaa: bool,
+    ioda: bool,
+    bluesky: bool,
+    telegram: bool,
+}
+
+impl Default for Enabled {
+    /// Every source on: a build that shipped a source enables it unless the
+    /// user has said otherwise.
+    fn default() -> Self {
+        Self {
+            gdelt: true,
+            acled: true,
+            noaa: true,
+            ioda: true,
+            bluesky: true,
+            telegram: true,
+        }
+    }
+}
+
+impl Enabled {
+    fn slot(&mut self, source: SourceId) -> Option<&mut bool> {
+        match source {
+            SourceId::Gdelt => Some(&mut self.gdelt),
+            SourceId::Acled => Some(&mut self.acled),
+            SourceId::Noaa => Some(&mut self.noaa),
+            SourceId::Ioda => Some(&mut self.ioda),
+            SourceId::Bluesky => Some(&mut self.bluesky),
+            SourceId::Telegram => Some(&mut self.telegram),
+            // Not a desktop runtime source; nothing to switch.
+            SourceId::Fixtures => None,
         }
     }
 }
@@ -301,6 +375,8 @@ pub enum IngestMsg {
 enum Ctl {
     SetOnline(bool),
     FetchNow,
+    /// Turn one source's scheduled polling on or off (Settings screen).
+    SetSourceEnabled(SourceId, bool),
 }
 
 /// UI-side handle to the worker. Dropping it stops the worker.
@@ -315,6 +391,13 @@ impl IngestHandle {
 
     pub fn fetch_now(&self) {
         let _ = self.ctl.send(Ctl::FetchNow);
+    }
+
+    /// Switch one source's scheduled polling on or off. Takes effect on the
+    /// worker's next loop turn; an in-flight fetch is allowed to finish
+    /// rather than being cancelled mid-request.
+    pub fn set_source_enabled(&self, source: SourceId, on: bool) {
+        let _ = self.ctl.send(Ctl::SetSourceEnabled(source, on));
     }
 }
 
@@ -364,8 +447,11 @@ async fn worker(
     let limiter = sched::request_limiter();
     let mut backoff = sched::Backoff::default();
     let mut online = false;
+    // Per-source switches from the Settings screen. The UI replays its saved
+    // state at startup, so `default()` (all on) only stands until then.
+    let mut enabled = Enabled::default();
     let mut next_at = Instant::now();
-    let mut status = SourceStatus::offline("GDELT");
+    let mut status = SourceStatus::offline(SourceId::Gdelt, "GDELT");
 
     // ACLED (feature-gated): its own source, limiter, backoff, and much
     // slower cadence. `None` = feature off or no credentials.
@@ -388,7 +474,7 @@ async fn worker(
     // would always be empty). Dedup keeps the repeat polls idempotent.
     let acled_window = fixed_window_env("LES_ACLED_WINDOW");
     let mut acled_next = Instant::now();
-    let mut acled_status = SourceStatus::offline("ACLED");
+    let mut acled_status = SourceStatus::offline(SourceId::Acled, "ACLED");
     if acled::BUILT && acled_src.is_none() {
         // Built for ACLED but not credentialed: say why the line stays off.
         acled_status.detail = "off — set ACLED_EMAIL / ACLED_PASSWORD".into();
@@ -407,7 +493,7 @@ async fn worker(
     let noaa_limiter = sched::request_limiter();
     let mut noaa_backoff = sched::Backoff::default();
     let mut noaa_next = Instant::now();
-    let mut noaa_status = SourceStatus::offline("NOAA");
+    let mut noaa_status = SourceStatus::offline(SourceId::Noaa, "NOAA");
 
     // IODA (feature-gated, keyless): near-real-time internet-outage events.
     let ioda_src = match ioda::make() {
@@ -420,7 +506,7 @@ async fn worker(
     let ioda_limiter = sched::request_limiter();
     let mut ioda_backoff = sched::Backoff::default();
     let mut ioda_next = Instant::now();
-    let mut ioda_status = SourceStatus::offline("IODA");
+    let mut ioda_status = SourceStatus::offline(SourceId::Ioda, "IODA");
 
     // Bluesky (feature-gated, keyless): aggregate chatter volume. `make()`
     // already started the socket; these cycles only drain what it counted, so
@@ -436,7 +522,7 @@ async fn worker(
     let bluesky_limiter = sched::request_limiter();
     let mut bluesky_backoff = sched::Backoff::default();
     let mut bluesky_next = Instant::now() + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
-    let mut bluesky_status = SourceStatus::offline("Bluesky");
+    let mut bluesky_status = SourceStatus::offline(SourceId::Bluesky, "Bluesky");
 
     // Telegram (feature-gated, credential-gated): aggregate chatter volume
     // over a curated public-channel allowlist.
@@ -450,7 +536,7 @@ async fn worker(
     let telegram_limiter = sched::request_limiter();
     let mut telegram_backoff = sched::Backoff::default();
     let mut telegram_next = Instant::now();
-    let mut telegram_status = SourceStatus::offline("Telegram");
+    let mut telegram_status = SourceStatus::offline(SourceId::Telegram, "Telegram");
     if telegram::BUILT && telegram_src.is_none() {
         telegram_status.detail =
             "off — set TELEGRAM_API_ID / TELEGRAM_API_HASH and run login_setup".into();
@@ -464,32 +550,37 @@ async fn worker(
                 None => break, // handle dropped → shut down
                 Some(Ctl::SetOnline(on)) => {
                     online = on;
-                    status.online = on;
-                    acled_status.online = on && acled_src.is_some();
-                    noaa_status.online = on && noaa_src.is_some();
-                    ioda_status.online = on && ioda_src.is_some();
-                    bluesky_status.online = on && bluesky_src.is_some();
-                    telegram_status.online = on && telegram_src.is_some();
+                    // A source switched off in Settings stays off when live
+                    // updates resume — the global toggle does not override
+                    // the per-source one.
+                    status.online = on && enabled.gdelt;
+                    acled_status.online = on && enabled.acled && acled_src.is_some();
+                    noaa_status.online = on && enabled.noaa && noaa_src.is_some();
+                    ioda_status.online = on && enabled.ioda && ioda_src.is_some();
+                    bluesky_status.online = on && enabled.bluesky && bluesky_src.is_some();
+                    telegram_status.online = on && enabled.telegram && telegram_src.is_some();
                     if on {
-                        status.detail = "online — fetching…".into();
-                        status.partial = false;
-                        next_at = Instant::now(); // fetch promptly
-                        if acled_src.is_some() {
+                        if enabled.gdelt {
+                            status.detail = "online — fetching…".into();
+                            status.partial = false;
+                            next_at = Instant::now(); // fetch promptly
+                        }
+                        if enabled.acled && acled_src.is_some() {
                             acled_status.detail = "online — fetching…".into();
                             acled_status.partial = false;
                             acled_next = Instant::now();
                         }
-                        if noaa_src.is_some() {
+                        if enabled.noaa && noaa_src.is_some() {
                             noaa_status.detail = "online — fetching…".into();
                             noaa_status.partial = false;
                             noaa_next = Instant::now();
                         }
-                        if ioda_src.is_some() {
+                        if enabled.ioda && ioda_src.is_some() {
                             ioda_status.detail = "online — fetching…".into();
                             ioda_status.partial = false;
                             ioda_next = Instant::now();
                         }
-                        if bluesky_src.is_some() {
+                        if enabled.bluesky && bluesky_src.is_some() {
                             // Counting resumes immediately, but a drain now
                             // would publish a stub window; wait one cadence.
                             bluesky_status.detail = "online — counting…".into();
@@ -497,7 +588,7 @@ async fn worker(
                             bluesky_next = Instant::now()
                                 + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
                         }
-                        if telegram_src.is_some() {
+                        if enabled.telegram && telegram_src.is_some() {
                             telegram_status.detail = "online — fetching…".into();
                             telegram_status.partial = false;
                             telegram_next = Instant::now();
@@ -522,6 +613,24 @@ async fn worker(
                             s.next_attempt_epoch_s = None;
                         }
                     }
+                    if on {
+                        // Sources switched off in Settings say so rather than
+                        // inheriting a stale "paused" line once live updates
+                        // are back on.
+                        for (is_on, s) in [
+                            (enabled.gdelt, &mut status),
+                            (enabled.acled, &mut acled_status),
+                            (enabled.noaa, &mut noaa_status),
+                            (enabled.ioda, &mut ioda_status),
+                            (enabled.bluesky, &mut bluesky_status),
+                            (enabled.telegram, &mut telegram_status),
+                        ] {
+                            if !is_on {
+                                s.detail = "off — switched off in Settings".into();
+                                s.next_attempt_epoch_s = None;
+                            }
+                        }
+                    }
                     let _ = tx.send(IngestMsg::Status(status.clone()));
                     if acled::BUILT {
                         let _ = tx.send(IngestMsg::Status(acled_status.clone()));
@@ -542,33 +651,92 @@ async fn worker(
                 }
                 Some(Ctl::FetchNow) => {
                     if online {
-                        next_at = Instant::now();
-                        if acled_src.is_some() {
+                        if enabled.gdelt {
+                            next_at = Instant::now();
+                        }
+                        if enabled.acled && acled_src.is_some() {
                             acled_next = Instant::now();
                         }
-                        if noaa_src.is_some() {
+                        if enabled.noaa && noaa_src.is_some() {
                             noaa_next = Instant::now();
                         }
-                        if ioda_src.is_some() {
+                        if enabled.ioda && ioda_src.is_some() {
                             ioda_next = Instant::now();
                         }
-                        if bluesky_src.is_some() {
+                        if enabled.bluesky && bluesky_src.is_some() {
                             // Safe to drain early: only completed windows are
                             // published, so nothing is half-counted.
                             bluesky_next = Instant::now();
                         }
-                        if telegram_src.is_some() {
+                        if enabled.telegram && telegram_src.is_some() {
                             telegram_next = Instant::now();
                         }
                     }
                 }
+                // The desktop never schedules fixtures, so there is nothing to
+                // switch — drop it here rather than teaching the loop below
+                // about a source it does not run.
+                Some(Ctl::SetSourceEnabled(SourceId::Fixtures, _)) => {}
+                Some(Ctl::SetSourceEnabled(source, on)) => {
+                    let changed = enabled.slot(source).is_some_and(|slot| {
+                        let changed = *slot != on;
+                        *slot = on;
+                        changed
+                    });
+                    if changed {
+                        let (st, next, available) = match source {
+                            SourceId::Gdelt => (&mut status, &mut next_at, gdelt.is_some()),
+                            SourceId::Acled => {
+                                (&mut acled_status, &mut acled_next, acled_src.is_some())
+                            }
+                            SourceId::Noaa => {
+                                (&mut noaa_status, &mut noaa_next, noaa_src.is_some())
+                            }
+                            SourceId::Ioda => {
+                                (&mut ioda_status, &mut ioda_next, ioda_src.is_some())
+                            }
+                            SourceId::Bluesky => {
+                                (&mut bluesky_status, &mut bluesky_next, bluesky_src.is_some())
+                            }
+                            SourceId::Telegram => (
+                                &mut telegram_status,
+                                &mut telegram_next,
+                                telegram_src.is_some(),
+                            ),
+                            SourceId::Fixtures => unreachable!("filtered by the arm above"),
+                        };
+                        st.enabled = on;
+                        st.online = on && online && available;
+                        st.degraded = false;
+                        st.partial = false;
+                        if !on {
+                            st.detail = "off — switched off in Settings".into();
+                            st.next_attempt_epoch_s = None;
+                        } else if st.online {
+                            st.detail = "online — fetching…".into();
+                            // Bluesky counts continuously; a drain now would
+                            // publish a stub window, so it waits one cadence
+                            // exactly as the resume-from-paused path does.
+                            *next = if source == SourceId::Bluesky {
+                                Instant::now() + std::time::Duration::from_secs(BLUESKY_POLL_SECS)
+                            } else {
+                                Instant::now()
+                            };
+                        } else {
+                            st.detail = "on — waiting for live updates".into();
+                            st.next_attempt_epoch_s = None;
+                        }
+                        let _ = tx.send(IngestMsg::Status(st.clone()));
+                        wake();
+                    }
+                }
             },
-            _ = sleep_until(next_at), if online && gdelt.is_some() => {
+            _ = sleep_until(next_at), if online && enabled.gdelt && gdelt.is_some() => {
                 let gdelt = gdelt.as_ref().unwrap();
                 let delay = fetch_cycle(gdelt, &limiter, &mut backoff, &mut status, &tx, &wake).await;
                 next_at = Instant::now() + delay;
             }
-            _ = sleep_until(acled_next), if online && acled_src.is_some() => {
+            _ = sleep_until(acled_next), if online && enabled.acled && acled_src.is_some() => {
                 let acled_src = acled_src.as_ref().unwrap();
                 let window = acled_window.unwrap_or_else(|| {
                     let now = Utc::now();
@@ -578,7 +746,7 @@ async fn worker(
                     &acled_limiter, &mut acled_backoff, &mut acled_status, &tx, &wake).await;
                 acled_next = Instant::now() + delay;
             }
-            _ = sleep_until(noaa_next), if online && noaa_src.is_some() => {
+            _ = sleep_until(noaa_next), if online && enabled.noaa && noaa_src.is_some() => {
                 let noaa_src = noaa_src.as_ref().unwrap();
                 // The alerts feed is a now-snapshot; the window is nominal.
                 let now = Utc::now();
@@ -587,7 +755,7 @@ async fn worker(
                     &noaa_limiter, &mut noaa_backoff, &mut noaa_status, &tx, &wake).await;
                 noaa_next = Instant::now() + delay;
             }
-            _ = sleep_until(ioda_next), if online && ioda_src.is_some() => {
+            _ = sleep_until(ioda_next), if online && enabled.ioda && ioda_src.is_some() => {
                 let ioda_src = ioda_src.as_ref().unwrap();
                 let now = Utc::now();
                 let window = TimeWindow::new(now - ChronoDuration::hours(IODA_LOOKBACK_HOURS), now);
@@ -601,11 +769,24 @@ async fn worker(
                 // the accumulator simply holds everything since the last drain.
                 let now = Utc::now();
                 let window = TimeWindow::new(now - ChronoDuration::seconds(BLUESKY_POLL_SECS as i64), now);
-                let delay = live_cycle(bluesky_src, "bluesky", window, BLUESKY_POLL_SECS,
-                    &bluesky_limiter, &mut bluesky_backoff, &mut bluesky_status, &tx, &wake).await;
-                bluesky_next = Instant::now() + delay;
+                if enabled.bluesky {
+                    let delay = live_cycle(bluesky_src, "bluesky", window, BLUESKY_POLL_SECS,
+                        &bluesky_limiter, &mut bluesky_backoff, &mut bluesky_status, &tx, &wake).await;
+                    bluesky_next = Instant::now() + delay;
+                } else {
+                    // Bluesky is the one source whose arm still runs while it
+                    // is switched off. The firehose socket is opened once by
+                    // `make()` and has no teardown path, so the accumulator
+                    // keeps counting either way; draining and dropping it on
+                    // cadence is what keeps that accumulator bounded and
+                    // guarantees nothing counted while off is ever stored.
+                    // No network request is made here — the drain is local.
+                    let _ = bluesky_src.fetch(window, &SourceFilters::default()).await;
+                    bluesky_next =
+                        Instant::now() + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
+                }
             }
-            _ = sleep_until(telegram_next), if online && telegram_src.is_some() => {
+            _ = sleep_until(telegram_next), if online && enabled.telegram && telegram_src.is_some() => {
                 let telegram_src = telegram_src.as_ref().unwrap();
                 // Nominal window: each channel's own high-water mark bounds
                 // the sweep to new messages, so the query window is unused.

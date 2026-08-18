@@ -64,7 +64,7 @@ terms and bounds than those providers' ingest use.
 | `display_name` | `&'static str` | |
 | `homepage_url` | `Option<&'static str>` | `None` only for the internal Fixtures entry. |
 | `licence_label` | `&'static str` | Short human-readable terms summary. |
-| `attribution_text` | `Option<&'static str>` | Verbatim upstream citation string when one is mandated (GDELT, ACLED); `None` otherwise — never a paraphrase. |
+| `attribution_text` | `Option<&'static str>` | Verbatim upstream citation string when one is mandated (GDELT, ACLED); `None` otherwise — never a paraphrase. ACLED's is a template carrying an access-date slot; see below. |
 | `credentials_required` | `bool` | |
 | `env_vars` | `&'static [&'static str]` | Env var **names** the credentialed path reads — never a value (product rule 5). |
 | `feature_flag` | `Option<&'static str>` | Desktop Cargo feature gating the live network path (e.g. `acled-live`); `None` when unconditionally compiled. |
@@ -74,6 +74,20 @@ are set and non-empty — the same check every live source's own `from_env`
 already performs, exposed as a query. It is distinct from "compiled": that is
 `feature_flag`, a build-time fact this type does not itself inspect. A
 keyless leg is always "configured".
+
+`ACCESS_DATE_SLOT` (`"[DATE]"`) is the slot ACLED's published citation
+template leaves for the date the data was accessed. It is stored in the table
+exactly as ACLED wrote it, because `attribution_text` is defined as verbatim;
+substituting at table-definition time would make the stored string no longer
+the upstream's. `SourceAttribution::citation(accessed)` is the render-time
+accessor that fills it: it takes the UTC date of the fetch that produced the
+rows on screen — read from the `SourceStatus` line the UI already polls, never
+from the clock — and returns `Cow::Borrowed` for every row without a slot, so
+only ACLED's row allocates. `citation_needs_access_date()` reports whether a
+row still carries an unfilled slot. Passing `None` leaves `[DATE]` visible
+rather than asserting an access that never happened; the About screen then
+says so in place of the date. Both surfaces that print a citation — About and
+the live-source panel — go through `citation()`.
 
 `attribution_for_source` matches every `SourceId` variant with no wildcard
 arm, so adding a variant without a row fails the build; `attribution.rs`'s
@@ -360,7 +374,27 @@ pruned past `keep_last`.
 ## SQLite (settings.sqlite)
 
 App settings only: window geometry, last filters, data paths. Never analytics
-data.
+data, and never a credential — keys stay in the process environment
+(`docs/SAFETY_AND_PRIVACY.md`), and the Settings screen renders only the env
+var *name* plus a configured yes/no.
+
+The table is a schemaless `settings(key TEXT PRIMARY KEY, value TEXT)` with
+serde_json values, so adding a key needs no migration; a changed value *shape*
+gets a new `_v<n>` key instead, which is why the live-only rebuild reads
+`filters_live_v1` rather than the fixture-era `filters`. Current keys:
+
+| Key | Value | Written by |
+|---|---|---|
+| `filters_live_v1` | `Filters` | filter/heat-mode controls |
+| `retention_days` | `Option<u32>` | the top bar's retention menu |
+| `how_to_read_seen_v1` | `bool` | dismissing the reading guide |
+| `disabled_sources_v1` | `Vec<SourceId>` | the Settings screen's per-source switch |
+
+`disabled_sources_v1` stores the sources switched *off*, not the ones left on:
+a source added in a later release then starts enabled rather than silently
+dark for everyone who already has a settings file. The desktop replays it to
+the ingest worker at startup, before going online, so a disabled source never
+gets one fetch in ahead of the toggle.
 
 ## Fixtures
 

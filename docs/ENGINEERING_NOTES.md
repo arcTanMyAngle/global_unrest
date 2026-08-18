@@ -136,6 +136,14 @@ immediately at startup and drains rollups on the first cycle. Bluesky needs
 its full first window before its first drain. Launch from the workspace root
 — `LES_TELEGRAM_SESSION_FILE` is a relative path.
 
+Switching Bluesky off in Settings does not stop its cadence arm. The Jetstream
+firehose socket has no teardown path, so its accumulator keeps filling whether
+or not the source is enabled; the arm still fires on cadence and drains the
+window, discarding it instead of storing it. Gating that arm like the other
+five would leave the accumulator growing without bound. The other five sources
+are gated normally because each is a request the worker either makes or does
+not.
+
 ### Correction to the chatter backlog: Burmese topic tokens will not work
 
 An older backlog item proposed adding Burmese equivalents to `chatter`'s

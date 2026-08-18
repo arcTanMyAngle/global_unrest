@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 mod attribution;
-pub use attribution::{AttributionSubject, SourceAttribution, attribution_for};
+pub use attribution::{ACCESS_DATE_SLOT, AttributionSubject, SourceAttribution, attribution_for};
 
 mod media;
 pub use media::{Embed, embed_for, is_video_url};

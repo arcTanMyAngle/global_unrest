@@ -63,6 +63,7 @@ synthetic data.
 | Telegram | Live with setup | Aggregate-only public-channel chatter from a curated allowlist, using a local MTProto session. |
 | Daily Events | Opt-in | A model-written, two-section digest for one UTC day of stored data. |
 | Media research and playback | On demand | Public video lookup for one selected place and time window; results are transient and can play in-app on Windows or open in a browser. |
+| Settings and About | Available | Per-source state — compiled in, configured, cadence, last fetch, next poll — with a switch per source, plus full attributions, licence, and version. |
 | Services API | Available | Dockerized worker/API snapshots with conditional GET, pagination, OpenAPI, metrics, and health staleness reporting. |
 | On-scene publishing | Planned | Consent-based field channels with publisher safety controls and explicit evidence states. |
 
@@ -80,6 +81,25 @@ synthetic data.
 The app keeps source event time, ingest time, and six-hour analysis buckets
 separate. A frequent fetch does not mean every underlying report is current or
 independently confirmed.
+
+### Settings and About
+
+The top bar's **settings** button opens the per-source state of this build.
+Each source shows whether it was compiled in, whether its credentials are
+configured, whether you have it switched on, its cadence, its last successful
+fetch, its last attempt, its next poll, and the worker's own summary of the
+last cycle. When a source is dark, the screen names the single next thing that
+would have to change — a missing Cargo feature, a missing environment
+variable, or the switch itself — rather than reporting a bare failure.
+
+Switching a source off stops it fetching, persists across restarts, and is
+independent of the global live-updates pause. It deletes nothing already
+stored; use the retention control for that. Credentials are never stored in
+the settings database or shown on screen in any form: the screen names the
+environment variable and says configured or not configured, nothing more.
+
+The **about** button shows the licence, the version, and every upstream's
+terms, with mandated citation strings rendered verbatim.
 
 ## Optional credentials, Daily Events, and media research
 

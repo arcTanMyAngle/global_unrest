@@ -10,6 +10,35 @@ project with no published crate API to stabilize against.
 
 ### Added
 
+- Settings and About screens, reachable from the top bar on every page
+  (`apps/global-signal-desktop/src/settings_screen.rs`,
+  `apps/global-signal-desktop/src/about.rs`). Settings shows, per source,
+  whether it was compiled into this build, whether its credentials are
+  configured, whether it is switched on, its cadence, last success, last
+  attempt, next poll, and the worker's own summary of the last cycle — and
+  names the single next thing that would have to change when a source is
+  dark, in the order those things actually gate it (missing Cargo feature
+  before missing credential before the switch). The on-demand Gemini and
+  Media legs are listed separately, without a cadence or a switch, because
+  they only ever run when a person asks. About renders every mandated
+  citation verbatim from `core_types`' attribution table, plus the licence,
+  the version, upstream terms links, and the bundled Natural Earth credit.
+  No credential value reaches the settings database or the screen in any
+  form — not a value, not a masked prefix, not a length; only the
+  environment variable's name and a configured yes/no, pinned by a test that
+  fails if `credential_line` ever renders anything else.
+
+- A per-source on/off switch, persisted as `disabled_sources_v1` in the
+  settings database and replayed to the ingest worker before it goes online,
+  so a disabled source never gets one fetch in first. It is distinct from
+  the global live-updates pause and survives a pause/resume cycle. The
+  worker keeps sole ownership of every source, limiter, and backoff: the
+  toggle travels over the existing `Ctl` channel, and the screen reads only
+  the `SourceStatus` lines the UI already polls, so it issues no query and
+  blocks no frame. The set stored is the *off* set, so a source added in a
+  later release starts enabled rather than silently dark.
+
+
 - CI now runs `analytics`' criterion benches as a compile-and-smoke gate
   (`.github/workflows/ci.yml`, `analytics-bench`). It is deliberately not a
   performance gate — the runner has no stable perf baseline and no GPU, so a
@@ -41,6 +70,12 @@ project with no published crate API to stabilize against.
 
 ### Changed
 
+- The live-source panel's per-source attribution line now comes from
+  `core_types`' attribution table instead of a local `match` on the display
+  name that carried its own copies of the GDELT, ACLED, NOAA, and IODA
+  strings. `SourceStatus` gained a `SourceId` so the join is on the id
+  rather than on matching display text across two crates.
+
 - Upgraded `criterion` 0.7 → 0.8.2 for `analytics`' scoring benches. The
   budgeted harness migration did not materialize either: 0.8's breaking
   changes are the removal of `criterion::black_box` (the bench already used
@@ -64,6 +99,18 @@ project with no published crate API to stabilize against.
   zip` is ambiguous; cargo-deny's `bans` check is fine with it.
 
 ### Fixed
+
+- ACLED's mandated citation no longer renders its template's literal
+  `[DATE]`. The table in `core-types` still stores the string verbatim, as
+  its contract requires; the new `SourceAttribution::citation(accessed)`
+  fills the slot at render time from the last successful ACLED fetch, and
+  both places that print a citation — the About screen and the live-source
+  side panel — now go through it. The date is the fetch's, not today's: a
+  citation asserts when the data was obtained, so with no successful fetch
+  yet the slot stays visible and About says who has to fill it instead of
+  inventing a date. Rows without a slot still borrow, so the common case
+  allocates nothing. Caught by looking at the running app; every test was
+  green with `[DATE]` on screen.
 
 - `analytics` now sets `[lib] bench = false`. Cargo was building the lib's
   own (empty) libtest bench target and running it first, so any criterion

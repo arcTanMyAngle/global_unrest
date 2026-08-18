@@ -60,9 +60,14 @@ switches to fixtures when a source is unavailable.
   exports Parquet, and persists the Daily Events cache. DuckDB connections are
   not shared between threads.
 - **Ingest worker:** a long-lived current-thread Tokio runtime. It receives
-  online/fetch-now control messages and polls or drains sources at their own
-  cadence. It sends normalized batches and source status back to the UI; only
-  the UI hands batches to storage.
+  online/fetch-now/enable-source control messages and polls or drains sources
+  at their own cadence. It sends normalized batches and source status back to
+  the UI; only the UI hands batches to storage. Ownership does not move for
+  the Settings screen's per-source switch: the worker still owns every source,
+  limiter, and backoff, and the switch travels as one more message on the
+  control channel that already carries the online pause. The Settings screen
+  itself reads only the status lines the UI already polls — no query of its
+  own, and nothing synchronous.
 - **Digest worker:** a separate background task. It calls Google Gemini only
   after an explicit Generate click, returns a parsed two-section digest to the
   UI, and never opens storage itself.
@@ -191,3 +196,10 @@ eframe 0.36 and wgpu 30 move together. Do not upgrade wgpu independently.
   treated as an event source or rendered as a map caption.
 - Media lookup is user-directed and transient. Its post-level public links
   never enter aggregate ingestion, DuckDB, Parquet, logs, or the services API.
+- Credentials live in the process environment and nowhere else. The settings
+  database and the Settings screen carry environment variable *names* and a
+  configured yes/no — never a value, a masked prefix, or a length.
+- Bluesky's accumulator keeps counting while the source is switched off,
+  because the firehose socket has no teardown path. Its cadence still drains
+  and discards, so the accumulator stays bounded and nothing counted while
+  off is ever stored.

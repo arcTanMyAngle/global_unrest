@@ -30,6 +30,11 @@ use crate::video::VideoPlayer;
 pub const NE_COUNTRIES: &str =
     include_str!("../../../assets/natural_earth/ne_110m_admin_0_countries.geojson");
 
+/// Settings key holding the sources the user has switched off. `SettingsDb` is
+/// a schemaless key/value store, so a new key needs no migration; the `_v1`
+/// suffix is how this repo retires a value shape instead.
+const DISABLED_SOURCES_KEY: &str = "disabled_sources_v1";
+
 pub enum Phase {
     Loading(String),
     Ready,
@@ -281,6 +286,16 @@ pub struct App {
     /// "How to read this map" (docs/VISUALIZATION.md V3 item 10). Opens once
     /// on first run and on `?` thereafter.
     pub show_how_to_read: bool,
+    /// Settings window: per-source state (compiled in / configured / enabled),
+    /// last fetch, next poll, cadence.
+    pub show_settings: bool,
+    /// About window: verbatim attributions, licence, version, links.
+    pub show_about: bool,
+    /// Sources the user has switched off in Settings. Persisted, and replayed
+    /// to the ingest worker at startup; a source absent here is enabled.
+    /// Storing the *off* set rather than the on set means a source added in a
+    /// later release starts enabled instead of silently dark.
+    pub disabled_sources: Vec<SourceId>,
 
     pending_extent: Option<Reply<Option<EpochWindow>>>,
     /// Bucket-aligned data extent `[start, end)`.
@@ -431,6 +446,17 @@ impl App {
         };
         store.set_retention(retention_days);
 
+        // Sources the user switched off previously. Unknown ids decode as an
+        // error rather than a silent partial list, so a decode failure falls
+        // back to "everything on" and says so.
+        let disabled_sources: Vec<SourceId> = match settings.get(DISABLED_SOURCES_KEY) {
+            Ok(v) => v.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("reading disabled sources: {e}");
+                Vec::new()
+            }
+        };
+
         // Migrate the legacy mixed database in place: only fixture-attributed
         // rows/logs are removed, preserving every real record. Finish before
         // opening the window so synthetic data can never flash on screen or
@@ -474,6 +500,9 @@ impl App {
             ingest_log: None,
             show_log_window: false,
             show_how_to_read: !how_to_read_seen,
+            show_settings: false,
+            show_about: false,
+            disabled_sources,
             pending_extent,
             extent: None,
             pending_vocab,
@@ -536,6 +565,12 @@ impl App {
             media_status: None,
             media_player: VideoPlayer::new(),
         };
+
+        // Replay the saved off-switches before going online, so a disabled
+        // source never gets one startup fetch in before the toggle lands.
+        for source in app.disabled_sources.clone() {
+            app.ingest_handle.set_source_enabled(source, false);
+        }
 
         // Live updates are the desktop default. LES_ONLINE=0 remains a useful
         // explicit pause for testing cached real data without network access.
@@ -603,6 +638,28 @@ impl App {
         self.ingest_handle.set_online(on);
     }
 
+    /// Switch one live source on or off: tell the ingest worker and persist.
+    /// This is not the global online pause — a source switched off here stays
+    /// off across a pause/resume cycle and across restarts.
+    pub fn set_source_enabled(&mut self, source: SourceId, on: bool) {
+        let was_off = self.disabled_sources.contains(&source);
+        if was_off != on {
+            return;
+        }
+        if on {
+            self.disabled_sources.retain(|s| *s != source);
+        } else {
+            self.disabled_sources.push(source);
+        }
+        self.ingest_handle.set_source_enabled(source, on);
+        if let Err(e) = self
+            .settings
+            .set(DISABLED_SOURCES_KEY, &self.disabled_sources)
+        {
+            tracing::warn!("saving disabled sources: {e}");
+        }
+    }
+
     /// Request an immediate live fetch (manual refresh; only acts when online).
     pub fn fetch_now(&self) {
         self.ingest_handle.fetch_now();
@@ -657,7 +714,7 @@ impl App {
                         match self
                             .source_statuses
                             .iter_mut()
-                            .find(|s| s.name == status.name)
+                            .find(|s| s.source == status.source)
                         {
                             Some(slot) => *slot = status,
                             None => {
@@ -1390,6 +1447,8 @@ impl eframe::App for App {
         }
         self.log_window(&ctx);
         self.how_to_read_window(&ctx);
+        self.settings_window(&ctx);
+        self.about_window(&ctx);
 
         // Zoom crossed a rollup threshold → re-aggregate the cached buckets
         // at the new display resolution (no storage round-trip).

@@ -3,6 +3,7 @@
 
 use chrono::DateTime;
 use core_types::EventKind;
+use core_types::{AttributionSubject, attribution_for};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Vec2};
 
 use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Page, Phase, WindowLen};
@@ -134,6 +135,23 @@ impl App {
                     self.fetch_now();
                 }
                 self.source_status_label(ui);
+                // Placed before the page early-return below: source state and
+                // attributions are properties of the application, not of the
+                // map, and must be reachable from Daily Events and Media too.
+                if ui
+                    .button("settings")
+                    .on_hover_text("per-source state: compiled in, configured, cadence")
+                    .clicked()
+                {
+                    self.show_settings = !self.show_settings;
+                }
+                if ui
+                    .button("about")
+                    .on_hover_text("attributions, licence, version")
+                    .clicked()
+                {
+                    self.show_about = !self.show_about;
+                }
                 if matches!(self.page, Page::DailyEvents | Page::Media) {
                     return;
                 }
@@ -639,25 +657,26 @@ impl App {
                         .small(),
                 );
             }
-            let attribution = match s.name {
-                "GDELT" => "Data: GDELT Project — free to use with attribution.",
-                "ACLED" => {
-                    "Data: ACLED (acleddata.com) — authorized access; attributed; \
-                     not redistributed."
-                }
-                "NOAA" => {
-                    "Data: NOAA/NWS active alerts — US public domain (US coverage \
-                     only)."
-                }
-                "IODA" => {
-                    "Data: IODA (Georgia Tech Internet Intelligence Research Lab) — \
-                     keyless public API; country-precision internet-outage signal."
-                }
-                _ => "",
-            };
-            if !attribution.is_empty() {
-                ui.label(RichText::new(attribution).color(TEXT_DIM).small());
-            }
+            // From `core_types::attribution`, not restated here: this panel
+            // used to carry its own copy of four of these strings, which is
+            // exactly how a mandated citation goes stale in one place while
+            // looking correct in another.
+            let attr = attribution_for(AttributionSubject::Source(s.source));
+            // ACLED's mandated citation names the date the data was accessed;
+            // this line sits beside that very fetch, so fill it from the same
+            // status rather than printing the template's empty slot.
+            let accessed = s
+                .last_success_epoch_s
+                .and_then(|e| DateTime::from_timestamp(e, 0))
+                .map(|dt| dt.date_naive());
+            ui.label(
+                RichText::new(match attr.citation(accessed) {
+                    Some(mandated) => format!("Data: {mandated}"),
+                    None => format!("Data: {} — {}", attr.display_name, attr.licence_label),
+                })
+                .color(TEXT_DIM)
+                .small(),
+            );
         }
     }
 
@@ -1530,6 +1549,42 @@ impl App {
             self.show_how_to_read = false;
             self.mark_how_to_read_seen();
         }
+    }
+
+    /// Settings: per-source state and the enable switch.
+    ///
+    /// `settings_screen::show` borrows the app immutably (it reads status
+    /// lines the worker already sent) and hands back the toggle the user
+    /// flipped, which is applied here where `&mut self` is available.
+    pub fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let mut toggled = None;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                toggled = crate::settings_screen::show(self, ui);
+            });
+        if let Some((source, on)) = toggled {
+            self.set_source_enabled(source, on);
+        }
+        self.show_settings = open;
+    }
+
+    /// About: attributions, licence, version.
+    pub fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("About")
+            .open(&mut open)
+            .default_width(600.0)
+            .show(ctx, |ui| crate::about::show(self, ui));
+        self.show_about = open;
     }
 
     pub fn log_window(&mut self, ctx: &egui::Context) {

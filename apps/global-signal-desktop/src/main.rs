@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod app;
 mod daily_events;
 mod digest;
@@ -15,6 +16,7 @@ mod map_view;
 mod media;
 mod media_page;
 mod panels;
+mod settings_screen;
 mod sparkline;
 mod style;
 mod timeline_strip;

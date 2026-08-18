@@ -44,6 +44,13 @@ impl AttributionSubject {
     ];
 }
 
+/// The slot ACLED's published citation template leaves for the date the data
+/// was accessed. Kept in the table exactly as the upstream wrote it — the
+/// template *is* the verbatim string S1 was told to copy — and filled at
+/// render time by [`SourceAttribution::citation`] from the fetch that
+/// actually produced the rows on screen.
+pub const ACCESS_DATE_SLOT: &str = "[DATE]";
+
 /// One row of the Settings/About attribution table.
 ///
 /// Never carries a credential value — only env-var *names* (CLAUDE.md
@@ -85,6 +92,42 @@ impl SourceAttribution {
         self.env_vars
             .iter()
             .all(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()))
+    }
+
+    /// Whether this row's citation template carries an unfilled
+    /// [`ACCESS_DATE_SLOT`] and therefore needs an access date to be
+    /// complete.
+    pub fn citation_needs_access_date(&self) -> bool {
+        self.attribution_text
+            .is_some_and(|t| t.contains(ACCESS_DATE_SLOT))
+    }
+
+    /// The citation to display, with the access-date slot filled in.
+    ///
+    /// `accessed` is the UTC date of the fetch that produced the data on
+    /// screen, not today: a citation claims when the data was obtained. Pass
+    /// `None` when no successful fetch is known — the template then renders
+    /// with `[DATE]` still visible, which is honest about being unfilled.
+    /// Substituting today's date for a fetch that never happened would state
+    /// something false in a compliance string.
+    ///
+    /// The date is rendered ISO 8601 (`2026-08-18`). ACLED's policy fixes the
+    /// sentence, not the date format, and every other timestamp this UI shows
+    /// is ISO UTC.
+    ///
+    /// Borrows when there is nothing to substitute, so the common rows cost
+    /// no allocation.
+    pub fn citation(
+        &self,
+        accessed: Option<chrono::NaiveDate>,
+    ) -> Option<std::borrow::Cow<'static, str>> {
+        let text = self.attribution_text?;
+        match accessed {
+            Some(date) if text.contains(ACCESS_DATE_SLOT) => Some(std::borrow::Cow::Owned(
+                text.replace(ACCESS_DATE_SLOT, &date.format("%Y-%m-%d").to_string()),
+            )),
+            _ => Some(std::borrow::Cow::Borrowed(text)),
+        }
     }
 }
 
@@ -152,7 +195,10 @@ const GDELT: SourceAttribution = SourceAttribution {
 /// docs/SAFETY_AND_PRIVACY.md "Source licensing and handling" and CLAUDE.md
 /// product rules 4 and 8 (never store notes; never serve ACLED aggregates
 /// publicly). Credential names from `crates/source-acled/src/live.rs`
-/// `AcledSource::from_env`.
+/// `AcledSource::from_env`. The `[DATE]` in the citation is ACLED's own
+/// template slot, not a typo — see [`ACCESS_DATE_SLOT`] and
+/// [`SourceAttribution::citation`], which fills it from the last successful
+/// fetch.
 const ACLED: SourceAttribution = SourceAttribution {
     display_name: "ACLED (Armed Conflict Location & Event Data Project)",
     homepage_url: Some("https://acleddata.com/"),
@@ -426,5 +472,50 @@ mod tests {
             acled.attribution_text,
             Some("ACLED, accessed on [DATE]. www.acleddata.com.")
         );
+    }
+
+    /// The access-date slot is filled from the fetch that produced the data,
+    /// leaving no bracketed placeholder in a string a person may copy.
+    #[test]
+    fn access_date_fills_the_slot() {
+        let acled = attribution_for(AttributionSubject::Source(SourceId::Acled));
+        assert!(acled.citation_needs_access_date());
+
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 18).unwrap();
+        let filled = acled.citation(Some(date)).unwrap();
+        assert_eq!(filled, "ACLED, accessed on 2026-08-18. www.acleddata.com.");
+        assert!(!filled.contains(ACCESS_DATE_SLOT));
+    }
+
+    /// No successful fetch means no access date to claim. The template stays
+    /// visibly unfilled rather than being stamped with today's date, which
+    /// would assert a fetch that never happened.
+    #[test]
+    fn without_a_fetch_the_slot_stays_visible() {
+        let acled = attribution_for(AttributionSubject::Source(SourceId::Acled));
+        let unfilled = acled.citation(None).unwrap();
+        assert!(unfilled.contains(ACCESS_DATE_SLOT), "{unfilled}");
+    }
+
+    /// A date is only ever substituted into a row that has a slot; rows
+    /// without one are returned verbatim and borrowed, not rebuilt.
+    #[test]
+    fn rows_without_a_slot_are_untouched() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 18).unwrap();
+        for subject in AttributionSubject::ALL {
+            let attr = attribution_for(subject);
+            let Some(text) = attr.attribution_text else {
+                assert!(attr.citation(Some(date)).is_none());
+                assert!(!attr.citation_needs_access_date());
+                continue;
+            };
+            if attr.citation_needs_access_date() {
+                continue;
+            }
+            assert!(matches!(
+                attr.citation(Some(date)).unwrap(),
+                std::borrow::Cow::Borrowed(t) if t == text
+            ));
+        }
     }
 }
