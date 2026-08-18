@@ -176,6 +176,21 @@ to add every possible feed:
   the DuckDB store, and a toggle that is off by default. Implementation is
   phased there and not yet started.
 - Criterion benchmarks in CI and a profiling pass toward higher retention.
+  **Done.** The benches run as a compile-and-smoke gate, and the profiling
+  pass found the ceiling was ingest-tick query time, not memory, frame time,
+  or disk (see
+  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#profiling-the-store-and-what-the-retention-ceiling-actually-was)).
+  Rescoring is now bounded to the buckets an ingest can have changed, so a
+  tick costs what arrived plus the 28-day baseline window rather than the
+  whole retained table. Two levers were measured and deliberately left open:
+  - *Theme-filtered `query_buckets` still reads the whole events table*
+    (1.4 s at 1M events). Bounding it needs a theme-aware tail leg; the
+    cheap version would silently change spike cold-start semantics for young
+    themes, which is a product decision rather than a perf fix.
+  - *The 28-day baseline window is the remaining per-tick floor* (~2.8M rows,
+    ~4 s/tick at 100k events/day). Removing it means seeding the baseline
+    index from `region_buckets` instead of from raw events — an `analytics`
+    API change, not a storage one.
 - Chatter coverage for unsegmented scripts. This is a **segmentation**
   problem, not a keyword-list addition — see the correction in
   [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#correction-to-the-chatter-backlog-burmese-topic-tokens-will-not-work).

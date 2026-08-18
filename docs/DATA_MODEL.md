@@ -337,9 +337,36 @@ parents via `geo_utils::cell_parent` at display time). Carries:
   **retention cap** (M3, online volumes ~100k/day) rows older than *N* days
   from the newest event are pruned on each ingest before rescoring; a cap ≥ the
   28-day baseline window keeps recent baselines warm. Default: keep everything.
+  The cutoff is **floored to a UTC day**, so the cap means "at least *N* days,
+  enforced to the day" — a store can hold up to one extra day. That is
+  deliberate: a raw cutoff advances every tick and therefore prunes every
+  tick, and pruning is the one thing that forces a full rescore (below).
 - `region_buckets` — recomputed from `events` after every ingest by running
   `analytics::score_buckets` (the single reference implementation — there
-  is deliberately no SQL twin to keep in sync).
+  is deliberately no SQL twin to keep in sync). The rescore is **bounded to
+  the buckets that can have changed**: ingest tracks the oldest genuinely new
+  timestamp and rewrites only buckets at or after it. Three rules make that
+  exact rather than approximate, and none of them may be relaxed without a new
+  equivalence proof:
+  1. Scoring reads back from `oldest_new − BASELINE_WINDOW_DAYS`, day-floored,
+     because a bucket's spike baseline is the trailing median of the previous
+     28 days and the baseline index counts whole days.
+  2. That bounded read also carries the **oldest surviving event of every
+     cell** older than the window. `BaselineIndex` clips trailing medians at
+     the store's first data day and emits one persisted baseline row per cell
+     the store ever saw, so both are store-wide facts that a recent-slice read
+     would otherwise lose. Those tail rows land on days no trailing window
+     reads, so they change no score.
+  3. **Pruning forces a full rescore.** Dropping rows moves the store's first
+     data day, which re-clips the trailing baselines of every bucket after it.
+     Day-aligning the cutoff is what keeps that to once a day rather than once
+     a tick.
+
+  A tick that inserts nothing and prunes nothing skips the rescore entirely.
+  This is exact because scoring reads no wall clock — only the data's own
+  extent. `storage::tests::bounded_rescore_matches_a_full_rebuild` asserts the
+  incremental path is bit-identical to a full rebuild across quiet ticks,
+  duplicate ticks, and a backfill landing mid-history.
 - `baselines` — per (h3_cell, time-of-day bucket): the current trailing
   28-day median and its `sample_days` (< `MIN_BASELINE_DAYS` ⇒ cold start).
 - `ingest_log` — one row per failed/refused record: source, reason, raw

@@ -851,6 +851,9 @@ fn do_ingest(
 
     let mut inserted = 0usize;
     let mut duplicates = 0usize;
+    // Oldest genuinely new timestamp: everything scored at or after its
+    // bucket can change, everything before it cannot.
+    let mut oldest_new: Option<i64> = None;
     {
         let mut appender = conn.appender("events")?;
         let mut batch_seen: HashSet<u64> = HashSet::new();
@@ -882,6 +885,8 @@ fn do_ingest(
                 serde_json::to_string(&ev.urls).unwrap_or_else(|_| "[]".into()),
             ])?;
             inserted += 1;
+            let ts = ev.ts_utc.timestamp();
+            oldest_new = Some(oldest_new.map_or(ts, |m: i64| m.min(ts)));
         }
         appender.flush()?;
     }
@@ -905,7 +910,18 @@ fn do_ingest(
         None => 0,
     };
 
-    rebuild_buckets(conn)?;
+    if pruned > 0 {
+        // Pruning moves the store's first data day, which re-clips the
+        // trailing baselines of every bucket in the window after it. Only a
+        // full rescore is correct here — the day-aligned cutoff in
+        // `prune_events` is what keeps that to once a day.
+        rebuild_buckets(conn, None)?;
+    } else if let Some(oldest) = oldest_new {
+        rebuild_buckets(conn, Some(bucket_start_epoch(oldest)))?;
+    }
+    // Otherwise nothing entered or left the table, so nothing derived can
+    // have changed. Skipping is what keeps a quiet cadence tick cheap on a
+    // large store; scoring reads no wall clock, only the data's own extent.
 
     tracing::info!(
         inserted,
@@ -988,7 +1004,7 @@ fn do_purge_source(
     )?;
 
     // Keep the table swap and all derived analytics atomic.
-    rebuild_buckets(&tx)?;
+    rebuild_buckets(&tx, None)?;
     tx.commit()?;
 
     let deleted = usize::try_from(deleted)
@@ -1002,13 +1018,20 @@ fn do_purge_source(
 /// baseline window (docs/SCORING.md) keeps recent baselines fully warm; shorter
 /// windows are allowed but degrade the oldest retained buckets to cold start.
 /// Returns the number of rows pruned.
+///
+/// The cutoff is floored to a UTC day, so retention means "at least
+/// `retention_days`, enforced to the day". That is deliberate and it is what
+/// makes ingest cheap: a raw cutoff advances every tick and therefore prunes
+/// every tick, and pruning is the one thing that forces a full rescore
+/// (docs/DATA_MODEL.md). Day-aligned, the store pays that once a day.
 fn prune_events(conn: &Connection, retention_days: i64) -> Result<usize, StorageError> {
     let max_ts: Option<i64> =
         conn.query_row("SELECT max(ts_epoch_s) FROM events", [], |r| r.get(0))?;
     let Some(max_ts) = max_ts else {
         return Ok(0);
     };
-    let cutoff = max_ts - retention_days.saturating_mul(86_400);
+    let cutoff = analytics::baseline::day_of(max_ts - retention_days.saturating_mul(86_400))
+        * analytics::baseline::SECS_PER_DAY;
     let pruned = conn.execute("DELETE FROM events WHERE ts_epoch_s < ?", params![cutoff])?;
     if pruned > 0 {
         tracing::info!(pruned, retention_days, "pruned events past retention");
@@ -1016,19 +1039,47 @@ fn prune_events(conn: &Connection, retention_days: i64) -> Result<usize, Storage
     Ok(pruned)
 }
 
+/// How far back scoring has to read to produce correct output for buckets at
+/// or after `from`: a bucket's spike baseline is the trailing median of the
+/// previous `BASELINE_WINDOW_DAYS`, so nothing older can reach it. Floored to
+/// a UTC day because the baseline index counts whole days — a partial first
+/// day would under-count one sample.
+fn score_read_start(from: i64) -> i64 {
+    let raw = from
+        - i64::from(analytics::weights::BASELINE_WINDOW_DAYS) * analytics::baseline::SECS_PER_DAY;
+    analytics::baseline::day_of(raw) * analytics::baseline::SECS_PER_DAY
+}
+
 /// Recompute region_buckets and baselines from events by running the
-/// analytics reference pipeline (`analytics::score_buckets`) over the whole
-/// events table and persisting the result. One implementation, no SQL twin
-/// to keep in sync. Reading everything back is fine at fixture/M3 scale
-/// (~1e5–1e6 rows); make this incremental if ingest ever gets hot.
-fn rebuild_buckets(conn: &Connection) -> Result<(), StorageError> {
-    let events = read_score_events(conn)?;
+/// analytics reference pipeline (`analytics::score_buckets`) and persisting
+/// the result. One implementation, no SQL twin to keep in sync.
+///
+/// `from = None` rescores the whole table. `from = Some(t)` rescores only
+/// buckets at or after `t`, reading events back to [`score_read_start`] — a
+/// cadence tick then costs the baseline window, not the whole of retention,
+/// which is what lets retention grow past it. `baselines` is a whole-store
+/// "as of the newest data" snapshot and is always replaced in full; the
+/// bounded read still carries every cell (see [`read_score_events_since`]).
+fn rebuild_buckets(conn: &Connection, from: Option<i64>) -> Result<(), StorageError> {
+    let events = read_score_events_since(conn, from.map(score_read_start))?;
     let scored = analytics::score_buckets(&events);
 
-    conn.execute("DELETE FROM region_buckets", [])?;
+    match from {
+        None => conn.execute("DELETE FROM region_buckets", [])?,
+        Some(t) => conn.execute(
+            "DELETE FROM region_buckets WHERE bucket_start >= ?",
+            params![t],
+        )?,
+    };
     {
         let mut app = conn.appender("region_buckets")?;
-        for b in &scored.buckets {
+        // The bounded read also produces buckets for the pre-window rows it
+        // carries for bookkeeping; those are not ours to rewrite.
+        for b in scored
+            .buckets
+            .iter()
+            .filter(|b| from.is_none_or(|t| b.bucket_start >= t))
+        {
             app.append_row(params![
                 u64_to_db(b.h3_cell),
                 b.bucket_start,
@@ -1066,14 +1117,41 @@ fn rebuild_buckets(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// The event columns scoring consumes, in the order both read paths bind.
+const SCORE_EVENT_COLS: &str = "h3_cell, ts_epoch_s, kind, article_count, distinct_source_count,
+     location_confidence, severity, location_precision, themes, outlet_domains";
+
 /// Read back the event columns that scoring consumes.
-fn read_score_events(conn: &Connection) -> Result<Vec<analytics::ScoreEvent>, StorageError> {
-    let mut stmt = conn.prepare(
-        "SELECT h3_cell, ts_epoch_s, kind, article_count, distinct_source_count,
-                location_confidence, severity, location_precision, themes, outlet_domains
-         FROM events",
-    )?;
-    let rows = stmt.query_map([], |r| {
+///
+/// `since = None` reads the whole table. `since = Some(t)` reads events at or
+/// after `t` **plus the oldest surviving event of every cell older than `t`**.
+/// That tail is not decoration. `analytics::baseline::BaselineIndex` clips
+/// trailing medians at the store's first data day and emits one baseline row
+/// per cell it ever saw, so both of those have to be derived from the whole
+/// table even when only a recent slice is being rescored. The tail rows are
+/// real events landing on days older than any trailing window the caller
+/// keeps, so they change no score: a bounded read is bit-identical to a full
+/// one for every bucket at or after `t + BASELINE_WINDOW_DAYS`.
+fn read_score_events_since(
+    conn: &Connection,
+    since: Option<i64>,
+) -> Result<Vec<analytics::ScoreEvent>, StorageError> {
+    let sql = match since {
+        None => format!("SELECT {SCORE_EVENT_COLS} FROM events"),
+        // Ties in the tail leg duplicate an old row, which is harmless: it
+        // only doubles a count on a day no trailing window reads.
+        Some(_) => format!(
+            "SELECT {SCORE_EVENT_COLS} FROM events WHERE ts_epoch_s >= ?
+             UNION ALL
+             SELECT {SCORE_EVENT_COLS} FROM events
+             SEMI JOIN (
+                 SELECT h3_cell AS c, min(ts_epoch_s) AS t
+                 FROM events WHERE ts_epoch_s < ? GROUP BY h3_cell
+             ) ON h3_cell = c AND ts_epoch_s = t"
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let map_row = |r: &duckdb::Row<'_>| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
@@ -1086,7 +1164,11 @@ fn read_score_events(conn: &Connection) -> Result<Vec<analytics::ScoreEvent>, St
             r.get::<_, String>(8)?,
             r.get::<_, String>(9)?,
         ))
-    })?;
+    };
+    let rows = match since {
+        None => stmt.query_map([], map_row)?,
+        Some(t) => stmt.query_map(params![t, t], map_row)?,
+    };
     let mut out = Vec::new();
     for row in rows {
         let (cell, ts, kind, articles, sources, conf, severity, precision, themes, outlets) = row?;
@@ -1129,7 +1211,7 @@ fn do_query_buckets(
     // Theme-filtered view: re-run the scoring pipeline over only the events
     // carrying a selected theme (full history, so the theme's baselines and
     // spike stay meaningful), then trim to the window.
-    let mut events = read_score_events(conn)?;
+    let mut events = read_score_events_since(conn, None)?;
     events.retain(|ev| ev.themes.iter().any(|t| themes.contains(t)));
     let from = bucket_start_epoch(window.0);
     let mut buckets = analytics::score_buckets(&events).buckets;
@@ -2386,6 +2468,138 @@ mod tests {
         assert_eq!(buckets[0].event_count, 1);
     }
 
+    /// Every derived row of `region_buckets` as text, with floats printed by
+    /// bits so a bounded rescore has to reproduce the reference exactly, not
+    /// closely — and so a mismatch prints the offending row.
+    fn dump_buckets(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT h3_cell, bucket_start, event_count, attention_count, article_count,
+                        source_count, distinct_outlets, attention_score, unrest_score,
+                        spike_score, combined_score, baseline, spike_cold_start
+                 FROM region_buckets ORDER BY h3_cell, bucket_start",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "{} {} {} {} {} {} {} {:08x} {:08x} {:08x} {:08x} {:08x} {}",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i32>(2)?,
+                    r.get::<_, i32>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i32>(6)?,
+                    r.get::<_, f32>(7)?.to_bits(),
+                    r.get::<_, f32>(8)?.to_bits(),
+                    r.get::<_, f32>(9)?.to_bits(),
+                    r.get::<_, f32>(10)?.to_bits(),
+                    r.get::<_, f32>(11)?.to_bits(),
+                    r.get::<_, bool>(12)?,
+                ))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    fn dump_baselines(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT h3_cell, tod_bucket, baseline, sample_days
+                 FROM baselines ORDER BY h3_cell, tod_bucket",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(format!(
+                    "{} {} {:016x} {}",
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i32>(1)?,
+                    r.get::<_, f64>(2)?.to_bits(),
+                    r.get::<_, i32>(3)?,
+                ))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    /// The bounded rescore is an optimisation, so it has to produce exactly
+    /// what a full rescore produces — including the store-wide first data day
+    /// that clips trailing medians and the one baseline row per cell the
+    /// store ever saw, neither of which is visible in a recent slice. Drive
+    /// both against raw connections: a single full rebuild as the reference,
+    /// cadence-shaped ticks as the subject.
+    #[test]
+    fn bounded_rescore_matches_a_full_rebuild() {
+        // 45 days across three cells, so history reaches well past the 28-day
+        // baseline window; cell 300 falls silent after day 3 and must still
+        // carry baseline rows the recent slice knows nothing about.
+        let day0 = Utc.with_ymd_and_hms(2026, 4, 1, 3, 0, 0).unwrap();
+        let mut events = Vec::new();
+        let mut seq = 0u32;
+        for d in 0..45i64 {
+            for (cell, per_day) in [(100u64, 3usize), (200, 1), (300, 2)] {
+                if cell == 300 && d > 3 {
+                    continue;
+                }
+                for k in 0..per_day {
+                    let kind = if (d as usize + k).is_multiple_of(3) {
+                        EventKind::Protest
+                    } else {
+                        EventKind::NewsAttention
+                    };
+                    let mut e = sample_event(seq, kind, 3, cell);
+                    e.ts_utc =
+                        day0 + chrono::Duration::days(d) + chrono::Duration::hours(6 * k as i64);
+                    e.id = event_id(SourceId::Fixtures, &format!("evt-{seq}"));
+                    e.source_event_id = format!("evt-{seq}");
+                    events.push(e);
+                    seq += 1;
+                }
+            }
+        }
+        events.sort_by_key(|e| e.ts_utc);
+
+        let full = Connection::open_in_memory().unwrap();
+        migrate(&full).unwrap();
+        do_ingest(&full, &events, &[], None).unwrap();
+        rebuild_buckets(&full, None).unwrap();
+
+        let incr = Connection::open_in_memory().unwrap();
+        migrate(&incr).unwrap();
+        for tick in events.chunks(11) {
+            do_ingest(&incr, tick, &[], None).unwrap();
+        }
+        // A quiet tick and a duplicate tick both have to be no-ops.
+        do_ingest(&incr, &[], &[], None).unwrap();
+        do_ingest(&incr, &events, &[], None).unwrap();
+
+        assert_eq!(dump_buckets(&full), dump_buckets(&incr));
+        assert_eq!(dump_baselines(&full), dump_baselines(&incr));
+
+        // Backfill: a source handing over a record two weeks old has to
+        // re-score the history in front of it, not just the newest bucket.
+        let mut late = sample_event(9_000, EventKind::Protest, 3, 100);
+        late.ts_utc = day0 + chrono::Duration::days(30);
+        late.id = event_id(SourceId::Fixtures, "evt-late");
+        late.source_event_id = "evt-late".into();
+        let backfilled: Vec<GeoTemporalEvent> = events
+            .iter()
+            .cloned()
+            .chain(std::iter::once(late.clone()))
+            .collect();
+
+        do_ingest(&incr, std::slice::from_ref(&late), &[], None).unwrap();
+        let full2 = Connection::open_in_memory().unwrap();
+        migrate(&full2).unwrap();
+        do_ingest(&full2, &backfilled, &[], None).unwrap();
+        rebuild_buckets(&full2, None).unwrap();
+
+        assert_eq!(dump_buckets(&full2), dump_buckets(&incr));
+        assert_eq!(dump_baselines(&full2), dump_baselines(&incr));
+    }
+
     #[test]
     fn retention_prunes_old_events_but_keeps_recent_baselines_warm() {
         let store = open_mem();
@@ -2411,8 +2625,8 @@ mod tests {
         assert_eq!(r.pruned, 0);
 
         // Enable 30-day retention and re-ingest (all dedupe; prune then runs).
-        // Newest event is day 39 (07:00); cutoff = day 9 (07:00). Days 0–8 are
-        // strictly older ⇒ 9 days × 2 = 18 events pruned.
+        // Newest event is day 39 (07:00); the cutoff floors to day 9 (00:00).
+        // Days 0–8 are strictly older ⇒ 9 days × 2 = 18 events pruned.
         store.set_retention(Some(30));
         let r2 = store.ingest(events.clone(), vec![]).wait().unwrap();
         assert_eq!(r2.inserted, 0);

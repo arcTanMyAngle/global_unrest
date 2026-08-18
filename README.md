@@ -98,6 +98,14 @@ stored; use the retention control for that. Credentials are never stored in
 the settings database or shown on screen in any form: the screen names the
 environment variable and says configured or not configured, nothing more.
 
+The retention control in the top bar caps the events table at 30, 60, or 90
+days from the newest event, or keeps everything (the default). It is a
+**lower bound enforced to the UTC day**: a 90-day cap keeps at least 90 days
+and may hold up to one day more, because trimming on a day boundary is what
+keeps a routine update cheap. Raising retention costs disk, not
+responsiveness — an update's cost tracks how much data arrived and the
+28-day baseline window, not how far back the store goes.
+
 The **about** button shows the licence, the version, and every upstream's
 terms, with mandated citation strings rendered verbatim.
 

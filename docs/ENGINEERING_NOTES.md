@@ -218,6 +218,58 @@ The call surface both Telegram paths actually need is small and closed:
 `channels.GetChannels`/`users.GetUsers` for peer refs, `messages.GetHistory`
 for the ingest sweep, and `messages.Search` for the media leg.
 
+## Profiling the store, and what the retention ceiling actually was
+
+The M8 profiling pass measured four candidate ceilings at 10x the current
+data volume (1,000,000 events, ~58,000 buckets, 1,500 res-3 cells). Only one
+of them was real:
+
+| axis | at 1M events | verdict |
+|---|---|---|
+| storage size | 118 MiB | not the ceiling |
+| memory | 1.68 GiB peak RSS, harness copy included | not the ceiling |
+| frame time | heatmap 12.5 ms at 12k cells; markers 3.2 ms at the 100k point cap | not the ceiling |
+| **query time** | **quiet cadence tick 3.2 s** | **the ceiling** |
+
+The cost was one line: the ingest path rescored the **entire** retained
+events table on every tick, so a tick's cost was a function of retention
+rather than of what arrived. Phase attribution at 1M rows: dedup scan 0.10 s,
+event read-back 1.03 s (0.70 s fetch, 0.42 s JSON), `score_buckets` 0.37 s,
+`region_buckets` rewrite 0.14-1.55 s. Note that JSON was only ~38% of the
+read-back — dropping serde would have been a non-fix, and measuring the
+phases is what showed that before any code was written.
+
+Things that cost time here and will again:
+
+- **`BaselineIndex` holds two store-wide facts that any bounded read must
+  reproduce**: `first_day` clips every trailing median, and `cells()` decides
+  which cells get a persisted baseline row. A "just read the recent slice"
+  rescore is silently wrong on both — old cells lose their baseline rows, and
+  every trailing window re-clips against the wrong first day. The fix is a
+  tail leg in the read (oldest surviving event per cell) rather than a change
+  in `analytics`. `storage::tests::bounded_rescore_matches_a_full_rebuild`
+  exists to keep that honest.
+- **Retention and ingest cost are coupled through pruning.** Pruning moves
+  the first data day, which forces a full rescore. With a raw cutoff the
+  store prunes on *every* tick and therefore rescores fully on every tick;
+  day-flooring the cutoff makes it once a day. If retention semantics are
+  ever tightened back to an exact instant, that cost comes straight back.
+- **Close the DuckDB connection before sizing the database file.** With the
+  connection open, the `.duckdb` file can read as 12 KiB while a `.duckdb.wal`
+  beside it holds ten megabytes. Sizing the wrong file makes storage look
+  free.
+- **The fixture generator produces ~315 events/day**; the online planning
+  figure is ~100k/day, over 300x more. A perf claim sized only on fixtures is
+  not a claim about the live desktop. That is why the profiling harness has a
+  second, synthesized axis, and why the fixture axis exists at all — it is
+  the real ingest path, and the synthesized one is the real volume.
+- Profile in `--release`. Debug timings for DuckDB and H3 work are noise.
+- Peak memory on Windows: `Start-Process -PassThru` does not hand back a
+  usable peak working set. Poll `WorkingSet64` on a
+  `System.Diagnostics.Process` until `HasExited` instead.
+- egui 0.36 has `Context::run_ui`, not `Context::run`, for driving frames
+  from a test harness.
+
 ## Verification discipline
 
 These rules exist because each one caught a wrong answer that a cheaper

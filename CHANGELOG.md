@@ -22,6 +22,14 @@ project with no published crate API to stabilize against.
   a place elsewhere still does not count. No new dependency, no dictionary or
   model file, and no change to the `(place, topic, window)` rollup: text is
   still borrowed for one `observe` call and dropped.
+- `apps/global-signal-desktop/tests/retention_profile.rs`, an `#[ignore]`d
+  two-axis timing harness for the store: every `events_*.json` fixture run
+  through the real ingest path, and a synthesized online-rate axis at
+  ~100k events/day across ~1,500 res-3 cells, which the fixture generator's
+  23 fixed spots cannot exercise. It reports ingest, re-ingest, incremental
+  and empty-tick latency, the six UI query paths, and database size per case.
+  Like `chatter::observe_cost` it is a measurement, not a gate — CI never
+  times it. See docs/DEVELOPMENT.md for the environment knobs.
 - Settings and About screens, reachable from the top bar on every page
   (`apps/global-signal-desktop/src/settings_screen.rs`,
   `apps/global-signal-desktop/src/about.rs`). Settings shows, per source,
@@ -81,6 +89,29 @@ project with no published crate API to stabilize against.
   seam rather than a mock MTProto server.
 
 ### Changed
+
+- Ingest no longer rescores the whole events table on every tick. A profiling
+  pass at 1x/2x/4x/10x the current data volume found the retention ceiling
+  was ingest-tick query time — not memory (1.68 GiB peak at 1M events), frame
+  time (12.5 ms for a 12,000-cell heatmap), or disk (118 MiB) — and that the
+  cost was a full rescore of everything retained, so a tick's cost tracked
+  retention rather than what arrived. `storage` now tracks the oldest
+  genuinely new timestamp per ingest and rewrites only the buckets at or
+  after it, reading back the 28-day baseline window plus a per-cell tail so
+  the result stays bit-identical to a full rebuild
+  (`storage::tests::bounded_rescore_matches_a_full_rebuild`). A tick that
+  inserts nothing and prunes nothing now skips scoring entirely. Measured on
+  the fixture axis at 10x retention: an incremental tick 517 ms → 102 ms, and
+  a tick that brings nothing new 397 ms → 8 ms. At 1,000,000 events the quiet
+  tick goes 3.2 s → 94 ms. Rendering, analytics scoring, and the storage
+  actor's single-connection ownership are unchanged — the fix is entirely
+  inside `crates/storage`.
+- The events retention cap is now enforced to the UTC day, making it a lower
+  bound: a 90-day cap keeps at least 90 days and may hold up to one day more.
+  Pruning is the one operation that forces a full rescore (it moves the
+  store's first data day, which re-clips every trailing baseline after it),
+  and a raw cutoff advances every tick and therefore pruned every tick.
+  Day-aligning it pays that cost once a day instead.
 
 - The live-source panel's per-source attribution line now comes from
   `core_types`' attribution table instead of a local `match` on the display

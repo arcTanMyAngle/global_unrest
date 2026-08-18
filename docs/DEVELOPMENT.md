@@ -80,6 +80,36 @@ package-level form works; running `--bench scoring` directly hits the lib's
 own empty libtest bench target first, which rejects criterion's `--quick`
 flag.
 
+## Retention profiling harness
+
+`apps/global-signal-desktop/tests/retention_profile.rs` is the two-axis
+timing harness behind the M8 retention work. Like `chatter::observe_cost` it
+is `#[ignore]`d — it is a measurement, not a gate, and CI never times it:
+
+~~~sh
+cargo test -p global-signal-desktop --release --test retention_profile -- --ignored --nocapture
+~~~
+
+Release mode is required; debug numbers are noise. It reports two axes:
+
+- **fixture-generator day axis** — every `events_*.json` under `fixtures/`
+  and `fixtures/generated/`, run through the real ingest path. Generate the
+  multiples first, since only the 35-day file is committed:
+  `cargo run --release -p source-fixtures --bin generate_fixtures -- --out <dir>/events_350d.json --days 350`.
+- **online-rate axis** — synthesized events at a realistic online volume
+  spread over ~1,500 res-3 cells, which the fixture generator's 23 fixed
+  spots cannot exercise.
+
+| Variable | Purpose |
+|---|---|
+| LES_PROFILE_FIXTURES | Directory of `events_*.json` for the fixture axis. Defaults to `fixtures/`. |
+| LES_PROFILE_DAYS | Comma-separated day counts for the online axis. Default `1,2,4,10`. |
+| LES_PROFILE_PER_DAY | Events per day for the online axis. Default `100000`. |
+
+The `empty` column is the one to watch when changing ingest: it is a tick
+that brings nothing new, so whatever it costs is paid on every cadence tick
+regardless of batch size.
+
 ## Desktop environment variables
 
 The desktop loads .env during startup. Process environment variables take
@@ -91,7 +121,7 @@ precedence; credentials and session files must never be committed.
 | WGPU_BACKEND | Override the wgpu backend (dx12, vulkan, or gl) when a driver misbehaves. |
 | LES_DATA_DIR | Override the desktop data directory. |
 | LES_ONLINE | Live updates default on; 0, false, or no starts with polling paused. |
-| LES_RETENTION_DAYS | Events retention cap in days. 0 or unset keeps all retained records. |
+| LES_RETENTION_DAYS | Events retention cap in days, enforced to the UTC day (a lower bound, see DATA_MODEL.md). 0 or unset keeps all retained records. |
 | LES_GDELT_DOC_ENDPOINT / LES_GDELT_EVENTS_URL | Point scheduled GDELT ingest at a local/mock endpoint. They do not configure Media search. |
 | ACLED_EMAIL / ACLED_PASSWORD | Authorized myACLED OAuth credentials. ACLED no longer uses API keys. |
 | LES_ACLED_TOKEN_URL / LES_ACLED_ENDPOINT | Local/mock ACLED OAuth or data endpoint. |
