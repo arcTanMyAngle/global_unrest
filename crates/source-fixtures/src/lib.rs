@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, NormalizeError, RawRecord,
-    SignalSource, SourceError, SourceFilters, SourceId, TimeWindow, event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, NormalizeError,
+    RawRecord, SignalFamily, SignalSource, SourceError, SourceFilters, SourceId, TimeWindow,
+    event_id,
 };
 use serde_json::Value;
 
@@ -226,11 +227,15 @@ fn normalize_gdelt_doc(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> {
             });
         }
     };
-    Ok(GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Fixtures, &source_event_id),
         source: SourceId::Fixtures,
         source_event_id,
+        family: SignalFamily::MediaAttention,
         kind: EventKind::NewsAttention,
+        // Synthetic coverage generated *about* a place, not resolved from a
+        // publisher's country the way the live DOC adapter is.
+        location_role: LocationRole::MentionedPlace,
         themes: str_list(v, "themes")
             .iter()
             .map(|t| t.to_lowercase())
@@ -244,13 +249,15 @@ fn normalize_gdelt_doc(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> {
         country_iso: req_str(v, "country_iso")?.to_owned(),
         admin1: v.get("admin1").and_then(Value::as_str).map(str::to_owned),
         h3_cell: h3_for(lat, lon)?,
-        article_count: opt_u32(v, "num_articles"),
+        volume_count: opt_u32(v, "num_articles"),
         distinct_source_count: opt_u32(v, "num_sources"),
         severity: None,
         headline: v.get("title").and_then(Value::as_str).map(str::to_owned),
         outlet_domains: str_list(v, "domains"),
         urls: str_list(v, "urls"),
-    })
+    };
+    ev.validate()?;
+    Ok(ev)
 }
 
 /// ACLED-style discrete event record.
@@ -286,11 +293,13 @@ fn normalize_acled_event(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> 
     let fatalities = v.get("fatalities").and_then(Value::as_u64).unwrap_or(0);
     // Transparent, documented mapping: 25+ fatalities saturates severity.
     let severity = ((fatalities as f32) * 0.04).min(1.0);
-    Ok(GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Fixtures, &source_event_id),
         source: SourceId::Fixtures,
         source_event_id,
+        family: SignalFamily::RecordedEvent,
         kind,
+        location_role: LocationRole::EventSite,
         themes: str_list(v, "tags")
             .iter()
             .map(|t| t.to_lowercase())
@@ -304,7 +313,7 @@ fn normalize_acled_event(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> 
         country_iso: req_str(v, "country_iso")?.to_owned(),
         admin1: v.get("admin1").and_then(Value::as_str).map(str::to_owned),
         h3_cell: h3_for(lat, lon)?,
-        article_count: opt_u32(v, "source_count"),
+        volume_count: opt_u32(v, "source_count"),
         distinct_source_count: opt_u32(v, "source_count"),
         severity: Some(severity),
         headline: v
@@ -313,7 +322,9 @@ fn normalize_acled_event(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> 
             .map(str::to_owned),
         outlet_domains: str_list(v, "domains"),
         urls: Vec::new(),
-    })
+    };
+    ev.validate()?;
+    Ok(ev)
 }
 
 #[cfg(test)]
@@ -355,7 +366,7 @@ mod tests {
         assert_eq!(e.location_precision, LocationPrecision::City);
         assert!((e.location_confidence - 0.85).abs() < 1e-6);
         assert_eq!(e.country_iso, "FRA");
-        assert_eq!(e.article_count, 14);
+        assert_eq!(e.volume_count, 14);
         assert_eq!(e.distinct_source_count, 6);
         assert_eq!(e.severity, None);
         // Paris at res 3 — must be a valid res-3 cell.
@@ -390,7 +401,7 @@ mod tests {
         assert_eq!(e.themes, vec!["elections"]);
         // 5 fatalities * 0.04 = 0.2 (hand-computed).
         assert!((e.severity.unwrap() - 0.2).abs() < 1e-6);
-        assert_eq!(e.article_count, 3);
+        assert_eq!(e.volume_count, 3);
         assert_eq!(e.country_iso, "KEN");
     }
 

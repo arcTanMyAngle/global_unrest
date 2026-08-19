@@ -25,8 +25,8 @@ pub use live::AcledSource;
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, NormalizeError, SourceId,
-    event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, NormalizeError,
+    SignalFamily, SourceId, event_id,
 };
 use serde_json::Value;
 
@@ -144,16 +144,18 @@ pub fn normalize_event(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> {
         .unwrap_or_default();
     let source_count = sources.len().min(u32::MAX as usize) as u32;
 
-    Ok(GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Acled, &source_event_id),
         source: SourceId::Acled,
         source_event_id,
+        family: SignalFamily::RecordedEvent,
         kind,
         themes,
         ts_utc,
         ingested_at: Utc::now(),
         lat,
         lon,
+        location_role: LocationRole::EventSite,
         location_precision,
         location_confidence,
         country_iso,
@@ -164,14 +166,18 @@ pub fn normalize_event(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> {
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
         h3_cell,
-        article_count: source_count,
+        // ACLED sourcing is a count of corroborating reports, not articles
+        // we hold — see docs/SIGNAL_MODEL.md on family-relative volume.
+        volume_count: source_count,
         distinct_source_count: source_count,
         severity: Some(severity),
         // Structural label only (e.g. "Armed clash") — never the `notes` body.
         headline: Some(sub_event_type.unwrap_or(event_type).to_owned()),
         outlet_domains: sources,
         urls: Vec::new(),
-    })
+    };
+    ev.validate()?;
+    Ok(ev)
 }
 
 /// ACLED `event_date` is a date; events land at 12:00 UTC (fixture convention).
@@ -288,7 +294,7 @@ mod tests {
         );
         assert_eq!(e.headline.as_deref(), Some("Armed clash"));
         assert_eq!(e.outlet_domains, vec!["Outlet One", "Outlet Two"]);
-        assert_eq!(e.article_count, 2);
+        assert_eq!(e.volume_count, 2);
         assert_eq!(e.distinct_source_count, 2);
         assert!(e.urls.is_empty());
     }

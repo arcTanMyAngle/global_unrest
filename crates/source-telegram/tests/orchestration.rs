@@ -186,7 +186,7 @@ async fn a_first_sweep_asks_for_the_recent_head_with_no_offset() {
 
 #[tokio::test]
 async fn an_incremental_sweep_passes_the_stored_mark_and_the_larger_limit() {
-    let channel = ALLOWED_CHANNELS[0];
+    let channel = ALLOWED_CHANNELS[0].name;
     let reader = FakeReader::default().with(
         channel,
         Channel {
@@ -212,15 +212,15 @@ async fn an_incremental_sweep_passes_the_stored_mark_and_the_larger_limit() {
     );
     // A channel that produced nothing on the first pass still has no mark, so
     // it asks for the head again rather than an offset of zero.
-    assert_eq!(core.mark(ALLOWED_CHANNELS[1]), None);
-    assert_eq!(reader.sweep_of(ALLOWED_CHANNELS[1]).after, None);
+    assert_eq!(core.mark(ALLOWED_CHANNELS[1].name), None);
+    assert_eq!(reader.sweep_of(ALLOWED_CHANNELS[1].name).after, None);
 }
 
 // --- the high-water mark ------------------------------------------------
 
 #[tokio::test]
 async fn the_mark_advances_to_the_newest_id_and_never_regresses() {
-    let channel = ALLOWED_CHANNELS[0];
+    let channel = ALLOWED_CHANNELS[0].name;
     let core = orchestrator();
 
     let first = FakeReader::default().with(
@@ -257,8 +257,8 @@ async fn the_mark_advances_to_the_newest_id_and_never_regresses() {
 
 #[tokio::test]
 async fn a_failing_channel_is_skipped_while_the_rest_still_roll_up() {
-    let dead = ALLOWED_CHANNELS[0];
-    let live = ALLOWED_CHANNELS[1];
+    let dead = ALLOWED_CHANNELS[0].name;
+    let live = ALLOWED_CHANNELS[1].name;
     let reader = FakeReader::default()
         .with(
             dead,
@@ -292,7 +292,7 @@ async fn a_failing_channel_is_skipped_while_the_rest_still_roll_up() {
 
 #[tokio::test]
 async fn messages_seen_before_a_mid_sweep_failure_stay_counted() {
-    let channel = ALLOWED_CHANNELS[0];
+    let channel = ALLOWED_CHANNELS[0].name;
     let reader = FakeReader::default().with(
         channel,
         Channel {
@@ -316,7 +316,7 @@ async fn messages_seen_before_a_mid_sweep_failure_stay_counted() {
 #[tokio::test]
 async fn only_completed_windows_drain_and_an_open_one_stays_pending() {
     let reader = FakeReader::default().with(
-        ALLOWED_CHANNELS[0],
+        ALLOWED_CHANNELS[0].name,
         Channel {
             history: vec![
                 msg(1, "protest in Kyiv", FINISHED_MESSAGE_TS),
@@ -364,7 +364,7 @@ async fn only_completed_windows_drain_and_an_open_one_stays_pending() {
 async fn no_raw_message_text_reaches_a_rollup() {
     const BODY: &str = "protest in Kyiv, filmed by a named eyewitness at 12 Example Street";
     let reader = FakeReader::default().with(
-        ALLOWED_CHANNELS[0],
+        ALLOWED_CHANNELS[0].name,
         Channel {
             history: vec![msg(1, BODY, FINISHED_MESSAGE_TS)],
             ..Channel::default()
@@ -404,7 +404,7 @@ async fn no_raw_message_text_reaches_a_rollup() {
 
 #[tokio::test]
 async fn the_server_filter_is_rechecked_before_a_row_promises_a_video() {
-    let channel = ALLOWED_CHANNELS[0];
+    let channel = ALLOWED_CHANNELS[0].name;
     let reader = FakeReader::default().with(
         channel,
         Channel {
@@ -458,7 +458,7 @@ async fn one_failing_channel_is_skipped_but_every_channel_failing_is_an_error() 
             ..Channel::default()
         })
         .with(
-            ALLOWED_CHANNELS[0],
+            ALLOWED_CHANNELS[0].name,
             Channel {
                 fails: true,
                 ..Channel::default()

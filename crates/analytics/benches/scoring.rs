@@ -4,7 +4,7 @@
 use std::hint::black_box;
 
 use analytics::{ScoreEvent, compose_window, score_buckets};
-use core_types::{BUCKET_SECS, EventKind};
+use core_types::{BUCKET_SECS, EventKind, SignalFamily};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Deterministic synthetic events: `n` records spread over ~200 cells and
@@ -33,12 +33,17 @@ fn synth_events(n: usize) -> Vec<ScoreEvent> {
             ScoreEvent {
                 h3_cell: 0x83_0000_0000_0000 | (r % 200), // synthetic cell keys
                 ts_epoch_s: (r % (35 * 86_400)) as i64,
+                family: if attention {
+                    SignalFamily::MediaAttention
+                } else {
+                    SignalFamily::RecordedEvent
+                },
                 kind: if attention {
                     EventKind::NewsAttention
                 } else {
                     EventKind::Protest
                 },
-                article_count: (r % 40) as u32 + 1,
+                volume_count: (r % 40) as u32 + 1,
                 distinct_source_count: (r % 4) as u32 + 1,
                 location_confidence: 0.85,
                 severity: (!attention).then_some(((r % 10) as f32) * 0.1),

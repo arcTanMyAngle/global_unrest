@@ -9,32 +9,60 @@ The single normalized record every source adapter produces.
 | `id` | `u64` | Deterministic FNV-1a hash of `(source, source_event_id)` — re-ingesting the same record is idempotent. |
 | `source` | `SourceId` | `Fixtures` \| `Gdelt` \| `Acled` \| `Noaa` \| `Ioda` \| `Bluesky` \| `Telegram`. |
 | `source_event_id` | `String` | Source-native identifier. |
-| `kind` | `EventKind` | `NewsAttention` \| `Protest` \| `Conflict` \| `Disruption` \| `Other`. |
+| `family` | `SignalFamily` | `MediaAttention` \| `Chatter` \| `RecordedEvent` \| `OfficialAlert` \| `Measurement`. **Ask this, never `kind`** — it decides scoring, digest, and display membership. See docs/SIGNAL_MODEL.md. |
+| `kind` | `EventKind` | Within-family subtype, not an independent axis: `NewsAttention` \| `Chatter` \| `Protest` \| `Conflict` \| `Disruption` \| `Alert` \| `Measurement` \| `Other`. Must satisfy `family.permits(kind)`; an off-matrix pair is a normalization error. |
 | `themes` | `Vec<String>` | Coarse topic tags from the source. |
 | `ts_utc` | `DateTime<Utc>` | Event/observation time. |
 | `ingested_at` | `DateTime<Utc>` | Set at normalization. |
 | `lat`, `lon` | `f64` | WGS84. |
+| `location_role` | `LocationRole` | What the coordinates *mean*: `EventSite` \| `MentionedPlace` \| `PublisherOrigin` \| `ReportingJurisdiction`. A `PublisherOrigin` record says where a story was filed, not where anything happened. |
 | `location_precision` | `LocationPrecision` | `Country` \| `Admin1` \| `City` \| `Exact`. |
 | `location_confidence` | `f32` | 0–1. |
 | `country_iso` | `String` | ISO 3166-1 alpha-3. |
 | `admin1` | `Option<String>` | |
 | `h3_cell` | `u64` | H3 cell at **resolution 3** (canonical); parents derived, never stored. |
-| `article_count` | `u32` | See counting semantics below. |
-| `distinct_source_count` | `u32` | Distinct outlets. |
+| `volume_count` | `u32` | How much of **the family's own unit** this record represents — articles, posts, records, alerts, or samples. Never summed across families. See counting semantics below. |
+| `distinct_source_count` | `u32` | Distinct outlets behind this record. Meaningful for `MediaAttention` and for coverage *of* a `RecordedEvent`; **zero** for chatter, alerts, and measurements. |
 | `severity` | `Option<f32>` | 0–1 when the source provides one. |
-| `headline` | `Option<String>` | Metadata only — **never article bodies**. |
+| `headline` | `Option<String>` | Metadata only — **never article bodies**, and never a string an adapter invented to fill the field. Chatter leaves it `None`; the UI composes its label at render time. |
 | `outlet_domains` | `Vec<String>` | |
 | `urls` | `Vec<String>` | Links back to sources. |
 
-### Counting semantics — attention vs. events
+### Counting semantics — one unit per family
 
-`NewsAttention` records are **attention observations** (how much coverage a
-place/topic got in a window), not discrete real-world events. Event-kind
-records (`Protest`/`Conflict`/`Disruption`) are discrete occurrences whose
-`article_count`/`distinct_source_count` describe coverage *of that event*.
-Scoring treats the two classes separately (attention_score vs unrest_score);
-mixing them double-counts. The UI keeps "media attention" and "event data"
-visually separated for the same reason.
+`volume_count` has no meaning on its own; its unit comes from `family`.
+docs/SIGNAL_MODEL.md is the contract, enforced by `SignalFamily::permits`,
+`SignalFamily::volume_unit`, and tests. Summary:
+
+| Family | Kinds | Unit | Unrest | Generic spike | `combined_score` | Digest |
+|---|---|---|:--:|:--:|:--:|---|
+| `MediaAttention` | `NewsAttention` | articles | no | yes | yes (attention term) | attention section |
+| `Chatter` | `Chatter` | posts | no | **no** | **no** | **excluded** |
+| `RecordedEvent` | `Protest`/`Conflict`/`Disruption`/`Other` | records | **yes** | yes | yes (unrest term) | event section |
+| `OfficialAlert` | `Alert` | alerts | **no** | no | no | event section, labelled official |
+| `Measurement` | `Measurement` | samples | no | no | no | excluded |
+
+Three consequences worth stating in full, because each one was previously
+false in the database:
+
+- **Chatter is not media attention.** Rollups are their own family with their
+  own unit. Post counts reach article totals, outlet diversity, attention
+  source counts, unrest, the generic spike, the trailing baseline, and Daily
+  Events **nowhere**. Chatter is surfaced in the app UI only.
+- **An official alert is not unrest.** NOAA/NWS warnings are
+  `OfficialAlert`/`Alert`, so they leave the unrest component and appear in
+  the Daily Events event section *named as warnings*. A weather warning is a
+  government message about a forecast, not a civil-unrest record.
+- **A measured outage is a record.** IODA is `RecordedEvent`/`Disruption`, not
+  an alert about one; `Measurement` is declared and currently unused (no
+  adapter, no lane, no source).
+
+`MediaAttention` records are attention observations (how much coverage a
+place/topic got in a window), not discrete real-world events; `RecordedEvent`
+records are discrete occurrences whose `distinct_source_count` describes
+coverage *of that event*. Scoring keeps the two apart (attention_score vs
+unrest_score) and the UI keeps "media attention" and "event data" visually
+separated for the same reason.
 
 ### Precision rendering contract
 
@@ -99,11 +127,17 @@ tests additionally check the table stays populated, exactly-once per
 Two independent `source-gdelt` paths produce `GeoTemporalEvent`s (both keyless,
 fallible per record → `ingest_log`):
 
-- **DOC 2.0 `artlist` JSON** → `NewsAttention`. The DOC feed carries no
-  per-article coordinates, so each article is geocoded to its **source
-  country** at `Country` precision (confidence 0.4). This is honest about the
-  feed's granularity and matches the precision rendering contract (country
-  attention shades regions, never fake point hotspots). `source_event_id` is
+- **DOC 2.0 `artlist` JSON** → `MediaAttention`/`NewsAttention`. The DOC feed
+  carries no per-article coordinates, so each article is geocoded to its
+  **source country** at `Country` precision (confidence 0.4) and carries
+  `LocationRole::PublisherOrigin`: the coordinates say where the story was
+  filed, not where anything happened. Those rows are therefore **excluded from
+  the spatial marker layer** and labelled "publisher-origin coverage" in Daily
+  Events, rather than drawn as attention at a place no one reported on. This
+  is honest about the feed's granularity and matches the precision rendering
+  contract (country attention shades regions, never fake point hotspots).
+  Restoring a story-located attention layer depends on the GDELT GEO/GKG
+  spike, not on relabelling this one. `source_event_id` is
   the article URL (stable dedup key). Themes come from the query (a DOC query
   is usually *for* a theme), lower-cased. Unknown source countries fail per
   record — never guessed. See `source-gdelt::country`.
@@ -122,8 +156,10 @@ fallible per record → `ingest_log`):
 
 `source-ioda` polls the keyless `GET /outages/events?entityType=country`
 endpoint (Internet Outage Detection and Analysis, Georgia Tech) and produces
-one `Disruption` event per outage record. Two honesty rules distinguish this
-source from the others:
+one `RecordedEvent`/`Disruption` per outage record — a *measured* outage is a
+discrete record, not an alert about one, so it counts as unrest-family
+evidence rather than as an official warning. Two honesty rules distinguish
+this source from the others:
 
 - **Country-only geocoding, so never a point marker.** IODA identifies a
   location only as `country/<ISO alpha-2>` — no finer geometry exists to
@@ -169,8 +205,9 @@ this pipeline; see [Transient media research](#transient-media-research).
 and `source-telegram`:
 
 - **`ChatterRollup` is the privacy boundary.** It is a count for a
-  `(place, topic, window)` triple — `place_name`, `country_iso`, lat/lon,
-  precision, `topic`, `window_start_epoch_s`, `window_secs`, `post_count`.
+  `(place, topic, channel class, window)` tuple — `place_name`,
+  `country_iso`, lat/lon, precision, `topic`, `channel_class`,
+  `window_start_epoch_s`, `window_secs`, `post_count`.
   There is deliberately no field for post text, author identity, or a URL,
   and `RawRecord::excerpt` formats the chatter line by hand rather than
   deriving `Debug`, so a future field cannot start leaking into
@@ -242,12 +279,29 @@ and `source-telegram`:
   native-script tables follow the same rules and are pinned the same way:
   bare ລາວ is not a Laos token because it is also the everyday Lao pronoun
   "he/she", the direct parallel to "us" not being a United States alias.
-- **Chatter is attention, not an event.** Rollups normalize to
-  `EventKind::NewsAttention` with `post_count` in `article_count`, so they
-  count in the attention component and never in the unrest component —
-  the same class as GDELT article counts. `location_confidence` is 0.5,
-  stating in the number the UI already shows that keyword place-matching is
-  crude. `themes` is `["chatter", <topic>]`.
+- **Chatter is its own family — neither attention nor an event.** Rollups
+  normalize to `SignalFamily::Chatter`/`EventKind::Chatter` with `post_count`
+  in `volume_count`, counted in **posts**, so they enter the attention
+  component, the unrest component, the generic spike, the trailing baseline
+  and Daily Events *nowhere*; they get a per-family spike instead.
+  `location_role` is `MentionedPlace` — a post naming Kyiv is not a record of
+  something at Kyiv. **No headline is written**: a generated summary is a
+  claim the row cannot support, so the UI composes "N posts mentioned X" at
+  render time. `distinct_source_count` is 0 and `outlet_domains` is empty —
+  bsky.app and t.me are not outlets. `location_confidence` is 0.5, stating in
+  the number the UI already shows that keyword place-matching is crude.
+  `themes` is `["chatter", <topic>]`.
+- **Channel class is part of the aggregation key, not the rollup's decoration.**
+  Telegram holds one accumulator for all channels, so a class field added at
+  rollup time would arrive after partisan, combatant and monitor messages had
+  already been summed together. `ChannelClass` (`Unspecified` \| `Monitor` \|
+  `Outlet` \| `Partisan` \| `Combatant` \| `State`) therefore enters
+  `observe()`, the accumulator key, and the derived `source_event_id`, so
+  classes are never summed and two classes' rollups for the same
+  place/topic/window cannot collide. It is a property of a *channel*, never of
+  a person, so it does not touch the `ChatterRollup` privacy boundary. The
+  default is `Unspecified`, never `Monitor` — defaulting would fabricate
+  provenance.
 - **Only completed windows are published.** `source_event_id` is
   `{place}-{topic}-{window_start}`, so publishing a half-counted window
   would claim that id and the remainder would then be dropped by
@@ -321,9 +375,12 @@ Physical key is H3-only; country rollups are queries/views, never a second
 physical table (the heatmap's world-zoom rollup to H3 res 1/2 derives
 parents via `geo_utils::cell_parent` at display time). Carries:
 
-- raw counts: `event_count`, `attention_count`, `article_count`,
-  `source_count` (summed upper bound) and `distinct_outlets` (exact
-  distinct outlet domains);
+- raw counts, all of which are now **family-scoped by construction**:
+  `event_count` (`RecordedEvent` records only — an official alert is not
+  unrest), `attention_count`, `article_count`, `source_count` (summed upper
+  bound) and `distinct_outlets` (exact distinct outlet domains). The last
+  three are **attention-only**: chatter posts contribute to article totals,
+  outlet diversity and attention source counts nowhere;
 - M2 score components, each in [0, 1], stored separately and shown
   separately: `attention_score`, `unrest_score`, `spike_score` (0.5 =
   neutral), `combined_score`, plus `baseline` (the spike denominator as of
@@ -331,7 +388,14 @@ parents via `geo_utils::cell_parent` at display time). Carries:
 
 ## DuckDB schema (analytics store)
 
-- `schema_version(version, applied_at)` — migration ledger.
+- `schema_version(version, applied_at)` — migration ledger. Migrations are
+  applied by version from `crates/storage/migrations/`: `0001_init`,
+  `0002_scores`, `0003_daily_digest`, `0004_signal_families`.
+- `storage_meta(key, value)` — small durable flags owned by the store itself,
+  currently `derived_rebuild_required`. A migration that invalidates derived
+  rows sets it rather than rebuilding inline; `StorageHandle::open` performs
+  the rebuild before serving a query and then clears it, so a marker left set
+  cannot make every open rescore the world.
 - `events` — one row per `GeoTemporalEvent`; `themes`/`outlet_domains`/`urls`
   stored as JSON text; timestamps as epoch seconds (`BIGINT`). Under a
   **retention cap** (M3, online volumes ~100k/day) rows older than *N* days
@@ -369,8 +433,46 @@ parents via `geo_utils::cell_parent` at display time). Carries:
   duplicate ticks, and a backfill landing mid-history.
 - `baselines` — per (h3_cell, time-of-day bucket): the current trailing
   28-day median and its `sample_days` (< `MIN_BASELINE_DAYS` ⇒ cold start).
+- `family_buckets(h3_cell, bucket_start, family, record_count, volume_count)`
+  and `family_baselines(h3_cell, tod_bucket, family, baseline, sample_days,
+  computed_at_epoch_s)` — the per-family half of the same derived data,
+  rebuilt by the same pass. **Long-form on purpose**: a sixth signal family
+  must be a row, not a schema migration, and `family_baselines` is the shape
+  the silence-zone work needs (one baseline per family per cell per slot,
+  rather than one combined number that cannot say which signal went quiet).
 - `ingest_log` — one row per failed/refused record: source, reason, raw
   excerpt, timestamp. Normalization failures are never silently dropped.
+
+### Migration 0004 — signal families
+
+`family` and `location_role` are NOT NULL columns on a table that already has
+rows, and **DuckDB cannot add a NOT NULL column in place**. So 0004 uses a
+shadow table: create `events_v4`, backfill it with a classifying `SELECT`,
+swap the names, drop the old table. `article_count` is renamed to
+`volume_count` in the same pass.
+
+The backfill classifies **per record, not per source**, because `gdelt` is two
+adapters writing to one `SourceId`:
+
+| Rows | Family / role |
+|---|---|
+| `gdelt` + `news_attention` | `MediaAttention` / `PublisherOrigin` |
+| other `news_attention` | `MediaAttention` / `MentionedPlace` |
+| `gdelt` Events, `acled` | `RecordedEvent` / `EventSite` |
+| `noaa` | `OfficialAlert` / `ReportingJurisdiction` (leaves the unrest count) |
+| `ioda` | `RecordedEvent` / `EventSite` (a measured outage is a record) |
+| `bluesky`, `telegram` | `Chatter` / `MentionedPlace`, class `Unspecified` |
+
+Chatter rows also lose what v3 invented for them: the synthesized headline
+becomes NULL, `outlet_domains` becomes `[]`, and `distinct_source_count`
+becomes 0. All derived tables are dropped and recreated; the migration does
+**not** rebuild them inline (that pass runs on ingest or purge) but sets
+`storage_meta.derived_rebuild_required`, which `open` honours before serving
+the first query. `daily_digest` gains `facts_schema_version` and is emptied,
+because prose written from the old counts describes numbers that were never
+true. Four tests in `crates/storage/src/lib.rs` migrate a genuinely
+v3-shaped database and assert the classification, the rebuilt counts, the
+digest invalidation, and idempotence.
 
 ## Daily Events cache
 
@@ -379,6 +481,12 @@ It is keyed by a UTC calendar day and records the model, generation time,
 separate media-attention and event-data prose, and the two record counts the
 prose was generated from. An explicit regeneration replaces that day's row.
 There is intentionally no combined-summary column.
+
+Migration 0004 adds `facts_schema_version`, stamped when a digest is stored
+and checked when one is loaded. Rows below the current version are pruned at
+open and never returned, so prose written under an older meaning of the counts
+cannot be presented as current — the alternative, showing it with a caveat, is
+still showing a number that was never true.
 
 The cache is not part of the worker-to-API snapshot contract. It belongs to
 the desktop's local analytics store and is never exposed by services/api.

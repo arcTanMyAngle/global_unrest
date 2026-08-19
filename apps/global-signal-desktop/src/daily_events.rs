@@ -224,7 +224,7 @@ impl App {
             HEADING_ATTENTION,
             digest.attention_records,
             "how much coverage a place drew — a biased proxy for what happened, \
-             not a record of it",
+             not a record of it. Counted where the outlet is published, not              where the story happened",
             &digest.media_attention,
         );
         ui.add_space(14.0);
@@ -234,7 +234,7 @@ impl App {
             HEADING_EVENTS,
             digest.event_records,
             "reported occurrences from the event sources, independent of how much \
-             coverage they drew",
+             coverage they drew. Includes official alerts, which are warnings              issued by an agency rather than observed incidents",
             &digest.event_data,
         );
 

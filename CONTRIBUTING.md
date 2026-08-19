@@ -46,6 +46,7 @@ Update the relevant documentation in the same pull request:
 |---|---|
 | User-visible capability or setup | README.md and CHANGELOG.md under Unreleased |
 | Domain type, migration, local cache, or transient media data | docs/DATA_MODEL.md |
+| Signal family, volume unit, location role, or score/digest/layer membership | docs/SIGNAL_MODEL.md (read it *before* changing one) |
 | Source, license, privacy boundary, third-party processing, or media-query scope | docs/SAFETY_AND_PRIVACY.md |
 | HTTP route, response, or API behavior | docs/API.md |
 | Runtime topology, crate ownership, or handoff | docs/ARCHITECTURE.md |

@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{TimeZone, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, LocationPrecision, SignalSource, SourceFilters, SourceId,
-    TimeWindow, event_id,
+    EventKind, GeoTemporalEvent, LocationPrecision, LocationRole, SignalFamily, SignalSource,
+    SourceFilters, SourceId, TimeWindow, event_id,
 };
 use source_fixtures::FixtureSource;
 use storage::StorageHandle;
@@ -368,10 +368,20 @@ fn synth_events(
                 id: event_id(SourceId::Fixtures, &sid),
                 source: SourceId::Fixtures,
                 source_event_id: sid,
+                family: if attention {
+                    SignalFamily::MediaAttention
+                } else {
+                    SignalFamily::RecordedEvent
+                },
                 kind: if attention {
                     EventKind::NewsAttention
                 } else {
                     EventKind::Protest
+                },
+                location_role: if attention {
+                    LocationRole::MentionedPlace
+                } else {
+                    LocationRole::EventSite
                 },
                 themes: vec![themes[(r % themes.len() as u64) as usize].to_string()],
                 ts_utc: ts,
@@ -387,7 +397,7 @@ fn synth_events(
                 country_iso: "ZZZ".into(),
                 admin1: None,
                 h3_cell: cell,
-                article_count: (r % 40) as u32 + 1,
+                volume_count: (r % 40) as u32 + 1,
                 distinct_source_count: (r % 4) as u32 + 1,
                 severity: (!attention).then_some(((r % 10) as f32) * 0.1),
                 headline: Some("[synthetic] profiling record".into()),

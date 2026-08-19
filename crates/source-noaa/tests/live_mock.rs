@@ -128,7 +128,8 @@ async fn fetch_requests_actual_alerts_and_normalizes_them() {
 
     let events = src.normalize(&raws[0]).unwrap();
     assert_eq!(events[0].source_event_id, "urn:1");
-    assert_eq!(events[0].kind, core_types::EventKind::Disruption);
+    assert_eq!(events[0].family, core_types::SignalFamily::OfficialAlert);
+    assert_eq!(events[0].kind, core_types::EventKind::Alert);
 }
 
 #[tokio::test]

@@ -231,11 +231,12 @@ mod tests {
     #[test]
     fn every_allowlisted_channel_produces_a_playable_post_url() {
         for channel in ALLOWED_CHANNELS {
-            let url = post_url(channel, MESSAGE_ID)
-                .unwrap_or_else(|| panic!("{channel} produced no post URL"));
+            let name = channel.name;
+            let url =
+                post_url(name, MESSAGE_ID).unwrap_or_else(|| panic!("{name} produced no post URL"));
             assert!(
                 core_types::embed_for(&url).is_some(),
-                "{channel} produced an unplayable URL: {url}"
+                "{name} produced an unplayable URL: {url}"
             );
         }
     }

@@ -16,7 +16,8 @@
 
 use chrono::{TimeZone, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, SourceId, event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, SignalFamily,
+    SourceId, event_id,
 };
 use storage::StorageHandle;
 
@@ -42,7 +43,15 @@ fn event(
         id: event_id(source, source_event_id),
         source,
         source_event_id: source_event_id.to_string(),
+        family: kind.family(),
         kind,
+        // The synthetic attention rows stand in for GDELT DOC, which resolves
+        // the publisher's country rather than the story's place.
+        location_role: if kind.family() == SignalFamily::MediaAttention {
+            LocationRole::PublisherOrigin
+        } else {
+            LocationRole::EventSite
+        },
         themes: vec!["synthetic".to_string()],
         ts_utc: ts,
         ingested_at: Utc::now(),
@@ -53,7 +62,7 @@ fn event(
         country_iso: country_iso.to_string(),
         admin1: None,
         h3_cell: h3(lat, lon),
-        article_count: 1,
+        volume_count: 1,
         distinct_source_count: 1,
         severity: None,
         headline: Some(format!("[synthetic] {headline}")),

@@ -24,8 +24,8 @@ use daily_digest::{
 };
 
 use core_types::{
-    EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, RegionBucket, SourceId,
-    bucket_start_epoch,
+    EventKind, GeoTemporalEvent, IngestFailure, LocationPrecision, LocationRole, RegionBucket,
+    SignalFamily, SourceId, bucket_start_epoch,
 };
 use duckdb::{Connection, params};
 
@@ -33,7 +33,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_scores.sql")),
     (3, include_str!("../migrations/0003_daily_digest.sql")),
+    (4, include_str!("../migrations/0004_signal_families.sql")),
 ];
+
+/// Version of the *facts* a cached Daily Events digest was generated from.
+///
+/// Bump when a change alters what the day's numbers mean, not merely how they
+/// are stored. v1 is the family split: before it, chatter rollups were counted
+/// as media attention, so pre-v1 prose describes a day that never happened.
+/// Cached rows below this version are dropped rather than shown.
+pub const DIGEST_FACTS_SCHEMA_VERSION: i32 = 1;
 
 /// Cap on rows returned to the UI in one query, as a memory safety valve.
 const MAX_POINT_ROWS: usize = 100_000;
@@ -82,11 +91,18 @@ pub struct EventPoint {
     pub id: u64,
     pub lat: f64,
     pub lon: f64,
+    pub family: SignalFamily,
     pub kind: EventKind,
+    /// What this point's coordinates are a statement about. The map layer
+    /// checks it: a publisher-origin record is not evidence about the place
+    /// it is drawn on (docs/SIGNAL_MODEL.md).
+    pub location_role: LocationRole,
     pub precision: LocationPrecision,
     pub confidence: f32,
     pub ts_epoch_s: i64,
-    pub article_count: u32,
+    /// Volume in this record's family unit — articles, records, alerts, or
+    /// posts. Never summed across families.
+    pub volume_count: u32,
     pub headline: Option<String>,
     /// 0.0–1.0 when the source provides one (docs/VISUALIZATION.md V1 item 3).
     pub severity: Option<f32>,
@@ -95,12 +111,14 @@ pub struct EventPoint {
     pub has_video: bool,
 }
 
-/// One `(bucket, kind)` count from the full-extent timeline histogram query.
-/// `kind` includes `NewsAttention` — callers separate it from discrete-event
-/// kinds (attention is drawn as a line overlay, never stacked with events).
+/// One `(bucket, family, kind)` count from the full-extent timeline histogram
+/// query. Every family is returned; the caller decides which lane each one
+/// belongs to. `family` is what that decision must be made on — `kind` alone
+/// cannot say whether a row is stackable (docs/SIGNAL_MODEL.md).
 #[derive(Debug, Clone, Copy)]
 pub struct TimelineHistogramPoint {
     pub bucket_start: i64,
+    pub family: SignalFamily,
     pub kind: EventKind,
     pub count: u32,
 }
@@ -121,12 +139,14 @@ pub struct AlertCell {
 #[derive(Debug, Clone)]
 pub struct HeadlineRow {
     pub ts_epoch_s: i64,
+    pub family: SignalFamily,
     pub kind: EventKind,
     pub headline: String,
     pub outlet_domains: Vec<String>,
     pub confidence: f32,
     pub precision: LocationPrecision,
-    pub article_count: u32,
+    /// Volume in `family`'s own unit — see docs/SIGNAL_MODEL.md.
+    pub volume_count: u32,
 }
 
 /// Real source links associated with one record in the selected region.
@@ -150,9 +170,16 @@ pub struct RegionDetail {
     pub top_themes: Vec<(String, u32)>,
     pub headlines: Vec<HeadlineRow>,
     pub source_links: Vec<SourceLinkRow>,
+    /// Attention-only by construction: outlets are counted from
+    /// `MediaAttention` records and nothing else (docs/SIGNAL_MODEL.md).
     pub distinct_outlets: u32,
     pub mean_confidence: f32,
+    /// Attention-only by construction. Volume from other families is measured
+    /// in records, alerts, or posts and is never added in here.
     pub total_articles: u64,
+    /// Posts counted by `Chatter` rollups in this cell/window, kept in its own
+    /// field precisely so it can never be added to `total_articles`.
+    pub chatter_posts: u64,
     /// Window-composed score components (`analytics::compose_window` over
     /// this cell's stored buckets); `None` when the window holds no buckets.
     pub scores: Option<analytics::WindowScores>,
@@ -414,6 +441,8 @@ impl StorageHandle {
             None => Connection::open_in_memory()?,
         };
         migrate(&conn)?;
+        rebuild_if_marked(&conn)?;
+        prune_stale_digests(&conn)?;
 
         let (tx, rx) = mpsc::channel::<Cmd>();
         let join = std::thread::Builder::new()
@@ -866,7 +895,9 @@ fn do_ingest(
                 u64_to_db(ev.id),
                 ev.source.as_str(),
                 ev.source_event_id,
+                ev.family.as_str(),
                 ev.kind.as_str(),
+                ev.location_role.as_str(),
                 serde_json::to_string(&ev.themes).unwrap_or_else(|_| "[]".into()),
                 ev.ts_utc.timestamp(),
                 ev.ingested_at.timestamp(),
@@ -877,7 +908,7 @@ fn do_ingest(
                 ev.country_iso,
                 ev.admin1,
                 u64_to_db(ev.h3_cell),
-                ev.article_count,
+                ev.volume_count,
                 ev.distinct_source_count,
                 ev.severity,
                 ev.headline,
@@ -967,7 +998,9 @@ fn do_purge_source(
             id BIGINT PRIMARY KEY,
             source VARCHAR NOT NULL,
             source_event_id VARCHAR NOT NULL,
+            family VARCHAR NOT NULL,
             kind VARCHAR NOT NULL,
+            location_role VARCHAR NOT NULL,
             themes VARCHAR NOT NULL,
             ts_epoch_s BIGINT NOT NULL,
             ingested_at_epoch_s BIGINT NOT NULL,
@@ -978,7 +1011,7 @@ fn do_purge_source(
             country_iso VARCHAR NOT NULL,
             admin1 VARCHAR,
             h3_cell BIGINT NOT NULL,
-            article_count INTEGER NOT NULL,
+            volume_count INTEGER NOT NULL,
             distinct_source_count INTEGER NOT NULL,
             severity REAL,
             headline VARCHAR,
@@ -1099,9 +1132,34 @@ fn rebuild_buckets(conn: &Connection, from: Option<i64>) -> Result<(), StorageEr
         app.flush()?;
     }
 
+    match from {
+        None => conn.execute("DELETE FROM family_buckets", [])?,
+        Some(t) => conn.execute(
+            "DELETE FROM family_buckets WHERE bucket_start >= ?",
+            params![t],
+        )?,
+    };
+    {
+        let mut app = conn.appender("family_buckets")?;
+        for f in scored
+            .family_buckets
+            .iter()
+            .filter(|f| from.is_none_or(|t| f.bucket_start >= t))
+        {
+            app.append_row(params![
+                u64_to_db(f.h3_cell),
+                f.bucket_start,
+                f.family.as_str(),
+                f.record_count as i32,
+                f.volume_count as i64,
+            ])?;
+        }
+        app.flush()?;
+    }
+
+    let computed_at = Utc::now().timestamp();
     conn.execute("DELETE FROM baselines", [])?;
     {
-        let computed_at = Utc::now().timestamp();
         let mut app = conn.appender("baselines")?;
         for r in &scored.baselines {
             app.append_row(params![
@@ -1114,11 +1172,80 @@ fn rebuild_buckets(conn: &Connection, from: Option<i64>) -> Result<(), StorageEr
         }
         app.flush()?;
     }
+
+    conn.execute("DELETE FROM family_baselines", [])?;
+    {
+        let mut app = conn.appender("family_baselines")?;
+        for r in &scored.family_baselines {
+            app.append_row(params![
+                u64_to_db(r.h3_cell),
+                i32::from(r.tod_bucket),
+                r.family.as_str(),
+                r.baseline,
+                r.sample_days as i32,
+                computed_at,
+            ])?;
+        }
+        app.flush()?;
+    }
+
+    clear_rebuild_marker(conn)?;
+    Ok(())
+}
+
+/// The v4 migration leaves `derived_rebuild_required` set, because migrating
+/// does not itself rescore. Honour it once at open: without this the app would
+/// answer from empty derived tables and present that as "no signal".
+fn rebuild_if_marked(conn: &Connection) -> Result<(), StorageError> {
+    let marked: bool = conn
+        .query_row(
+            "SELECT count(*) FROM storage_meta
+              WHERE key = 'derived_rebuild_required' AND value = '1'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)?;
+    if marked {
+        tracing::info!("derived tables marked stale by a migration; rebuilding");
+        rebuild_buckets(conn, None)?;
+    }
+    Ok(())
+}
+
+/// Drop cached Daily Events prose written from an older facts schema.
+///
+/// The prose is not regenerable from the row — it is what a model said about
+/// facts we have since redefined. A digest written when chatter counted as
+/// media attention describes a world this build no longer reports, so it is
+/// deleted rather than shown with a caveat. `NULL` means "written before the
+/// version existed" and is equally stale.
+fn prune_stale_digests(conn: &Connection) -> Result<(), StorageError> {
+    let dropped = conn.execute(
+        "DELETE FROM daily_digest
+         WHERE facts_schema_version IS NULL OR facts_schema_version < ?",
+        params![DIGEST_FACTS_SCHEMA_VERSION],
+    )?;
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            version = DIGEST_FACTS_SCHEMA_VERSION,
+            "dropped cached digests generated from an older facts schema"
+        );
+    }
+    Ok(())
+}
+
+fn clear_rebuild_marker(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE storage_meta SET value = '0' WHERE key = 'derived_rebuild_required'",
+        [],
+    )?;
     Ok(())
 }
 
 /// The event columns scoring consumes, in the order both read paths bind.
-const SCORE_EVENT_COLS: &str = "h3_cell, ts_epoch_s, kind, article_count, distinct_source_count,
+const SCORE_EVENT_COLS: &str =
+    "h3_cell, ts_epoch_s, family, kind, volume_count, distinct_source_count,
      location_confidence, severity, location_precision, themes, outlet_domains";
 
 /// Read back the event columns that scoring consumes.
@@ -1156,13 +1283,14 @@ fn read_score_events_since(
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
+            r.get::<_, String>(3)?,
             r.get::<_, i64>(4)?,
-            r.get::<_, f32>(5)?,
-            r.get::<_, Option<f32>>(6)?,
-            r.get::<_, String>(7)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, f32>(6)?,
+            r.get::<_, Option<f32>>(7)?,
             r.get::<_, String>(8)?,
             r.get::<_, String>(9)?,
+            r.get::<_, String>(10)?,
         ))
     };
     let rows = match since {
@@ -1171,12 +1299,14 @@ fn read_score_events_since(
     };
     let mut out = Vec::new();
     for row in rows {
-        let (cell, ts, kind, articles, sources, conf, severity, precision, themes, outlets) = row?;
+        let (cell, ts, family, kind, volume, sources, conf, severity, precision, themes, outlets) =
+            row?;
         out.push(analytics::ScoreEvent {
             h3_cell: u64_from_db(cell),
             ts_epoch_s: ts,
+            family: parse_family(&family)?,
             kind: parse_kind(&kind)?,
-            article_count: articles.max(0) as u32,
+            volume_count: volume.max(0) as u32,
             distinct_source_count: sources.max(0) as u32,
             location_confidence: conf,
             severity,
@@ -1240,23 +1370,25 @@ fn do_theme_vocab(conn: &Connection) -> Result<Vec<(String, u32)>, StorageError>
 /// so this doesn't depend on DuckDB's integer/float division rules.
 fn do_timeline_histogram(conn: &Connection) -> Result<Vec<TimelineHistogramPoint>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT ts_epoch_s - (ts_epoch_s % ?) AS bucket_start, kind, COUNT(*) AS cnt
+        "SELECT ts_epoch_s - (ts_epoch_s % ?) AS bucket_start, family, kind, COUNT(*) AS cnt
          FROM events
-         GROUP BY 1, 2
+         GROUP BY 1, 2, 3
          ORDER BY 1",
     )?;
     let rows = stmt.query_map(params![core_types::BUCKET_SECS], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
-            r.get::<_, i64>(2)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (bucket_start, kind, count) = row?;
+        let (bucket_start, family, kind, count) = row?;
         out.push(TimelineHistogramPoint {
             bucket_start,
+            family: parse_family(&family)?,
             kind: parse_kind(&kind)?,
             count: count.max(0) as u32,
         });
@@ -1334,6 +1466,15 @@ fn select_buckets(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+fn parse_family(s: &str) -> Result<SignalFamily, StorageError> {
+    SignalFamily::parse(s).ok_or_else(|| StorageError::Corrupt(format!("unknown family `{s}`")))
+}
+
+fn parse_role(s: &str) -> Result<LocationRole, StorageError> {
+    LocationRole::parse(s)
+        .ok_or_else(|| StorageError::Corrupt(format!("unknown location role `{s}`")))
+}
+
 fn parse_kind(s: &str) -> Result<EventKind, StorageError> {
     EventKind::parse(s).ok_or_else(|| StorageError::Corrupt(format!("unknown kind `{s}`")))
 }
@@ -1357,8 +1498,9 @@ fn do_query_points(
     video_only: bool,
 ) -> Result<Vec<EventPoint>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT id, lat, lon, kind, location_precision, location_confidence,
-                ts_epoch_s, article_count, headline, themes, severity, source, urls
+        "SELECT id, lat, lon, family, kind, location_role, location_precision,
+                location_confidence, ts_epoch_s, volume_count, headline, themes,
+                severity, source, urls
          FROM events
          WHERE ts_epoch_s >= ? AND ts_epoch_s < ?
            AND location_precision IN ('city', 'exact')
@@ -1375,14 +1517,16 @@ fn do_query_points(
                 r.get::<_, f64>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, f32>(5)?,
-                r.get::<_, i64>(6)?,
-                r.get::<_, i64>(7)?,
-                r.get::<_, Option<String>>(8)?,
-                r.get::<_, String>(9)?,
-                r.get::<_, Option<f32>>(10)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, f32>(7)?,
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?,
+                r.get::<_, Option<String>>(10)?,
                 r.get::<_, String>(11)?,
-                r.get::<_, String>(12)?,
+                r.get::<_, Option<f32>>(12)?,
+                r.get::<_, String>(13)?,
+                r.get::<_, String>(14)?,
             ))
         },
     )?;
@@ -1392,11 +1536,13 @@ fn do_query_points(
             id,
             lat,
             lon,
+            family,
             kind,
+            role,
             precision,
             confidence,
             ts,
-            articles,
+            volume,
             headline,
             themes_s,
             severity,
@@ -1424,11 +1570,13 @@ fn do_query_points(
             id: u64_from_db(id),
             lat,
             lon,
+            family: parse_family(&family)?,
             kind,
+            location_role: parse_role(&role)?,
             precision: parse_precision(&precision)?,
             confidence,
             ts_epoch_s: ts,
-            article_count: articles as u32,
+            volume_count: volume as u32,
             headline,
             severity,
             source: parse_source(&source_s)?,
@@ -1470,10 +1618,12 @@ fn do_region_events(
     offset: usize,
     limit: usize,
 ) -> Result<RegionEventsPage, StorageError> {
-    // `kind <> 'news_attention'` is the attention/event separation, enforced
-    // here rather than in the UI so no caller can accidentally opt out of it.
+    // The event half is a *family* predicate, never "everything that is not
+    // attention" — that inverted form is what let chatter rollups land in the
+    // event list. Enforced here rather than in the UI so no caller can
+    // accidentally opt out of it. See docs/SIGNAL_MODEL.md.
     const WHERE: &str = "WHERE h3_cell = ? AND ts_epoch_s >= ? AND ts_epoch_s < ?
-                           AND kind <> 'news_attention'";
+                           AND family IN ('recorded_event', 'official_alert')";
     let cell = u64_to_db(h3_cell);
 
     let total: i64 = conn.query_row(
@@ -1549,12 +1699,12 @@ fn do_region_detail(
     window: EpochWindow,
 ) -> Result<RegionDetail, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT source, kind, themes, headline, outlet_domains, urls,
-                location_confidence, location_precision, article_count,
+        "SELECT source, family, kind, themes, headline, outlet_domains, urls,
+                location_confidence, location_precision, volume_count,
                 ts_epoch_s
          FROM events
          WHERE h3_cell = ? AND ts_epoch_s >= ? AND ts_epoch_s < ?
-         ORDER BY article_count DESC, ts_epoch_s DESC
+         ORDER BY volume_count DESC, ts_epoch_s DESC
          LIMIT ?",
     )?;
     let rows = stmt.query_map(
@@ -1564,13 +1714,14 @@ fn do_region_detail(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, String>(4)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, f32>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, i64>(8)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, f32>(7)?,
+                r.get::<_, String>(8)?,
                 r.get::<_, i64>(9)?,
+                r.get::<_, i64>(10)?,
             ))
         },
     )?;
@@ -1591,6 +1742,7 @@ fn do_region_detail(
     for row in rows {
         let (
             source_s,
+            family_s,
             kind_s,
             themes_s,
             headline,
@@ -1598,10 +1750,11 @@ fn do_region_detail(
             urls_s,
             confidence,
             precision_s,
-            articles,
+            volume,
             ts,
         ) = row?;
         let source = parse_source(&source_s)?;
+        let family = parse_family(&family_s)?;
         let kind = parse_kind(&kind_s)?;
         let precision = parse_precision(&precision_s)?;
         let themes: Vec<String> = serde_json::from_str(&themes_s).unwrap_or_default();
@@ -1613,12 +1766,20 @@ fn do_region_detail(
         for theme in themes {
             *theme_counts.entry(theme).or_insert(0) += 1;
         }
-        for domain in &domains {
-            outlets.insert(domain.clone());
+        // Outlets and article totals are attention-only. A chatter or alert
+        // row carries neither, and adding its volume here would restate posts
+        // as articles — the artefact docs/SIGNAL_MODEL.md exists to stop.
+        if family.enters_attention() {
+            for domain in &domains {
+                outlets.insert(domain.clone());
+            }
+            detail.total_articles += volume.max(0) as u64;
+        }
+        if family == SignalFamily::Chatter {
+            detail.chatter_posts += volume.max(0) as u64;
         }
         conf_sum += f64::from(confidence);
         n_rows += 1;
-        detail.total_articles += articles.max(0) as u64;
 
         if detail.source_links.len() < MAX_SOURCE_LINK_ROWS {
             let unique_urls: Vec<String> = urls
@@ -1641,12 +1802,13 @@ fn do_region_detail(
         {
             detail.headlines.push(HeadlineRow {
                 ts_epoch_s: ts,
+                family,
                 kind,
                 headline,
                 outlet_domains: domains,
                 confidence,
                 precision,
-                article_count: articles as u32,
+                volume_count: volume as u32,
             });
         }
     }
@@ -1841,18 +2003,19 @@ fn prune_old_snapshots(
 // ---------------------------------------------------------------------------
 // Daily Events digest
 //
-// `kind = 'news_attention'` splits every query below into its attention half
-// and its event half. That predicate is the hard separation rule in SQL: a
-// coverage observation cannot reach the event totals and an event cannot
-// reach the coverage totals, whatever a caller or a prompt asks for.
+// `family` splits every query below into its attention half and its event
+// half. That predicate is the hard separation rule in SQL: a coverage
+// observation cannot reach the event totals and an event cannot reach the
+// coverage totals, whatever a caller or a prompt asks for. Both halves name
+// the families they want, so `chatter` and `measurement` reach neither.
 // ---------------------------------------------------------------------------
 
 /// Days with data, newest first, tagged with whether a digest is cached.
 fn do_digest_days(conn: &Connection, limit: usize) -> Result<Vec<DigestDay>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT strftime(to_timestamp(ts_epoch_s), '%Y-%m-%d') AS day,
-                count(*) FILTER (WHERE kind = 'news_attention'),
-                count(*) FILTER (WHERE kind <> 'news_attention')
+                count(*) FILTER (WHERE family = 'media_attention'),
+                count(*) FILTER (WHERE family IN ('recorded_event', 'official_alert'))
          FROM events
          GROUP BY day
          ORDER BY day DESC
@@ -1867,8 +2030,11 @@ fn do_digest_days(conn: &Connection, limit: usize) -> Result<Vec<DigestDay>, Sto
     })?;
 
     let cached: HashSet<String> = {
-        let mut stmt = conn.prepare("SELECT day_utc FROM daily_digest")?;
-        let days = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut stmt =
+            conn.prepare("SELECT day_utc FROM daily_digest WHERE facts_schema_version >= ?")?;
+        let days = stmt.query_map(params![DIGEST_FACTS_SCHEMA_VERSION], |r| {
+            r.get::<_, String>(0)
+        })?;
         days.collect::<Result<_, _>>()?
     };
 
@@ -1901,10 +2067,10 @@ fn digest_attention(
     conn: &Connection,
     window: EpochWindow,
 ) -> Result<AttentionFacts, StorageError> {
-    const WHERE: &str = "WHERE ts_epoch_s >= ? AND ts_epoch_s < ? AND kind = 'news_attention'";
+    const WHERE: &str = "WHERE ts_epoch_s >= ? AND ts_epoch_s < ? AND family = 'media_attention'";
 
     let (records, articles): (i64, i64) = conn.query_row(
-        &format!("SELECT count(*), coalesce(sum(article_count), 0) FROM events {WHERE}"),
+        &format!("SELECT count(*), coalesce(sum(volume_count), 0) FROM events {WHERE}"),
         params![window.0, window.1],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -1912,7 +2078,7 @@ fn digest_attention(
     let mut top_places = Vec::new();
     {
         let mut stmt = conn.prepare(&format!(
-            "SELECT coalesce(country_iso, '???'), count(*), coalesce(sum(article_count), 0)
+            "SELECT coalesce(country_iso, '???'), count(*), coalesce(sum(volume_count), 0)
              FROM events {WHERE}
              GROUP BY 1
              ORDER BY 3 DESC, 2 DESC, 1
@@ -1959,7 +2125,7 @@ fn digest_attention(
         let mut stmt = conn.prepare(&format!(
             "SELECT coalesce(country_iso, '???'), source, headline, outlet_domains
              FROM events {WHERE} AND headline IS NOT NULL
-             ORDER BY article_count DESC, ts_epoch_s DESC
+             ORDER BY volume_count DESC, ts_epoch_s DESC
              LIMIT ?"
         ))?;
         // Over-fetch: the licence filter below is applied in Rust (it is a
@@ -2003,7 +2169,8 @@ fn digest_attention(
 }
 
 fn digest_events(conn: &Connection, window: EpochWindow) -> Result<EventFacts, StorageError> {
-    const WHERE: &str = "WHERE ts_epoch_s >= ? AND ts_epoch_s < ? AND kind <> 'news_attention'";
+    const WHERE: &str = "WHERE ts_epoch_s >= ? AND ts_epoch_s < ?
+                           AND family IN ('recorded_event', 'official_alert')";
 
     let records: i64 = conn.query_row(
         &format!("SELECT count(*) FROM events {WHERE}"),
@@ -2027,6 +2194,14 @@ fn digest_events(conn: &Connection, window: EpochWindow) -> Result<EventFacts, S
     };
     let by_kind = group_by("kind")?;
     let by_source = group_by("source")?;
+
+    // Split out of the same set rather than queried separately, so the two
+    // numbers can never disagree about which rows the section covers.
+    let official_alerts: i64 = conn.query_row(
+        &format!("SELECT count(*) FROM events {WHERE} AND family = 'official_alert'"),
+        params![window.0, window.1],
+        |r| r.get(0),
+    )?;
 
     // Every source whose rows are withheld is named with its count, so the
     // digest can say the events happened without describing them.
@@ -2150,6 +2325,7 @@ fn digest_events(conn: &Connection, window: EpochWindow) -> Result<EventFacts, S
 
     Ok(EventFacts {
         records: records.max(0) as u64,
+        official_alerts: official_alerts.max(0) as u64,
         by_kind,
         by_source,
         top_places,
@@ -2162,9 +2338,10 @@ fn do_load_digest(conn: &Connection, day: DayKey) -> Result<Option<DayDigest>, S
     let mut stmt = conn.prepare(
         "SELECT model, generated_at_epoch_s, media_attention, event_data,
                 attention_records, event_records
-         FROM daily_digest WHERE day_utc = ?",
+         FROM daily_digest
+         WHERE day_utc = ? AND facts_schema_version >= ?",
     )?;
-    let mut rows = stmt.query_map(params![day.key()], |r| {
+    let mut rows = stmt.query_map(params![day.key(), DIGEST_FACTS_SCHEMA_VERSION], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
@@ -2199,8 +2376,8 @@ fn do_store_digest(conn: &Connection, digest: &DayDigest) -> Result<(), StorageE
     conn.execute(
         "INSERT INTO daily_digest
             (day_utc, model, generated_at_epoch_s, media_attention, event_data,
-             attention_records, event_records)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+             attention_records, event_records, facts_schema_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             digest.day_utc.key(),
             digest.model,
@@ -2209,6 +2386,7 @@ fn do_store_digest(conn: &Connection, digest: &DayDigest) -> Result<(), StorageE
             digest.event_data,
             digest.attention_records as i64,
             digest.event_records as i64,
+            DIGEST_FACTS_SCHEMA_VERSION,
         ],
     )?;
     Ok(())
@@ -2248,6 +2426,8 @@ mod tests {
             id: event_id(SourceId::Fixtures, &format!("evt-{seq}")),
             source: SourceId::Fixtures,
             source_event_id: format!("evt-{seq}"),
+            family: kind.family(),
+            location_role: LocationRole::EventSite,
             kind,
             themes: vec!["protest".into(), "labor".into()],
             ts_utc: ts,
@@ -2259,7 +2439,7 @@ mod tests {
             country_iso: "FRA".into(),
             admin1: Some("Île-de-France".into()),
             h3_cell: cell,
-            article_count: 10,
+            volume_count: 10,
             distinct_source_count: 4,
             severity: None,
             headline: Some(format!("[synthetic] headline {seq}")),
@@ -2387,7 +2567,9 @@ mod tests {
         assert_eq!(buckets[0].h3_cell, 100);
         assert_eq!(buckets[0].attention_count, 1);
         assert_eq!(buckets[0].event_count, 1);
-        assert_eq!(buckets[0].article_count, 20);
+        // Attention-only: the protest record's volume is measured in records,
+        // so only the one attention record's 10 articles land here.
+        assert_eq!(buckets[0].article_count, 10);
         assert_eq!(buckets[1].h3_cell, 200);
         assert_eq!(buckets[1].bucket_start, day + BUCKET_SECS);
 
@@ -2776,7 +2958,8 @@ mod tests {
         assert_eq!(detail.source_links.len(), 2);
         assert_eq!(detail.source_links[0].source, SourceId::Fixtures);
         assert_eq!(detail.source_links[0].urls.len(), 1);
-        assert_eq!(detail.total_articles, 30);
+        // Attention-only: one of the cell's three rows is media attention.
+        assert_eq!(detail.total_articles, 10);
         assert!((detail.mean_confidence - 0.85).abs() < 1e-6);
         assert_eq!(detail.top_themes[0].1, 3); // protest & labor appear 3x each
 
@@ -2906,7 +3089,11 @@ mod tests {
             .wait()
             .unwrap();
         assert_eq!(page.total, 2, "only the cell's discrete events count");
-        assert!(page.rows.iter().all(|r| r.kind.is_discrete_event()));
+        assert!(
+            page.rows
+                .iter()
+                .all(|r| r.kind.family() == SignalFamily::RecordedEvent)
+        );
         // Newest first.
         assert_eq!(page.rows[0].kind, EventKind::Conflict);
         assert_eq!(page.rows[0].headline.as_deref(), Some("Armed clash"));
@@ -3339,5 +3526,361 @@ mod tests {
             .wait()
             .unwrap();
         assert!(store.digest_days(10).wait().unwrap()[0].cached);
+    }
+
+    // ---- v3 -> v4: the signal-family migration (migrations/0004) ----------
+
+    /// The UTC day every seeded v3 row lands in.
+    const MIGRATION_DAY: &str = "2026-06-01";
+
+    /// Build a database in the shape v3 actually left behind: chatter written
+    /// as `news_attention` with post counts in `article_count`, a synthesized
+    /// headline and a claimed outlet domain; NOAA alerts written as
+    /// `disruption`; derived rows computed under those meanings; and a cached
+    /// digest describing them. Only migrations 1..=3 run here, by hand, so
+    /// this is genuinely the old schema rather than the new one holding
+    /// old-looking data.
+    fn seed_v3_database(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (
+                version BIGINT PRIMARY KEY,
+                applied_at_epoch_s BIGINT NOT NULL
+            );",
+        )
+        .unwrap();
+        for (version, sql) in MIGRATIONS.iter().take(3) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at_epoch_s) VALUES (?, ?)",
+                params![*version, 0i64],
+            )
+            .unwrap();
+        }
+
+        let day = DayKey::parse(MIGRATION_DAY).unwrap().window().0;
+        // All rows share one 6-h bucket, so the rebuilt derived row is a
+        // single bucket whose columns can be asserted exactly.
+        let insert = |id: i64,
+                      source: &str,
+                      kind: &str,
+                      hour: i64,
+                      articles: i64,
+                      sources: i64,
+                      headline: &str,
+                      domains: &str| {
+            conn.execute(
+                "INSERT INTO events VALUES
+                 (?, ?, ?, ?, '[\"protest\"]', ?, ?, 48.85, 2.35, 'city', 0.9,
+                  'FRA', 'Ile-de-France', 100, ?, ?, NULL, ?, ?, '[]')",
+                params![
+                    id,
+                    source,
+                    format!("{source}-{id}"),
+                    kind,
+                    day + hour * 3600,
+                    day + hour * 3600,
+                    articles,
+                    sources,
+                    headline,
+                    domains,
+                ],
+            )
+            .unwrap();
+        };
+
+        // Chatter, as v3 stored it: posts in an articles column, a headline
+        // nobody wrote, and a domain the rollup never observed.
+        insert(
+            1,
+            "bluesky",
+            "news_attention",
+            1,
+            42,
+            1,
+            "42 posts mentioned Paris",
+            "[\"bsky.app\"]",
+        );
+        insert(
+            2,
+            "telegram",
+            "news_attention",
+            2,
+            17,
+            1,
+            "17 posts mentioned Paris",
+            "[\"t.me\"]",
+        );
+        // Real media attention, from the same source id as the Events dump.
+        insert(
+            3,
+            "gdelt",
+            "news_attention",
+            2,
+            9,
+            3,
+            "Wire report on the march",
+            "[\"globalwire.example\",\"worldpost.example\"]",
+        );
+        insert(
+            4,
+            "gdelt",
+            "protest",
+            3,
+            1,
+            1,
+            "March through the 11th",
+            "[]",
+        );
+        // NOAA, written as a disruption and therefore scored as unrest.
+        insert(
+            5,
+            "noaa",
+            "disruption",
+            3,
+            1,
+            1,
+            "Severe thunderstorm warning",
+            "[]",
+        );
+        insert(6, "acled", "conflict", 4, 1, 1, "Clash reported", "[]");
+        insert(7, "ioda", "disruption", 4, 1, 1, "Connectivity drop", "[]");
+
+        // Derived rows computed under the old meanings, plus prose written
+        // from them. Neither must survive as it is.
+        conn.execute_batch(&format!(
+            "INSERT INTO region_buckets VALUES
+                 (100, {day}, 999, 999, 999, 999, 9, 1.0, 1.0, 1.0, 1.0, 1.0, false);
+             INSERT INTO baselines VALUES (100, 0, 999.0, 28, 0);
+             INSERT INTO daily_digest VALUES
+                 ('{MIGRATION_DAY}', 'gemini-3.7-flash', 0,
+                  '68 media-attention records across zero identified outlets',
+                  'three events', 68, 3);"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn v3_rows_are_classified_per_record_not_per_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.duckdb");
+        seed_v3_database(&path);
+
+        let store = StorageHandle::open(Some(path), Box::new(|| {})).unwrap();
+        let window = DayKey::parse(MIGRATION_DAY).unwrap().window();
+        let points = store
+            .query_points(window, None, None, 0.0, false)
+            .wait()
+            .unwrap();
+        assert_eq!(points.len(), 7, "{points:?}");
+
+        // `permits` is the matrix itself, so this asserts the backfill cannot
+        // have produced a family/kind pair the normalizer would reject.
+        for p in &points {
+            assert!(p.family.permits(p.kind), "{:?}/{:?}", p.family, p.kind);
+        }
+
+        let row = |id: u64| points.iter().find(|p| p.id == id).unwrap().clone();
+        let classified = |id: u64| {
+            let p = row(id);
+            (p.family, p.kind, p.location_role)
+        };
+
+        // Chatter: its own family, and its coordinates are a mention, not a
+        // site. Both rows lose the headline the normalizer invented.
+        for id in [1, 2] {
+            assert_eq!(
+                classified(id),
+                (
+                    SignalFamily::Chatter,
+                    EventKind::Chatter,
+                    LocationRole::MentionedPlace
+                )
+            );
+            assert_eq!(
+                row(id).headline,
+                None,
+                "a synthesized headline must not survive"
+            );
+        }
+        assert_eq!(row(1).volume_count, 42, "posts move across as posts");
+
+        // `gdelt` is two adapters. The DOC row is attention geocoded to the
+        // publisher; the Events row under the same source id is a record.
+        assert_eq!(
+            classified(3),
+            (
+                SignalFamily::MediaAttention,
+                EventKind::NewsAttention,
+                LocationRole::PublisherOrigin
+            )
+        );
+        assert_eq!(row(3).volume_count, 9);
+        assert_eq!(
+            row(3).headline.as_deref(),
+            Some("Wire report on the march"),
+            "real attention metadata is untouched"
+        );
+        assert_eq!(
+            classified(4),
+            (
+                SignalFamily::RecordedEvent,
+                EventKind::Protest,
+                LocationRole::EventSite
+            )
+        );
+
+        // NOAA stops being a disruption: an agency warning is an alert.
+        assert_eq!(
+            classified(5),
+            (
+                SignalFamily::OfficialAlert,
+                EventKind::Alert,
+                LocationRole::ReportingJurisdiction
+            )
+        );
+        assert_eq!(
+            classified(6),
+            (
+                SignalFamily::RecordedEvent,
+                EventKind::Conflict,
+                LocationRole::EventSite
+            )
+        );
+        // A measured outage is a discrete record, not an alert about one.
+        assert_eq!(
+            classified(7),
+            (
+                SignalFamily::RecordedEvent,
+                EventKind::Disruption,
+                LocationRole::EventSite
+            )
+        );
+    }
+
+    #[test]
+    fn migration_rebuilds_derived_rows_under_the_new_meanings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.duckdb");
+        seed_v3_database(&path);
+
+        let store = StorageHandle::open(Some(path), Box::new(|| {})).unwrap();
+        let window = DayKey::parse(MIGRATION_DAY).unwrap().window();
+
+        // The stale bucket (999s, written when chatter counted as articles)
+        // is gone, replaced by a rebuild the migration only *marked* as owed.
+        let buckets = store.query_buckets(window, None).wait().unwrap();
+        assert_eq!(buckets.len(), 1, "{buckets:?}");
+        let b = buckets[0];
+        assert_eq!(b.attention_count, 1, "one attention record, not three");
+        assert_eq!(
+            b.event_count, 3,
+            "gdelt protest, acled conflict, ioda outage - the alert is not unrest"
+        );
+        assert_eq!(b.article_count, 9, "59 chatter posts are not articles");
+        assert_eq!(b.source_count, 3, "attention-only source count");
+        assert_eq!(b.distinct_outlets, 2, "bsky.app and t.me are not outlets");
+
+        // The same split, seen through the inspector.
+        let detail = store.region_detail(100, window).wait().unwrap();
+        assert_eq!(detail.total_articles, 9);
+        assert_eq!(detail.chatter_posts, 59);
+        assert_eq!(detail.distinct_outlets, 2);
+
+        // And through the histogram the timeline strip lanes on family.
+        let hist = store.timeline_histogram().wait().unwrap();
+        let chatter: u32 = hist
+            .iter()
+            .filter(|p| p.family == SignalFamily::Chatter)
+            .map(|p| p.count)
+            .sum();
+        assert_eq!(chatter, 2, "{hist:?}");
+        assert!(hist.iter().all(|p| p.family.permits(p.kind)));
+
+        // Region history is bucket-grained and reads the same rebuilt row.
+        let history = store.region_history(100, window.1).wait().unwrap();
+        assert!(
+            history.iter().any(|p| p.records() == 4),
+            "3 records + 1 attention: {history:?}"
+        );
+    }
+
+    #[test]
+    fn migration_invalidates_prose_written_from_the_old_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.duckdb");
+        seed_v3_database(&path);
+
+        let store = StorageHandle::open(Some(path), Box::new(|| {})).unwrap();
+        let day = DayKey::parse(MIGRATION_DAY).unwrap();
+
+        // The cached digest described 68 media-attention records. There were
+        // never 68; it must be gone rather than shown with a caveat.
+        assert!(store.load_digest(day).wait().unwrap().is_none());
+
+        let facts = store.digest_facts(day).wait().unwrap();
+        assert_eq!(facts.attention.records, 1);
+        assert_eq!(facts.attention.articles, 9);
+        assert_eq!(facts.attention.distinct_outlets, 2);
+        assert_eq!(
+            facts.events.records, 4,
+            "three records plus the alert, which stays in the event section"
+        );
+        assert_eq!(facts.events.official_alerts, 1, "labelled, not silent");
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_clears_the_rebuild_marker_it_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.duckdb");
+        seed_v3_database(&path);
+        let window = DayKey::parse(MIGRATION_DAY).unwrap().window();
+
+        let first = {
+            let store = StorageHandle::open(Some(path.clone()), Box::new(|| {})).unwrap();
+            store.query_buckets(window, None).wait().unwrap()
+        };
+
+        {
+            // Handle dropped, actor joined, file free: inspect the raw state.
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn
+                .query_row("SELECT max(version) FROM schema_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 4);
+            let marker: String = conn
+                .query_row(
+                    "SELECT value FROM storage_meta WHERE key = 'derived_rebuild_required'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(marker, "0", "left set, every open would rescore the world");
+            // The shadow table is dropped, not left standing beside the real one.
+            let leftovers: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'events_v4'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(leftovers, 0);
+        }
+
+        let store = StorageHandle::open(Some(path), Box::new(|| {})).unwrap();
+        let second = store.query_buckets(window, None).wait().unwrap();
+        assert_eq!(first.len(), second.len());
+        assert_eq!(first[0].article_count, second[0].article_count);
+        assert_eq!(first[0].event_count, second[0].event_count);
+        assert_eq!(first[0].combined_score, second[0].combined_score);
+        assert_eq!(
+            store
+                .query_points(window, None, None, 0.0, false)
+                .wait()
+                .unwrap()
+                .len(),
+            7,
+            "a second open must not duplicate or drop rows"
+        );
     }
 }

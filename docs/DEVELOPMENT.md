@@ -163,6 +163,12 @@ they cannot embed playback. Do not extract stream URLs from a watch page.
   separate local SQLite file.
 - On startup, the desktop removes legacy fixture rows and rebuilds derived
   aggregates before rendering live data.
+- **A database written before the signal-family migration is upgraded in
+  place on first open.** Migration `0004_signal_families` reclassifies every
+  stored record, so the first launch after it rebuilds all derived rows and
+  drops any cached Daily Events prose, which then has to be regenerated. That
+  is a one-time cost per database and is expected, not a fault. There is no
+  downgrade path: an older build will not read a v4 store.
 
 ## Services
 

@@ -20,8 +20,8 @@
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, NormalizeError, SourceError,
-    SourceId, TimeWindow, event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, NormalizeError,
+    SignalFamily, SourceError, SourceId, TimeWindow, event_id,
 };
 use serde_json::{Value, json};
 use url::Url;
@@ -170,23 +170,28 @@ pub fn normalize(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> {
         .map(|d| vec![d.to_owned()])
         .unwrap_or_default();
 
-    Ok(GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Gdelt, &url),
         source: SourceId::Gdelt,
         source_event_id: url.clone(),
+        family: SignalFamily::MediaAttention,
         kind: EventKind::NewsAttention,
         themes,
         ts_utc,
         ingested_at: Utc::now(),
         lat: country.lat,
         lon: country.lon,
+        // DOC resolves `sourcecountry` — where the outlet is, not where the
+        // story is. See docs/SIGNAL_MODEL.md; these are excluded from the
+        // spatial attention layer until the GDELT geography work lands.
+        location_role: LocationRole::PublisherOrigin,
         location_precision: LocationPrecision::Country,
         location_confidence: COUNTRY_CONFIDENCE,
         country_iso: country.iso_a3.to_owned(),
         admin1: None,
         h3_cell,
         // One article per record; domain is one distinct outlet.
-        article_count: 1,
+        volume_count: 1,
         distinct_source_count: 1,
         severity: None,
         headline: v
@@ -196,7 +201,9 @@ pub fn normalize(v: &Value) -> Result<GeoTemporalEvent, NormalizeError> {
             .map(str::to_owned),
         outlet_domains: domains,
         urls: vec![url],
-    })
+    };
+    ev.validate()?;
+    Ok(ev)
 }
 
 /// GDELT `seendate` is `YYYYMMDDTHHMMSSZ`; accept RFC 3339 as a fallback.
@@ -373,7 +380,7 @@ mod tests {
             e.ts_utc,
             Utc.with_ymd_and_hms(2026, 6, 20, 8, 15, 0).unwrap()
         );
-        assert_eq!(e.article_count, 1);
+        assert_eq!(e.volume_count, 1);
         assert_eq!(e.distinct_source_count, 1);
         assert_eq!(e.outlet_domains, vec!["globalwire.example"]);
         assert_eq!(e.urls, vec!["https://globalwire.example/a/1001"]);

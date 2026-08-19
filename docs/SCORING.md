@@ -10,7 +10,8 @@ below are documentation of that module, not a second source of truth.
 
 ```
 attention_score =
-    log(article_count + 1)            (normalized: /ln(1+100), clamped)
+    log(article_count + 1)            (attention volume only — see families)
+                                      (normalized: /ln(1+100), clamped)
   * recency_weight                    (2^(−mean_age / 24 h))
   * source_diversity_weight           (ln(1+outlets)/ln(1+8), clamped)
   * theme_weight                      (1.0 high-signal theme, else 0.6)
@@ -35,9 +36,32 @@ combined_signal =
 ```
 
 Every component is normalized to **[0, 1]**, so `combined_signal` is also in
-[0, 1] and the UI renders each as a plain bar. `attention_score` consumes
-only `NewsAttention` observations; `unrest_score` only discrete event
-records (see DATA_MODEL.md "Counting semantics" — mixing double-counts).
+[0, 1] and the UI renders each as a plain bar.
+
+## What each component is allowed to see
+
+Membership is decided by `SignalFamily`, not by `EventKind`, and the matrix
+in docs/SIGNAL_MODEL.md is the contract:
+
+- `attention_score` consumes **`MediaAttention` only**. `article_count`,
+  `source_count` and `distinct_outlets` are attention-only by construction —
+  chatter posts are not articles and a chatter rollup names no outlet.
+- `unrest_score` consumes **`RecordedEvent` only**. An `OfficialAlert` is a
+  government message about a forecast, so NOAA/NWS warnings no longer raise
+  unrest; they appear in the event section of Daily Events *named as
+  warnings*, and this is a deliberate behaviour change that lowers previously
+  US-weather-inflated unrest scores.
+- `spike_score` runs on a **`generic_count`** that only families with
+  `enters_generic_spike()` increment (currently `MediaAttention` and
+  `RecordedEvent`). It is a separate counter rather than
+  `event_count + attention_count` on purpose: a new family joins the spike
+  only by saying so in the matrix, never by accident.
+- **`Chatter` enters none of the above** — not attention, not unrest, not the
+  generic spike, not the trailing baseline that feeds it, and therefore not
+  `combined_signal`. It gets a per-family spike from `family_baselines`
+  instead. Chatter volume with its own baseline is a useful signal; chatter
+  volume quietly added to a headline number is not.
+- `Measurement` is declared and unused.
 
 ## When scores are computed (M2 design, as implemented)
 
@@ -71,7 +95,10 @@ averages over non-empty buckets only (no records ⇒ no ratio).
   `spike_cold_start`, and the UI badges the region **low confidence**.
 - The `baselines` table persists the *current* medians (trailing window
   ending on the newest data day) per (cell, tod) with their `sample_days`,
-  for M3 live use and inspector context.
+  for M3 live use and inspector context. `family_baselines` persists the same
+  statistic **per family**, which is what lets chatter have a spike without
+  touching the generic one — and what a later silence layer needs, since one
+  combined baseline cannot say *which* signal went quiet.
 
 ## Theme filtering interaction
 

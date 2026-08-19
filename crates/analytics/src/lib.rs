@@ -9,7 +9,10 @@ pub mod scoring;
 
 use std::collections::{BTreeMap, HashSet};
 
-use core_types::{BUCKET_SECS, EventKind, GeoTemporalEvent, RegionBucket, bucket_start_epoch};
+use core_types::{
+    BUCKET_SECS, EventKind, FamilyBucket, GeoTemporalEvent, RegionBucket, SignalFamily,
+    bucket_start_epoch,
+};
 
 /// Every scoring constant, named (docs/SCORING.md). Nothing in the score
 /// functions is a magic number.
@@ -98,8 +101,12 @@ pub fn aggregate_buckets(events: &[GeoTemporalEvent]) -> Vec<RegionBucket> {
 pub struct ScoreEvent {
     pub h3_cell: u64,
     pub ts_epoch_s: i64,
+    /// The observation axis. Every scoring decision below asks the family,
+    /// never the kind — see docs/SIGNAL_MODEL.md.
+    pub family: SignalFamily,
     pub kind: EventKind,
-    pub article_count: u32,
+    /// Volume in this family's own unit. Never summed across families.
+    pub volume_count: u32,
     pub distinct_source_count: u32,
     pub location_confidence: f32,
     pub severity: Option<f32>,
@@ -114,8 +121,9 @@ impl From<&GeoTemporalEvent> for ScoreEvent {
         Self {
             h3_cell: ev.h3_cell,
             ts_epoch_s: ev.ts_utc.timestamp(),
+            family: ev.family,
             kind: ev.kind,
-            article_count: ev.article_count,
+            volume_count: ev.volume_count,
             distinct_source_count: ev.distinct_source_count,
             location_confidence: ev.location_confidence,
             severity: ev.severity,
@@ -136,13 +144,44 @@ pub struct BaselineRow {
     pub sample_days: u32,
 }
 
+/// One row for the `family_baselines` table: a family's own trailing median,
+/// per (cell, time-of-day bucket, family).
+///
+/// Long-form deliberately: a sixth family must not cost a schema migration,
+/// and per-family deficits (silence detection) are exactly this shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FamilyBaselineRow {
+    pub h3_cell: u64,
+    pub tod_bucket: u8,
+    pub family: SignalFamily,
+    pub baseline: f64,
+    pub sample_days: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ScoredBuckets {
     /// Sorted by (cell, bucket start); counts plus all score components.
     pub buckets: Vec<RegionBucket>,
     /// Current baselines (as of the newest data day) for every seen cell ×
-    /// the four time-of-day slots.
+    /// the four time-of-day slots. Built from the families that feed the
+    /// generic spike only, so chatter volume can never move it.
     pub baselines: Vec<BaselineRow>,
+    /// Per-family record and volume counts, sorted by (cell, bucket, family).
+    pub family_buckets: Vec<FamilyBucket>,
+    /// Per-family trailing medians as of the newest data day.
+    pub family_baselines: Vec<FamilyBaselineRow>,
+}
+
+/// Position of a family in `SignalFamily::ALL`, for the fixed-size per-bucket
+/// tally. Exhaustive on purpose: a new family fails to compile here.
+const fn family_index(family: SignalFamily) -> usize {
+    match family {
+        SignalFamily::MediaAttention => 0,
+        SignalFamily::RecordedEvent => 1,
+        SignalFamily::OfficialAlert => 2,
+        SignalFamily::Chatter => 3,
+        SignalFamily::Measurement => 4,
+    }
 }
 
 /// The M2 scoring pipeline (docs/SCORING.md): aggregate per bucket, then
@@ -156,6 +195,10 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
     struct Accum<'e> {
         event_count: u32,
         attention_count: u32,
+        /// Records in the families that feed the generic spike. Kept as its
+        /// own counter rather than `event_count + attention_count`, so a new
+        /// family joins the spike only by saying so in the matrix.
+        generic_count: u32,
         article_count: u64,
         source_count: u64,
         outlets: HashSet<&'e str>,
@@ -165,11 +208,14 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
         att_conf_sum: f64,
         att_age_sum: f64,
         att_theme_w_max: f64,
-        // Discrete event records only.
+        // Unrest-bearing records only.
         evt_kind_w_max: f64,
         evt_sev_sum: f64,
         evt_point_count: u32,
         evt_age_sum: f64,
+        /// Per-family (record_count, volume_count), indexed by
+        /// `SignalFamily::ALL`.
+        family: [(u32, u64); SignalFamily::ALL.len()],
     }
 
     let mut map: BTreeMap<(u64, i64), Accum<'_>> = BTreeMap::new();
@@ -177,14 +223,25 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
         let bucket_start = bucket_start_epoch(ev.ts_epoch_s);
         let a = map.entry((ev.h3_cell, bucket_start)).or_default();
         let age = (bucket_start + BUCKET_SECS - ev.ts_epoch_s) as f64;
-        a.article_count += u64::from(ev.article_count);
-        a.source_count += u64::from(ev.distinct_source_count);
-        for d in &ev.outlet_domains {
-            a.outlets.insert(d.as_str());
+
+        let slot = &mut a.family[family_index(ev.family)];
+        slot.0 += 1;
+        slot.1 += u64::from(ev.volume_count);
+
+        if ev.family.enters_generic_spike() {
+            a.generic_count += 1;
         }
-        if ev.kind.is_attention() {
+        // `article_count`, `source_count` and `distinct_outlets` are
+        // attention-only by construction: chatter posts are not articles and
+        // a chatter rollup names no outlet.
+        if ev.family.enters_attention() {
             a.attention_count += 1;
-            a.att_articles += u64::from(ev.article_count);
+            a.article_count += u64::from(ev.volume_count);
+            a.source_count += u64::from(ev.distinct_source_count);
+            for d in &ev.outlet_domains {
+                a.outlets.insert(d.as_str());
+            }
+            a.att_articles += u64::from(ev.volume_count);
             for d in &ev.outlet_domains {
                 a.att_outlets.insert(d.as_str());
             }
@@ -193,7 +250,8 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
             a.att_theme_w_max = a
                 .att_theme_w_max
                 .max(scoring::theme_weight(ev.themes.iter().map(String::as_str)));
-        } else {
+        }
+        if ev.family.enters_unrest() {
             a.event_count += 1;
             a.evt_kind_w_max = a.evt_kind_w_max.max(scoring::kind_weight(ev.kind));
             a.evt_sev_sum += f64::from(ev.severity.unwrap_or(0.0));
@@ -204,7 +262,7 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
 
     let index = baseline::BaselineIndex::from_bucket_counts(
         map.iter()
-            .map(|(&(cell, start), a)| (cell, start, a.event_count + a.attention_count)),
+            .map(|(&(cell, start), a)| (cell, start, a.generic_count)),
     );
     let last_day = map.keys().map(|&(_, start)| baseline::day_of(start)).max();
 
@@ -241,7 +299,7 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
         let spike = if cold {
             weights::SPIKE_NEUTRAL
         } else {
-            scoring::spike_score(f64::from(a.event_count + a.attention_count), base)
+            scoring::spike_score(f64::from(a.generic_count), base)
         };
         buckets.push(RegionBucket {
             h3_cell: cell,
@@ -260,7 +318,25 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
         });
     }
 
+    let mut family_buckets = Vec::new();
+    for (&(cell, bucket_start), a) in &map {
+        for (i, family) in SignalFamily::ALL.into_iter().enumerate() {
+            let (record_count, volume_count) = a.family[i];
+            if record_count == 0 {
+                continue;
+            }
+            family_buckets.push(FamilyBucket {
+                h3_cell: cell,
+                bucket_start,
+                family,
+                record_count,
+                volume_count,
+            });
+        }
+    }
+
     let mut baselines = Vec::new();
+    let mut family_baselines = Vec::new();
     if let Some(last_day) = last_day {
         for cell in index.cells() {
             for tod in 0..4u8 {
@@ -273,8 +349,35 @@ pub fn score_buckets(events: &[ScoreEvent]) -> ScoredBuckets {
                 });
             }
         }
+        // Each family gets its own trailing median from its own counts. This
+        // is what lets a family go quiet observably (docs/SIGNAL_MODEL.md)
+        // without its volume ever entering the generic spike.
+        for (i, family) in SignalFamily::ALL.into_iter().enumerate() {
+            let fam_index = baseline::BaselineIndex::from_bucket_counts(
+                map.iter()
+                    .filter(|(_, a)| a.family[i].0 > 0)
+                    .map(|(&(cell, start), a)| (cell, start, a.family[i].0)),
+            );
+            for cell in fam_index.cells() {
+                for tod in 0..4u8 {
+                    let (b, n) = fam_index.current(cell, tod, last_day);
+                    family_baselines.push(FamilyBaselineRow {
+                        h3_cell: cell,
+                        tod_bucket: tod,
+                        family,
+                        baseline: b,
+                        sample_days: n,
+                    });
+                }
+            }
+        }
     }
-    ScoredBuckets { buckets, baselines }
+    ScoredBuckets {
+        buckets,
+        baselines,
+        family_buckets,
+        family_baselines,
+    }
 }
 
 /// Window-level scores for one cell, composed from stored bucket scores.
@@ -575,7 +678,7 @@ pub fn divergence_ranks(cells: &[CellComponents]) -> Vec<(u64, Option<f32>)> {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use core_types::{BUCKET_SECS, EventKind, LocationPrecision, SourceId, event_id};
+    use core_types::{BUCKET_SECS, EventKind, LocationPrecision, LocationRole, SourceId, event_id};
 
     fn ev(kind: EventKind, cell: u64, hour: u32, articles: u32, sources: u32) -> GeoTemporalEvent {
         let ts = Utc.with_ymd_and_hms(2026, 6, 1, hour, 15, 0).unwrap();
@@ -583,7 +686,9 @@ mod tests {
             id: event_id(SourceId::Fixtures, &format!("{kind:?}-{cell}-{hour}")),
             source: SourceId::Fixtures,
             source_event_id: "x".into(),
+            family: kind.family(),
             kind,
+            location_role: LocationRole::EventSite,
             themes: vec![],
             ts_utc: ts,
             ingested_at: ts,
@@ -594,7 +699,7 @@ mod tests {
             country_iso: "UNK".into(),
             admin1: None,
             h3_cell: cell,
-            article_count: articles,
+            volume_count: articles,
             distinct_source_count: sources,
             severity: None,
             headline: None,
@@ -623,8 +728,10 @@ mod tests {
         assert_eq!((buckets[0].h3_cell, buckets[0].bucket_start), (10, day));
         assert_eq!(buckets[0].attention_count, 1);
         assert_eq!(buckets[0].event_count, 1);
-        assert_eq!(buckets[0].article_count, 4 + 3);
-        assert_eq!(buckets[0].source_count, 2 + 1);
+        // Attention-only by construction: the protest record's volume is
+        // measured in records, not articles, so it is not added in here.
+        assert_eq!(buckets[0].article_count, 4);
+        assert_eq!(buckets[0].source_count, 2);
 
         assert_eq!(
             (buckets[1].h3_cell, buckets[1].bucket_start),
@@ -671,8 +778,9 @@ mod tests {
         ScoreEvent {
             h3_cell: cell,
             ts_epoch_s: ts,
+            family: kind.family(),
             kind,
-            article_count: 1,
+            volume_count: 1,
             distinct_source_count: 1,
             location_confidence: 0.9,
             severity: None,
@@ -693,14 +801,14 @@ mod tests {
         //   spike     = 0.5 + cold flag  (first day ⇒ no history)
         //   combined  = 0.40·att + 0.45·unr + 0.15·0.5 = 0.497500991764
         let mk_att = |ts: i64, articles: u32, outlets: &[&str], theme: &str| ScoreEvent {
-            article_count: articles,
+            volume_count: articles,
             location_confidence: 0.85,
             themes: vec![theme.into()],
             outlet_domains: outlets.iter().map(|s| s.to_string()).collect(),
             ..score_ev(EventKind::NewsAttention, 5, ts)
         };
         let mk_evt = |ts: i64, kind: EventKind, sev: Option<f32>, point: bool| ScoreEvent {
-            article_count: 0,
+            volume_count: 0,
             severity: sev,
             renders_as_point: point,
             ..score_ev(kind, 5, ts)
@@ -1178,5 +1286,136 @@ mod tests {
         assert!((c.attention - 0.9).abs() < F32_EPS);
         assert!((c.unrest - 0.7).abs() < F32_EPS);
         assert!(c.comparable());
+    }
+
+    // ---- docs/SIGNAL_MODEL.md, enforced ----------------------------------
+
+    /// The A0 claim in its strongest form: take a scored bucket, add chatter
+    /// to it, and *nothing* generic may move. Asserted directly rather than
+    /// inferred from a zero weight, because the old failure was a count term
+    /// that no weight could reach.
+    #[test]
+    fn chatter_contributes_nothing_generic() {
+        let base = vec![
+            score_ev(EventKind::NewsAttention, 5, 1_000),
+            score_ev(EventKind::Conflict, 5, 2_000),
+        ];
+        let mut with_chatter = base.clone();
+        for ts in [1_100, 1_200, 1_300, 1_400] {
+            with_chatter.push(ScoreEvent {
+                volume_count: 500,
+                ..score_ev(EventKind::Chatter, 5, ts)
+            });
+        }
+
+        let a = score_buckets(&base);
+        let b = score_buckets(&with_chatter);
+        assert_eq!(a.buckets.len(), 1);
+        assert_eq!(b.buckets.len(), 1);
+        let (a, b) = (&a.buckets[0], &b.buckets[0]);
+
+        assert_eq!(a.event_count, b.event_count, "unrest count");
+        assert_eq!(a.attention_count, b.attention_count, "attention count");
+        assert_eq!(a.article_count, b.article_count, "article total");
+        assert_eq!(a.source_count, b.source_count, "attention source count");
+        assert_eq!(a.distinct_outlets, b.distinct_outlets, "outlet diversity");
+        assert_eq!(a.unrest_score, b.unrest_score);
+        assert_eq!(a.attention_score, b.attention_score);
+        assert_eq!(a.spike_score, b.spike_score);
+        assert_eq!(a.baseline, b.baseline);
+        assert_eq!(a.combined_score, b.combined_score);
+    }
+
+    /// An official alert is an authority announcing a hazard, not an
+    /// occurrence of unrest. This is the M9 behaviour change: NOAA used to
+    /// normalize to `Disruption` and land in the unrest branch.
+    #[test]
+    fn official_alerts_do_not_score_as_unrest() {
+        let quiet = score_buckets(&[score_ev(EventKind::NewsAttention, 5, 1_000)]);
+        let alerted = score_buckets(&[
+            score_ev(EventKind::NewsAttention, 5, 1_000),
+            score_ev(EventKind::Alert, 5, 1_500),
+            score_ev(EventKind::Alert, 5, 2_500),
+        ]);
+        assert_eq!(alerted.buckets[0].event_count, 0);
+        assert_eq!(alerted.buckets[0].unrest_score, 0.0);
+        assert_eq!(
+            quiet.buckets[0].combined_score, alerted.buckets[0].combined_score,
+            "alerts must not move the headline score"
+        );
+        // …but they are still counted, in their own family.
+        let alerts = alerted
+            .family_buckets
+            .iter()
+            .find(|f| f.family == SignalFamily::OfficialAlert)
+            .expect("alerts are recorded in their own family bucket");
+        assert_eq!(alerts.record_count, 2);
+    }
+
+    #[test]
+    fn family_buckets_count_each_family_in_its_own_unit() {
+        let events = vec![
+            ScoreEvent {
+                volume_count: 9,
+                ..score_ev(EventKind::NewsAttention, 5, 1_000)
+            },
+            ScoreEvent {
+                volume_count: 300,
+                ..score_ev(EventKind::Chatter, 5, 1_100)
+            },
+            ScoreEvent {
+                volume_count: 1,
+                ..score_ev(EventKind::Protest, 5, 1_200)
+            },
+        ];
+        let scored = score_buckets(&events);
+        let by_family: BTreeMap<SignalFamily, (u32, u64)> = scored
+            .family_buckets
+            .iter()
+            .map(|f| (f.family, (f.record_count, f.volume_count)))
+            .collect();
+
+        assert_eq!(by_family[&SignalFamily::MediaAttention], (1, 9));
+        assert_eq!(by_family[&SignalFamily::Chatter], (1, 300));
+        assert_eq!(by_family[&SignalFamily::RecordedEvent], (1, 1));
+        assert!(!by_family.contains_key(&SignalFamily::OfficialAlert));
+        // The 300 posts appear nowhere near the 9 articles.
+        assert_eq!(scored.buckets[0].article_count, 9);
+    }
+
+    /// Silence detection needs a family to be able to go quiet against its
+    /// own history, which the single combined baseline could never express.
+    #[test]
+    fn each_family_gets_its_own_baseline() {
+        let day = 86_400;
+        let mut events = Vec::new();
+        for d in 0..10 {
+            events.push(score_ev(EventKind::NewsAttention, 5, d * day + 100));
+            for n in 0..4 {
+                events.push(score_ev(EventKind::Chatter, 5, d * day + 200 + n));
+            }
+        }
+        let scored = score_buckets(&events);
+        let att = scored
+            .family_baselines
+            .iter()
+            .find(|b| b.family == SignalFamily::MediaAttention && b.tod_bucket == 0)
+            .expect("attention baseline");
+        let chat = scored
+            .family_baselines
+            .iter()
+            .find(|b| b.family == SignalFamily::Chatter && b.tod_bucket == 0)
+            .expect("chatter baseline");
+        assert_eq!(att.baseline, 1.0);
+        assert_eq!(chat.baseline, 4.0);
+        assert_eq!(att.sample_days, chat.sample_days);
+
+        // The generic baseline saw the attention record only.
+        let generic = scored
+            .baselines
+            .iter()
+            .find(|b| b.tod_bucket == 0)
+            .expect("generic baseline");
+        assert_eq!(generic.baseline, 1.0);
     }
 }

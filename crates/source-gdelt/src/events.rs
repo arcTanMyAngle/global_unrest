@@ -20,8 +20,8 @@ use std::io::Read;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, NormalizeError, SourceError,
-    SourceId, event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, NormalizeError,
+    SignalFamily, SourceError, SourceId, event_id,
 };
 
 use crate::country;
@@ -184,16 +184,18 @@ pub fn normalize(row: &str) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
         }
     };
 
-    Ok(vec![GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Gdelt, global_id),
         source: SourceId::Gdelt,
         source_event_id: global_id.to_owned(),
+        family: SignalFamily::RecordedEvent,
         kind,
         themes: Vec::new(), // Events dumps carry no GKG themes.
         ts_utc,
         ingested_at: Utc::now(),
         lat,
         lon,
+        location_role: LocationRole::EventSite,
         location_precision: precision,
         location_confidence: confidence,
         country_iso: country::iso3_from_fips(get(COL_ACTIONGEO_COUNTRYCODE))
@@ -201,13 +203,15 @@ pub fn normalize(row: &str) -> Result<Vec<GeoTemporalEvent>, NormalizeError> {
             .to_owned(),
         admin1,
         h3_cell,
-        article_count: parse_u32(get(COL_NUMARTICLES)),
+        volume_count: parse_u32(get(COL_NUMARTICLES)),
         distinct_source_count: parse_u32(get(COL_NUMSOURCES)),
         severity: Some(goldstein_severity(get(COL_GOLDSTEIN))),
         headline: None, // titles live in the Mentions/GKG feeds, not Events.
         outlet_domains,
         urls,
-    }])
+    };
+    ev.validate()?;
+    Ok(vec![ev])
 }
 
 /// GDELT `DATEADDED`: 14-digit `YYYYMMDDHHMMSS` UTC.
@@ -310,7 +314,7 @@ mod tests {
         assert!(e.location_precision.renders_as_point());
         assert_eq!(e.country_iso, "FRA");
         assert_eq!(e.admin1.as_deref(), Some("FR11"));
-        assert_eq!(e.article_count, 14);
+        assert_eq!(e.volume_count, 14);
         assert_eq!(e.distinct_source_count, 6);
         assert_eq!(e.outlet_domains, vec!["globalwire.example"]);
         assert_eq!(e.urls, vec!["https://globalwire.example/a/1"]);

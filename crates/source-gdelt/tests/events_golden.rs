@@ -8,7 +8,9 @@
 //! reported rather than dropped. It is also zipped in memory to prove the
 //! `.CSV.zip` unpack path round-trips.
 
-use core_types::{EventKind, LocationPrecision, NormalizeError, SourceId, event_id};
+use core_types::{
+    EventKind, LocationPrecision, LocationRole, NormalizeError, SignalFamily, SourceId, event_id,
+};
 use source_gdelt::events;
 
 fn sample_csv() -> String {
@@ -43,10 +45,11 @@ fn events_export_normalizes_with_skips_and_failures() {
         NormalizeError::InvalidCoordinates { .. }
     ));
 
-    // Every kept record is a discrete GDELT event (never NewsAttention).
+    // Every kept record is a discrete GDELT event (never media attention).
     for e in &events_out {
         assert_eq!(e.source, SourceId::Gdelt);
-        assert!(e.kind.is_discrete_event());
+        assert_eq!(e.family, SignalFamily::RecordedEvent);
+        assert_eq!(e.location_role, LocationRole::EventSite);
         assert!(e.themes.is_empty());
         assert!(e.severity.is_some());
     }

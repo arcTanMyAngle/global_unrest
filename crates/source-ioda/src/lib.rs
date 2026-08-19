@@ -22,8 +22,8 @@ mod live;
 pub use live::IodaSource;
 
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, NormalizeError, SourceId,
-    event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, NormalizeError,
+    SignalFamily, SourceId, event_id,
 };
 use geo_utils::CountryIndex;
 use serde_json::Value;
@@ -129,22 +129,26 @@ pub fn normalize_event(
         method.to_owned(),
     ];
 
-    Ok(vec![GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Ioda, &source_event_id),
         source: SourceId::Ioda,
         source_event_id,
+        // A measured outage is a discrete disruption that happened at a
+        // place, not a measurement series — see docs/SIGNAL_MODEL.md.
+        family: SignalFamily::RecordedEvent,
         kind: EventKind::Disruption,
         themes,
         ts_utc,
         ingested_at: chrono::Utc::now(),
         lat,
         lon,
+        location_role: LocationRole::EventSite,
         location_precision: LocationPrecision::Country,
         location_confidence: 0.55,
         country_iso: info.iso_a3.clone(),
         admin1: None,
         h3_cell,
-        article_count: 1,
+        volume_count: 1,
         distinct_source_count: 1,
         severity: Some(severity_from_score(score)),
         headline: Some(format!(
@@ -155,7 +159,9 @@ pub fn normalize_event(
             "https://ioda.inetintel.cc.gatech.edu/country/{entity_code}?from={start}&until={}",
             start + duration
         )],
-    }])
+    };
+    ev.validate()?;
+    Ok(vec![ev])
 }
 
 #[cfg(test)]

@@ -153,14 +153,19 @@ pub fn search_terms(raw: &str) -> String {
 ///
 /// The same clip routinely reaches us twice — a news article and a Bluesky
 /// post both linking one YouTube video — so identity is the URL, not the
-/// provider. The first occurrence wins, which is why callers pass the
-/// providers in the order they'd rather attribute to.
+/// provider. The first occurrence wins, and the sort decides which copy that
+/// is.
 ///
-/// The sort is by timestamp *only*, deliberately: `sort_by` is stable, so ties
-/// keep the caller's order and that attribution preference survives. Adding a
-/// URL tiebreak would silently hand ties to whichever copy sorts lower.
+/// The tiebreak is `Provider`'s own declaration order (`Gdelt` < `Bluesky` <
+/// `Telegram`), *not* the caller's insertion order. It used to be insertion
+/// order, on the reasoning that a stable sort would preserve whatever sequence
+/// the legs were run in. That reasoning died with sequential search: the
+/// desktop now runs the legs concurrently, so insertion order is whichever
+/// provider's socket answered first, and attribution would flip between two
+/// identical searches. Ranking here makes the merged list a function of the
+/// hits alone.
 pub fn merge(mut hits: Vec<MediaHit>) -> Vec<MediaHit> {
-    hits.sort_by_key(|hit| std::cmp::Reverse(hit.ts_utc));
+    hits.sort_by_key(|hit| (std::cmp::Reverse(hit.ts_utc), hit.provider));
     let mut seen = std::collections::HashSet::new();
     hits.retain(|hit| seen.insert(hit.url.to_lowercase()));
     hits
@@ -239,9 +244,31 @@ mod tests {
             vec![
                 "https://youtu.be/b",
                 "https://t.me/chan/7",
-                "https://youtu.be/a"
+                // The news copy survives the duplicate pair even though the
+                // post was passed first: identity is the URL, attribution is
+                // the provider rank.
+                "https://youtu.be/A"
             ]
         );
+    }
+
+    #[test]
+    fn attribution_does_not_depend_on_which_leg_answered_first() {
+        // The desktop runs the legs concurrently, so these two vectors are the
+        // same search finishing in two different orders. A user who searches
+        // twice must not see the clip credited to the outlet once and to an
+        // anonymous post the next time.
+        let news = hit("https://youtu.be/dup", Provider::Gdelt, 100);
+        let post = hit("https://youtu.be/DUP", Provider::Bluesky, 100);
+        for order in [
+            vec![news.clone(), post.clone()],
+            vec![post.clone(), news.clone()],
+        ] {
+            let merged = merge(order);
+            assert_eq!(merged.len(), 1);
+            assert_eq!(merged[0].provider, Provider::Gdelt);
+            assert_eq!(merged[0].url, "https://youtu.be/dup");
+        }
     }
 
     #[test]

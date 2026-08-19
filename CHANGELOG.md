@@ -8,6 +8,89 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
+M9 "Truth" is in progress. See [docs/SIGNAL_MODEL.md](docs/SIGNAL_MODEL.md)
+for the contract and [docs/ROADMAP.md](docs/ROADMAP.md#m9-truth--the-signal-contract)
+for the item-by-item state.
+
+### Added
+
+- `docs/SIGNAL_MODEL.md`: the signal contract. Product rule 1 says media
+  attention, discrete events, official alerts, aggregate chatter, generated
+  prose, and transient media research stay separate; this page is the
+  machine-checkable form of that rule — the family matrix, volume units,
+  location roles, score membership, digest membership, and the long-form
+  bucket/baseline storage shape.
+- `core-types::SignalFamily`: the top-level observation axis
+  (`MediaAttention`, `RecordedEvent`, `OfficialAlert`, `Chatter`,
+  `Measurement`). `EventKind` is demoted to the within-family subtype, and the
+  pair is validated at normalization by `SignalFamily::permits`, so a
+  family/kind pair outside the matrix is a normalization error rather than a
+  column that drifts.
+- `core-types::LocationRole` (`EventSite`, `MentionedPlace`,
+  `PublisherOrigin`, `ReportingJurisdiction`): what a record's coordinates are
+  a statement about. GDELT DOC resolves the *publisher's* country, so DOC rows
+  are `PublisherOrigin` and are excluded from the spatial attention layer
+  until the GDELT geography question is settled.
+- `core-types::ChannelClass`: chatter-source provenance (monitor, partisan,
+  combatant, state, `Unspecified` by default — never `Monitor`, which would
+  fabricate provenance a source never asserted). It enters the chatter
+  accumulator *key* and the derived rollup id, not `ChatterRollup`: by rollup
+  time the counts are already summed, and class-specific rollups for the same
+  place/topic/window would otherwise collide in storage. Class is a property
+  of a channel, not a person, so the aggregate-before-storage boundary is
+  unchanged.
+- Long-form per-family derived tables:
+  `family_buckets(h3_cell, bucket_start, family, record_count, volume_count)`
+  and `family_baselines(h3_cell, tod_bucket, family, baseline, sample_days)`.
+  Long-form rather than a column per family so a sixth family is not a schema
+  migration, and because per-family baselines are exactly the shape silence
+  detection needs.
+- `storage::DIGEST_FACTS_SCHEMA_VERSION`: cached Daily Events prose is tagged
+  with the facts schema it was generated from, so prose written when chatter
+  counted as media attention can never be presented as current.
+
+### Changed
+
+- **Aggregate chatter is no longer stored as media attention.** Bluesky and
+  Telegram rollups were normalized as `EventKind::NewsAttention` with post
+  count in `article_count` and a synthetic headline that the row-level licence
+  check then stripped — which is what produced Daily Events prose reading "16
+  media-attention records across zero identified outlet domains, with no
+  headline metadata available". Chatter is now its own family, writes no
+  synthetic headline and no outlet domains, and contributes nothing to unrest,
+  the generic spike baseline, `combined_score`, article totals, outlet
+  diversity, or attention source counts. Asserted field-by-field, not inferred
+  from weights.
+- **NOAA alerts leave the unrest score.** They normalized to `Disruption` and
+  scored as civil unrest; they are now `OfficialAlert`, count in their own
+  family bucket, and still appear in the Daily Events event section, labelled
+  official. This visibly lowers US-heavy unrest scores.
+- `GeoTemporalEvent.article_count` is now `volume_count`, measured in the
+  family's own unit (articles, records, alerts, posts, samples) and never
+  summed across families. IODA, NOAA, and chatter stop claiming articles they
+  do not have. `RegionBucket.article_count`, `source_count`,
+  `distinct_outlets`, and `RegionDetail.total_articles` are attention-only by
+  construction.
+- Analytics no longer branches on "attention, or else". `EventKind::is_attention`
+  and `is_discrete_event` are gone — the latter was literally `!is_attention()`,
+  so any third kind of observation fell into the event branch and contributed
+  event count, recency, severity, and precision to the unrest score. Every
+  scoring decision now asks `SignalFamily`, exhaustively and with no catch-all
+  arm, so a new family fails to compile wherever a decision is required.
+- Storage queries split on `family` instead of `kind = 'news_attention'`. Both
+  halves name the families they want, so chatter and measurement reach
+  neither.
+
+### Migration
+
+- `crates/storage/migrations/0004_signal_families.sql`. `events` gains NOT NULL
+  `family` and `location_role` columns, which DuckDB cannot add in place, so
+  the migration builds a shadow table inside one transaction, backfills per
+  record (not per source), swaps, and drops. Derived tables are dropped and
+  recreated. Migration does not itself trigger a bucket rebuild — that runs on
+  ingest or purge — so it sets a `storage_meta` marker that forces the rebuild
+  before any query is served. Cached digests are invalidated.
+
 ## [0.8.0] — 2026-08-17 — M8: source attribution, Settings and About, CI benches, retention profiling, and chatter segmentation
 
 ### Added

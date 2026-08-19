@@ -31,7 +31,19 @@ smoke-test path.
   agency's coverage and update cycle.
 - **Aggregate chatter** is a count of public posts or channel messages that
   matched a place and topic. The app stores no post text, author identity,
-  message identifier, or message URL.
+  message identifier, or message URL. Chatter is its **own** signal, counted
+  in posts: it never adds to article counts, outlet diversity, the unrest
+  score, the headline combined score, or Daily Events. It is shown on its own
+  timeline lane, and its markers are off by default.
+
+Each of these is a **signal family** with its own unit — articles, records,
+alerts, posts — and volumes are never comparable across families. The
+machine-checked contract is [docs/SIGNAL_MODEL.md](docs/SIGNAL_MODEL.md).
+Two consequences worth knowing as a reader: an official weather warning is a
+warning, not unrest, so it does not raise a region's unrest score; and a
+media-attention record from GDELT's article feed is located at the
+**publisher**, not at the story, so those rows shade regions and are kept off
+the marker layer rather than drawn as events at a place.
 
 This is a situational-awareness aid, not a substitute for official emergency
 instructions or a promise that an area is safe.
@@ -132,10 +144,12 @@ click **generate digest**. Nothing is generated automatically. A digest is
 cached locally per day and can be regenerated explicitly.
 
 The page always keeps **media attention** and **event data** in separate
-sections with their record counts, model, and generation time. A bounded set
-of aggregate counts and permitted record metadata is sent to Google Gemini for a
-requested digest; ACLED and Bluesky/Telegram row-level data are withheld and
-remain counts-only. Read the exact boundary in
+sections with their record counts, model, and generation time. The attention
+section counts media attention only — aggregate chatter is not sent and is
+not described there — and official alerts appear in the event section
+explicitly named as warnings rather than as incidents. A bounded set of
+aggregate counts and permitted record metadata is sent to Google Gemini for a
+requested digest; ACLED row-level data is withheld and remains counts-only. Read the exact boundary in
 [Safety and privacy](docs/SAFETY_AND_PRIVACY.md#third-party-processing-google-gemini-api).
 
 The **media** page is a separate, user-directed research action. Pick a place,
@@ -239,6 +253,7 @@ Tag-driven releases build desktop binaries and publish worker/API images.
 | [docs/API.md](docs/API.md) | Services API, snapshot contract, middleware, and endpoints. |
 | [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | Domain types, DuckDB schema, Daily Events cache, transient media research, and fixtures. |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup, environment variables, test commands, and service operations. |
+| [docs/SIGNAL_MODEL.md](docs/SIGNAL_MODEL.md) | The signal-family contract: families, units, location roles, and which score, digest, and layer each may enter. |
 | [docs/SCORING.md](docs/SCORING.md) | Transparent scoring and baseline design. |
 | [docs/VISUALIZATION.md](docs/VISUALIZATION.md) | Shipped V1-V3 visualization decisions and guardrails. |
 | [docs/SAFETY_AND_PRIVACY.md](docs/SAFETY_AND_PRIVACY.md) | Hard safety rules, licensing, bias, retention, and Daily Events/media boundaries. |

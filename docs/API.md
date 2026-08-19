@@ -187,9 +187,15 @@ Query params:
 
 **Response is a page, not a bare array** (M7): `{"total": usize, "offset":
 i64, "limit": i64, "rows": [...]}`, `rows` shaped as before
-(`{"id": u64, "lat": f64, "lon": f64, "kind": str, "precision": str,
-"confidence": f32, "ts_epoch_s": i64, "article_count": u32, "headline":
-str | null}`). Pages are ordered `(ts_epoch_s DESC, id DESC)` — the same
+(`{"id": u64, "lat": f64, "lon": f64, "kind": str, "family": str,
+"location_role": str, "precision": str, "confidence": f32, "ts_epoch_s":
+i64, "volume_count": u32, "headline": str | null}`). **`family` and
+`volume_count` must be read together**: the volume is in that family's own
+unit (articles, records, alerts, posts) and is never comparable across
+families — see docs/SIGNAL_MODEL.md. `location_role` says what the
+coordinates are a statement about; a `publisher_origin` row locates the
+outlet, not the story. `kind` remains the within-family subtype, so `kinds=`
+still filters as before; there is no `families=` parameter yet. Pages are ordered `(ts_epoch_s DESC, id DESC)` — the same
 tiebreak `storage::region_events` uses, and for the same reason: without
 the `id`, rows sharing a timestamp can repeat or vanish across pages.
 `kinds`/`themes` are applied before pagination (so `total` and page

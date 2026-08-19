@@ -28,7 +28,8 @@ pub mod topic;
 
 use chrono::{DateTime, Utc};
 use core_types::{
-    ChatterRollup, EventKind, GeoTemporalEvent, H3_RESOLUTION, NormalizeError, SourceId, event_id,
+    ChannelClass, ChatterRollup, EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationRole,
+    NormalizeError, SignalFamily, SourceId, event_id,
 };
 
 pub use place::{Place, PlaceMatcher};
@@ -98,9 +99,14 @@ pub struct ChatterAccumulator {
     places: PlaceMatcher,
     topics: TopicMatcher,
     window_secs: i64,
-    /// (place index, topic index, window start) -> post count. A BTreeMap so
-    /// `drain` emits rollups in a deterministic order.
-    counts: std::collections::BTreeMap<(usize, usize, i64), u32>,
+    /// (place index, topic index, channel class, window start) -> post count.
+    /// A BTreeMap so `drain` emits rollups in a deterministic order.
+    ///
+    /// Class is in the **key**, not on the rollup, because this accumulator is
+    /// shared across every channel a source sweeps: a monitor's posts and a
+    /// combatant's would otherwise be summed before any rollup exists, and no
+    /// later field could unpick them. See docs/SIGNAL_MODEL.md.
+    counts: std::collections::BTreeMap<(usize, usize, ChannelClass, i64), u32>,
     scanned: u64,
     matched: u64,
 }
@@ -136,7 +142,13 @@ impl ChatterAccumulator {
     /// A post counts only if it names both a known place and a known topic;
     /// one place and one topic per post, so a post cannot inflate several
     /// aggregates at once.
-    pub fn observe(&mut self, text: &str, ts: DateTime<Utc>) -> bool {
+    ///
+    /// `class` is the provenance of the *channel* the post came from — never
+    /// anything about its author. Callers must state it; there is no default,
+    /// because assuming `Monitor` would fabricate provenance the source never
+    /// asserted. A firehose with no per-channel notion passes
+    /// [`ChannelClass::Unspecified`].
+    pub fn observe(&mut self, text: &str, ts: DateTime<Utc>, class: ChannelClass) -> bool {
         self.scanned += 1;
         let words = tokenize(text);
         // Scripts that do not delimit words arrive as one whitespace token per
@@ -164,7 +176,7 @@ impl ChatterAccumulator {
         let window = window_start(ts.timestamp(), self.window_secs);
         *self
             .counts
-            .entry((place_idx, topic_idx, window))
+            .entry((place_idx, topic_idx, class, window))
             .or_insert(0) += 1;
         self.matched += 1;
         true
@@ -174,7 +186,7 @@ impl ChatterAccumulator {
     /// leaving the in-progress window still accumulating.
     ///
     /// Completed-only is a correctness requirement, not tidiness. A rollup's
-    /// derived event id is `(place, topic, window_start)`, so publishing a
+    /// derived event id is `(place, topic, class, window_start)`, so publishing a
     /// half-counted window would claim that id; the rest of that window would
     /// then be discarded by storage's dedup-by-id and those posts would
     /// vanish. Draining whole windows only means every window is published
@@ -186,7 +198,7 @@ impl ChatterAccumulator {
         let mut completed = std::collections::BTreeMap::new();
         let mut pending = std::collections::BTreeMap::new();
         for (key, count) in std::mem::take(&mut self.counts) {
-            if key.2 < cutoff {
+            if key.3 < cutoff {
                 completed.insert(key, count);
             } else {
                 pending.insert(key, count);
@@ -205,24 +217,27 @@ impl ChatterAccumulator {
 
     fn rollups_from(
         &self,
-        counts: std::collections::BTreeMap<(usize, usize, i64), u32>,
+        counts: std::collections::BTreeMap<(usize, usize, ChannelClass, i64), u32>,
     ) -> Vec<ChatterRollup> {
         counts
             .into_iter()
-            .map(|((place_idx, topic_idx, window), post_count)| {
-                let place = self.places.place(place_idx);
-                ChatterRollup {
-                    place_name: place.name.clone(),
-                    country_iso: place.country_iso.clone(),
-                    lat: place.lat,
-                    lon: place.lon,
-                    precision: place.precision,
-                    topic: self.topics.label(topic_idx).to_owned(),
-                    window_start_epoch_s: window,
-                    window_secs: self.window_secs,
-                    post_count,
-                }
-            })
+            .map(
+                |((place_idx, topic_idx, channel_class, window), post_count)| {
+                    let place = self.places.place(place_idx);
+                    ChatterRollup {
+                        place_name: place.name.clone(),
+                        country_iso: place.country_iso.clone(),
+                        lat: place.lat,
+                        lon: place.lon,
+                        precision: place.precision,
+                        topic: self.topics.label(topic_idx).to_owned(),
+                        channel_class,
+                        window_start_epoch_s: window,
+                        window_secs: self.window_secs,
+                        post_count,
+                    }
+                },
+            )
             .collect()
     }
 
@@ -244,10 +259,17 @@ impl ChatterAccumulator {
 
 /// Turn one rollup into the workspace's normalized event shape.
 ///
-/// Chatter volume is an **attention** observation, the same class as GDELT's
-/// article counts — never a discrete event record. `article_count` carries
-/// the post count, and the headline is a generated summary of the aggregate;
-/// no post text can reach it.
+/// Chatter is its **own family** ([`SignalFamily::Chatter`]), not media
+/// attention and not a discrete event. It was previously written as
+/// [`EventKind::NewsAttention`], which is how post volume reached article
+/// totals, outlet diversity and the Daily Events attention section — "16
+/// media-attention records across zero identified outlet domains". Post
+/// volume lands in `volume_count`, counted in posts, and enters neither the
+/// unrest score nor the generic spike baseline.
+///
+/// No headline is written. A generated summary is a claim the row cannot
+/// support; the UI composes its label from the rollup's own place, topic and
+/// count at render time.
 pub fn normalize_rollup(
     rollup: &ChatterRollup,
     source: SourceId,
@@ -272,20 +294,29 @@ pub fn normalize_rollup(
         return Ok(Vec::new());
     }
 
+    // Class is part of the id: two class-specific rollups for the same
+    // place/topic/window are different observations, and without it the
+    // second would be discarded by storage's dedup-by-id.
     let source_event_id = format!(
-        "{}-{}-{}",
-        rollup.place_name, rollup.topic, rollup.window_start_epoch_s
+        "{}-{}-{}-{}",
+        rollup.place_name,
+        rollup.topic,
+        rollup.channel_class.as_str(),
+        rollup.window_start_epoch_s
     );
-    Ok(vec![GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(source, &source_event_id),
         source,
         source_event_id,
-        kind: EventKind::NewsAttention,
+        family: SignalFamily::Chatter,
+        kind: EventKind::Chatter,
         themes: vec!["chatter".to_owned(), rollup.topic.clone()],
         ts_utc,
         ingested_at: Utc::now(),
         lat: rollup.lat,
         lon: rollup.lon,
+        // A place named in posts, never a location taken from any person.
+        location_role: LocationRole::MentionedPlace,
         location_precision: rollup.precision,
         // Keyword place-matching is deliberately crude; say so in the number
         // the UI already shows rather than implying gazetteer-grade accuracy.
@@ -293,17 +324,18 @@ pub fn normalize_rollup(
         country_iso: rollup.country_iso.clone(),
         admin1: None,
         h3_cell,
-        article_count: rollup.post_count,
+        // Posts, per the family's volume unit — not articles.
+        volume_count: rollup.post_count,
         // One stream, so there is exactly one "outlet" behind every rollup.
         distinct_source_count: 1,
         severity: None,
-        headline: Some(format!(
-            "{} posts mentioned {} + {}",
-            rollup.post_count, rollup.place_name, rollup.topic
-        )),
+        // Deliberately none: see this function's docs.
+        headline: None,
         outlet_domains: Vec::new(),
         urls: Vec::new(),
-    }])
+    };
+    ev.validate()?;
+    Ok(vec![ev])
 }
 
 #[cfg(test)]
@@ -378,13 +410,29 @@ mod tests {
     #[test]
     fn observe_requires_both_a_place_and_a_topic() {
         let mut acc = accumulator();
-        assert!(!acc.observe("just posted a photo of my lunch", ts(0)));
+        assert!(!acc.observe(
+            "just posted a photo of my lunch",
+            ts(0),
+            ChannelClass::Unspecified
+        ));
         // Place with no topic.
-        assert!(!acc.observe("landed in Kyiv this morning", ts(0)));
+        assert!(!acc.observe(
+            "landed in Kyiv this morning",
+            ts(0),
+            ChannelClass::Unspecified
+        ));
         // Topic with no place.
-        assert!(!acc.observe("there is a protest happening", ts(0)));
+        assert!(!acc.observe(
+            "there is a protest happening",
+            ts(0),
+            ChannelClass::Unspecified
+        ));
         // Both.
-        assert!(acc.observe("big protest in Kyiv right now", ts(0)));
+        assert!(acc.observe(
+            "big protest in Kyiv right now",
+            ts(0),
+            ChannelClass::Unspecified
+        ));
         assert_eq!(acc.scanned(), 4);
         assert_eq!(acc.matched(), 1);
     }
@@ -393,12 +441,20 @@ mod tests {
     fn counts_group_by_place_topic_and_window_then_drain() {
         let mut acc = accumulator();
         // Same window (300s): two posts about the same place and topic.
-        acc.observe("protest in Kyiv", ts(1_000));
-        acc.observe("another protest in Kyiv", ts(1_100));
+        acc.observe("protest in Kyiv", ts(1_000), ChannelClass::Unspecified);
+        acc.observe(
+            "another protest in Kyiv",
+            ts(1_100),
+            ChannelClass::Unspecified,
+        );
         // Same place and topic, next window.
-        acc.observe("protest in Kyiv again", ts(1_000 + 300));
+        acc.observe(
+            "protest in Kyiv again",
+            ts(1_000 + 300),
+            ChannelClass::Unspecified,
+        );
         // Same window, different topic.
-        acc.observe("flooding in Kyiv", ts(1_000));
+        acc.observe("flooding in Kyiv", ts(1_000), ChannelClass::Unspecified);
 
         let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 3);
@@ -421,8 +477,8 @@ mod tests {
     fn drain_completed_leaves_the_in_progress_window_alone() {
         let mut acc = accumulator();
         // Window [900, 1200) is finished; [1200, 1500) is still running.
-        acc.observe("protest in Kyiv", ts(1_000));
-        acc.observe("protest in Kyiv", ts(1_250));
+        acc.observe("protest in Kyiv", ts(1_000), ChannelClass::Unspecified);
+        acc.observe("protest in Kyiv", ts(1_250), ChannelClass::Unspecified);
 
         let now = ts(1_300);
         let first = acc.drain_completed(now);
@@ -434,7 +490,7 @@ mod tests {
         assert!(acc.drain_completed(now).is_empty());
 
         // More posts land in the still-open window and are not lost.
-        acc.observe("protest in Kyiv", ts(1_400));
+        acc.observe("protest in Kyiv", ts(1_400), ChannelClass::Unspecified);
         let second = acc.drain_completed(ts(1_600));
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].window_start_epoch_s, 1_200);
@@ -448,13 +504,17 @@ mod tests {
     fn posts_in_unsegmented_scripts_count() {
         let mut acc = accumulator();
         // Burmese: "an earthquake struck in Yangon".
-        assert!(acc.observe("ရန်ကုန်မြို့မှာ ငလျင်လှုပ်ခဲ့သည်", ts(0)));
+        assert!(acc.observe("ရန်ကုန်မြို့မှာ ငလျင်လှုပ်ခဲ့သည်", ts(0), ChannelClass::Unspecified));
         // Japanese, no spaces at all: "residents evacuated for the typhoon".
-        assert!(acc.observe("東京で台風のため住民が避難した", ts(0)));
+        assert!(acc.observe(
+            "東京で台風のため住民が避難した",
+            ts(0),
+            ChannelClass::Unspecified
+        ));
         // Thai: "flooding in Bangkok".
-        assert!(acc.observe("น้ำท่วมกรุงเทพมหานคร", ts(0)));
+        assert!(acc.observe("น้ำท่วมกรุงเทพมหานคร", ts(0), ChannelClass::Unspecified));
         // A place with no topic still does not count, in any script.
-        assert!(!acc.observe("東京の天気はいいですね", ts(0)));
+        assert!(!acc.observe("東京の天気はいいですね", ts(0), ChannelClass::Unspecified));
 
         let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 3);
@@ -484,7 +544,11 @@ mod tests {
     fn one_place_and_one_topic_per_post() {
         let mut acc = accumulator();
         // Three places and two topics in one post still counts exactly once.
-        acc.observe("protest and flooding in Kyiv, Berlin and Sudan", ts(0));
+        acc.observe(
+            "protest and flooding in Kyiv, Berlin and Sudan",
+            ts(0),
+            ChannelClass::Unspecified,
+        );
         let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].post_count, 1);
@@ -520,7 +584,11 @@ mod tests {
         for (label, text) in &cases {
             let start = std::time::Instant::now();
             for _ in 0..iterations {
-                std::hint::black_box(acc.observe(std::hint::black_box(text), ts(0)));
+                std::hint::black_box(acc.observe(
+                    std::hint::black_box(text),
+                    ts(0),
+                    ChannelClass::Unspecified,
+                ));
             }
             let whole = start.elapsed() / iterations;
 
@@ -542,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_produces_an_attention_event_with_no_post_content() {
+    fn normalize_produces_a_chatter_event_with_no_post_content() {
         let rollup = ChatterRollup {
             place_name: "Kyiv".into(),
             country_iso: "UKR".into(),
@@ -550,6 +618,7 @@ mod tests {
             lon: 30.52,
             precision: LocationPrecision::City,
             topic: "protest".into(),
+            channel_class: ChannelClass::Unspecified,
             window_start_epoch_s: 1_786_500_000,
             window_secs: 300,
             post_count: 42,
@@ -557,24 +626,97 @@ mod tests {
         let events = normalize_rollup(&rollup, SourceId::Bluesky).unwrap();
         assert_eq!(events.len(), 1);
         let e = &events[0];
-        // Chatter is an attention observation, never a discrete event.
-        assert_eq!(e.kind, EventKind::NewsAttention);
-        assert!(e.kind.is_attention());
-        assert_eq!(e.article_count, 42);
+        // Chatter is its own family — not media attention, not an event.
+        assert_eq!(e.family, SignalFamily::Chatter);
+        assert_eq!(e.kind, EventKind::Chatter);
+        assert_eq!(e.volume_count, 42);
         assert_eq!(e.source, SourceId::Bluesky);
         assert_eq!(e.themes, vec!["chatter", "protest"]);
         assert_eq!(e.ts_utc.timestamp(), 1_786_500_000);
         // No per-post identifiers or content can reach storage.
         assert!(e.urls.is_empty());
         assert!(e.outlet_domains.is_empty());
-        assert_eq!(
-            e.headline.as_deref(),
-            Some("42 posts mentioned Kyiv + protest")
-        );
+        assert!(e.headline.is_none());
 
         // Stable id: same rollup re-ingested is idempotent.
         let again = normalize_rollup(&rollup, SourceId::Bluesky).unwrap();
         assert_eq!(again[0].id, e.id);
+    }
+
+    fn rollup_of(class: ChannelClass, post_count: u32) -> ChatterRollup {
+        ChatterRollup {
+            place_name: "Kyiv".into(),
+            country_iso: "UKR".into(),
+            lat: 50.45,
+            lon: 30.52,
+            precision: LocationPrecision::City,
+            topic: "protest".into(),
+            channel_class: class,
+            window_start_epoch_s: 900,
+            window_secs: 300,
+            post_count,
+        }
+    }
+
+    /// Monitor and combatant volume must not be summed. They are summed
+    /// inside the accumulator unless class is part of its key — no field on
+    /// the rollup could separate them after the fact.
+    #[test]
+    fn channel_class_separates_counts_before_any_rollup_exists() {
+        let mut acc = accumulator();
+        acc.observe("protest in Kyiv", ts(1_000), ChannelClass::Monitor);
+        acc.observe("protest in Kyiv", ts(1_050), ChannelClass::Monitor);
+        acc.observe("protest in Kyiv", ts(1_100), ChannelClass::Combatant);
+
+        let mut rollups = acc.drain_all();
+        rollups.sort_by_key(|r| r.channel_class);
+        assert_eq!(rollups.len(), 2, "same place/topic/window, two classes");
+        let monitor = rollups
+            .iter()
+            .find(|r| r.channel_class == ChannelClass::Monitor)
+            .unwrap();
+        let combatant = rollups
+            .iter()
+            .find(|r| r.channel_class == ChannelClass::Combatant)
+            .unwrap();
+        assert_eq!(monitor.post_count, 2);
+        assert_eq!(combatant.post_count, 1);
+    }
+
+    /// Two class-specific rollups for the same place/topic/window are
+    /// different observations; if class were left out of the derived id the
+    /// second would be silently dropped by storage's dedup-by-id.
+    #[test]
+    fn class_is_part_of_the_derived_event_id() {
+        let a = normalize_rollup(&rollup_of(ChannelClass::Monitor, 2), SourceId::Telegram).unwrap();
+        let b =
+            normalize_rollup(&rollup_of(ChannelClass::Combatant, 1), SourceId::Telegram).unwrap();
+        assert_ne!(a[0].id, b[0].id);
+        assert_ne!(a[0].source_event_id, b[0].source_event_id);
+    }
+
+    /// The defect this whole split exists to remove: chatter was stored as
+    /// `NewsAttention` with a synthetic headline and post counts in the
+    /// article column.
+    #[test]
+    fn chatter_is_never_media_attention() {
+        let ev = &normalize_rollup(&rollup_of(ChannelClass::Unspecified, 7), SourceId::Bluesky)
+            .unwrap()[0];
+        assert_eq!(ev.family, SignalFamily::Chatter);
+        assert_eq!(ev.kind, EventKind::Chatter);
+        assert!(!ev.family.enters_attention());
+        assert!(!ev.family.enters_unrest());
+        assert!(!ev.family.enters_generic_spike());
+        assert!(!ev.family.in_digest());
+        assert_eq!(ev.volume_count, 7, "posts, not articles");
+        assert_eq!(ev.family.volume_unit(), core_types::VolumeUnit::Posts);
+        assert_eq!(ev.location_role, LocationRole::MentionedPlace);
+        assert!(
+            ev.headline.is_none(),
+            "no synthetic headline — the UI composes its own label"
+        );
+        assert!(ev.outlet_domains.is_empty());
+        assert!(ev.validate().is_ok());
     }
 
     #[test]
@@ -586,6 +728,7 @@ mod tests {
             lon: 0.0,
             precision: LocationPrecision::Country,
             topic: "protest".into(),
+            channel_class: ChannelClass::Unspecified,
             window_start_epoch_s: 0,
             window_secs: 300,
             post_count: 0,

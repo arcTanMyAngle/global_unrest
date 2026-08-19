@@ -182,6 +182,13 @@ pub struct AttentionFacts {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EventFacts {
     pub records: u64,
+    /// How many of `records` are official alerts rather than observed events.
+    /// Broken out, and named in the prompt, because a jurisdiction issuing a
+    /// warning is not civil unrest and must not be narrated as one
+    /// (docs/SIGNAL_MODEL.md). Alerts stay in this section because they are
+    /// still things that happened -- Daily Events stays two-sectioned
+    /// (CLAUDE.md product rule 6).
+    pub official_alerts: u64,
     pub by_kind: Vec<(String, u64)>,
     pub by_source: Vec<(String, u64)>,
     pub top_places: Vec<PlaceCount>,
@@ -383,8 +390,16 @@ pub fn render_facts(facts: &DigestFacts) -> String {
     let _ = writeln!(s);
 
     let e = &facts.events;
-    let _ = writeln!(s, "== EVENT DATA (discrete recorded events) ==");
+    let _ = writeln!(s, "== EVENT DATA (recorded events and official alerts) ==");
     let _ = writeln!(s, "event records: {}", e.records);
+    if e.official_alerts > 0 {
+        let _ = writeln!(
+            s,
+            "of which official alerts issued by an agency: {} (a warning, \
+             not an observed incident - never describe these as unrest)",
+            e.official_alerts
+        );
+    }
     let _ = writeln!(s, "by kind: {}", pairs(&e.by_kind));
     let _ = writeln!(s, "by dataset: {}", pairs(&e.by_source));
     if e.top_places.is_empty() {
@@ -564,9 +579,14 @@ mod tests {
                 }],
             },
             events: EventFacts {
-                records: 18,
-                by_kind: vec![("protest".into(), 12), ("disruption".into(), 6)],
-                by_source: vec![("acled".into(), 12), ("ioda".into(), 6)],
+                records: 22,
+                official_alerts: 4,
+                by_kind: vec![
+                    ("protest".into(), 12),
+                    ("disruption".into(), 6),
+                    ("alert".into(), 4),
+                ],
+                by_source: vec![("acled".into(), 12), ("ioda".into(), 6), ("noaa".into(), 4)],
                 top_places: vec![PlaceCount {
                     country_iso: "KEN".into(),
                     records: 9,
@@ -631,8 +651,35 @@ mod tests {
         assert!(text[att..evt].contains("attention records: 120"));
         assert!(text[att..evt].contains("articles behind them: 900"));
         // Event numbers stay in the event half.
-        assert!(text[evt..].contains("event records: 18"));
+        assert!(text[evt..].contains("event records: 22"));
         assert!(text[evt..].contains("protest=12"));
+    }
+
+    #[test]
+    fn official_alerts_are_named_as_warnings_inside_the_event_section() {
+        // Alerts share the event section (two sections only), so the prompt has
+        // to say what they are or the model narrates a weather warning as
+        // unrest -- docs/SIGNAL_MODEL.md.
+        let text = render_facts(&facts());
+        let evt = text.find("== EVENT DATA").expect("event section");
+        let line = text[evt..]
+            .lines()
+            .find(|l| l.starts_with("of which official alerts"))
+            .expect("alert line");
+        assert!(line.contains(": 4"));
+        assert!(text[evt..].contains("never describe these as unrest"));
+    }
+
+    #[test]
+    fn a_day_without_alerts_says_nothing_about_them() {
+        let mut f = facts();
+        f.events.official_alerts = 0;
+        let text = render_facts(&f);
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.starts_with("of which official alerts"))
+        );
     }
 
     #[test]

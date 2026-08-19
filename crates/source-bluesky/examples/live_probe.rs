@@ -61,7 +61,7 @@ async fn main() {
                     // appears twice when a run straddles a flush boundary.
                     println!(
                         "  {:>4} posts  {:<12} {:<12} {:<8} window={}  {}",
-                        e.article_count,
+                        e.volume_count,
                         e.themes.get(1).cloned().unwrap_or_default(),
                         e.country_iso,
                         e.location_precision.label(),

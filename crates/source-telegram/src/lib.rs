@@ -56,7 +56,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use chatter::ChatterAccumulator;
 use chrono::{DateTime, Utc};
-use core_types::{RawRecord, SourceError};
+use core_types::{ChannelClass, RawRecord, SourceError};
 use media_search::{MediaHit, MediaQuery};
 
 use crate::media::ChannelVideo;
@@ -175,8 +175,8 @@ impl ChannelOrchestrator {
 
     /// Sweep every allowlisted channel in order.
     pub async fn sweep_all(&self, reader: &impl ChannelReader) {
-        for name in ALLOWED_CHANNELS {
-            self.sweep_channel(reader, name).await;
+        for channel in ALLOWED_CHANNELS {
+            self.sweep_channel(reader, *channel).await;
         }
     }
 
@@ -189,7 +189,8 @@ impl ChannelOrchestrator {
     /// [`ALLOWED_CHANNELS`]. Whatever arrived before a mid-sweep failure is
     /// still counted and still advances the mark; re-reading it next cycle
     /// would double-count it.
-    async fn sweep_channel(&self, reader: &impl ChannelReader, name: &str) {
+    async fn sweep_channel(&self, reader: &impl ChannelReader, channel: Channel) {
+        let name = channel.name;
         let last_id = self.mark(name);
         let limit = if last_id.is_some() {
             PER_CYCLE_LIMIT
@@ -202,7 +203,7 @@ impl ChannelOrchestrator {
             // The closure is the whole point: text is borrowed, folded into
             // the accumulator, and gone before the next message arrives.
             let mut on_message = |id: i32, text: &str, date: DateTime<Utc>| {
-                sweep.observe(&mut self.lock_accumulator(), id, text, date);
+                sweep.observe(&mut self.lock_accumulator(), id, text, date, channel.class);
             };
             reader
                 .sweep_history(name, last_id, limit, &mut on_message)
@@ -263,7 +264,8 @@ pub async fn search_all(
 
     let mut hits = Vec::new();
     let mut failed = 0usize;
-    for name in ALLOWED_CHANNELS {
+    for channel in ALLOWED_CHANNELS {
+        let name = channel.name;
         match reader.search_videos(name, &text, query).await {
             Ok(found) => hits.extend(media::playable_hits(name, &found)),
             Err(e) => {
@@ -312,11 +314,14 @@ impl ChannelSweep {
         id: i32,
         text: &str,
         date: chrono::DateTime<chrono::Utc>,
+        class: ChannelClass,
     ) {
         self.scanned += 1;
         self.newest = Some(self.newest.map_or(id, |newest| newest.max(id)));
         if !text.trim().is_empty() {
-            acc.observe(text, date);
+            // One accumulator is shared by every channel, so the class has to
+            // travel with the message — by rollup time the counts are summed.
+            acc.observe(text, date, class);
         }
     }
 
@@ -413,28 +418,55 @@ impl ChannelSweep {
 /// pass: the Caribbean (nothing at all), South Asia, West Africa/the Sahel
 /// (lost when `osintsahel` was dropped), and Ethiopia/the wider Horn beyond
 /// Somalia.
-pub const ALLOWED_CHANNELS: &[&str] = &[
+pub const ALLOWED_CHANNELS: &[Channel] = &[
     // Global/multi-region aggregators.
-    "liveuamap",
-    "ClashReport",
-    "osintdefender",
-    "insiderpaper", // global breaking news; heavy video, named outlet
+    Channel::new("liveuamap", ChannelClass::Monitor),
+    Channel::new("ClashReport", ChannelClass::Monitor),
+    Channel::new("osintdefender", ChannelClass::Monitor),
+    // Global breaking news; heavy video, named outlet.
+    Channel::new("insiderpaper", ChannelClass::Outlet),
     // Regional.
-    "AMK_Mapping",     // Russia-Ukraine + Middle East
-    "AlertaMundoNews", // Latin America + world, Spanish-language, video-heavy
-    "garoweonline",    // Somalia and East Africa
+    // Russia-Ukraine + Middle East.
+    Channel::new("AMK_Mapping", ChannelClass::Monitor),
+    // Latin America + world, Spanish-language, video-heavy.
+    Channel::new("AlertaMundoNews", ChannelClass::Outlet),
+    // Somalia and East Africa.
+    Channel::new("garoweonline", ChannelClass::Outlet),
     // Underreported/"forgotten story" beats, deliberately included even
     // though smaller than the aggregators above.
-    "borderlandbeat", // Mexican cartel violence, citizen journalism since 2009
+    // Mexican cartel violence, citizen journalism since 2009.
+    Channel::new("borderlandbeat", ChannelClass::Outlet),
     // The three Myanmar outlets post mostly in Burmese. `chatter::script` can
     // now read Burmese place and topic tokens, so they register ingest signal,
     // but only for the terms in those tables — a Burmese post about anywhere
     // outside Myanmar is still unreachable. They also earn their place on the
     // media side, where the search term is usually a Latin-script place name.
-    "MyanmarWitness", // human-rights reporting, geolocation-led
-    "DVBTV",          // Democratic Voice of Burma — exile outlet, junta-banned
-    "khitthitnews",   // Khit Thit Media — high volume and very fresh
+    // Human-rights reporting, geolocation-led.
+    Channel::new("MyanmarWitness", ChannelClass::Monitor),
+    // Democratic Voice of Burma — exile outlet, junta-banned.
+    Channel::new("DVBTV", ChannelClass::Outlet),
+    // Khit Thit Media — high volume and very fresh.
+    Channel::new("khitthitnews", ChannelClass::Outlet),
 ];
+
+/// One allowlisted channel and its stated provenance.
+///
+/// Class is mandatory rather than defaulted: a channel's posting rate means
+/// something different depending on who runs it — a monitor's tracks events,
+/// a combatant's tracks messaging — and summing them produces a number that
+/// means neither. It is a property of the channel, never of any person who
+/// posts there. See docs/SIGNAL_MODEL.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Channel {
+    pub name: &'static str,
+    pub class: ChannelClass,
+}
+
+impl Channel {
+    const fn new(name: &'static str, class: ChannelClass) -> Self {
+        Self { name, class }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -442,6 +474,8 @@ mod tests {
 
     use chatter::{ChatterAccumulator, DEFAULT_WINDOW_SECS};
     use chrono::{DateTime, Utc};
+
+    use core_types::ChannelClass;
 
     use super::{ALLOWED_CHANNELS, ChannelSweep};
 
@@ -468,9 +502,27 @@ mod tests {
         let mut acc = accumulator();
         let mut sweep = ChannelSweep::new(None);
 
-        sweep.observe(&mut acc, FIRST_ID, "", ts(FINISHED_MESSAGE_TS));
-        sweep.observe(&mut acc, HIGH_ID, "", ts(FINISHED_MESSAGE_TS));
-        sweep.observe(&mut acc, LOW_ID, "", ts(FINISHED_MESSAGE_TS));
+        sweep.observe(
+            &mut acc,
+            FIRST_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
+        sweep.observe(
+            &mut acc,
+            HIGH_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
+        sweep.observe(
+            &mut acc,
+            LOW_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
 
         assert_eq!(sweep.scanned(), 3);
         assert_eq!(sweep.finish(), Some(HIGH_ID));
@@ -481,8 +533,20 @@ mod tests {
         let mut acc = accumulator();
         let mut sweep = ChannelSweep::new(Some(LAST_ID));
 
-        sweep.observe(&mut acc, NEWER_ID, "", ts(FINISHED_MESSAGE_TS));
-        sweep.observe(&mut acc, LOW_ID, "", ts(FINISHED_MESSAGE_TS));
+        sweep.observe(
+            &mut acc,
+            NEWER_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
+        sweep.observe(
+            &mut acc,
+            LOW_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
 
         assert_eq!(sweep.finish(), Some(NEWER_ID));
     }
@@ -492,7 +556,13 @@ mod tests {
         let mut acc = accumulator();
         let mut sweep = ChannelSweep::new(Some(LAST_ID));
 
-        sweep.observe(&mut acc, OLDER_ID, "", ts(FINISHED_MESSAGE_TS));
+        sweep.observe(
+            &mut acc,
+            OLDER_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
 
         assert_eq!(sweep.finish(), None);
     }
@@ -502,8 +572,20 @@ mod tests {
         let mut acc = accumulator();
         let mut sweep = ChannelSweep::new(None);
 
-        sweep.observe(&mut acc, FIRST_ID, "", ts(FINISHED_MESSAGE_TS));
-        sweep.observe(&mut acc, HIGH_ID, " \t\n ", ts(FINISHED_MESSAGE_TS));
+        sweep.observe(
+            &mut acc,
+            FIRST_ID,
+            "",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
+        sweep.observe(
+            &mut acc,
+            HIGH_ID,
+            " \t\n ",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
 
         assert_eq!(sweep.scanned(), 2);
         assert_eq!(acc.scanned(), 0);
@@ -520,9 +602,22 @@ mod tests {
             FIRST_ID,
             "protest in Kyiv",
             ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
         );
-        sweep.observe(&mut acc, HIGH_ID, "travel to Kyiv", ts(FINISHED_MESSAGE_TS));
-        sweep.observe(&mut acc, LOW_ID, "protest today", ts(FINISHED_MESSAGE_TS));
+        sweep.observe(
+            &mut acc,
+            HIGH_ID,
+            "travel to Kyiv",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
+        sweep.observe(
+            &mut acc,
+            LOW_ID,
+            "protest today",
+            ts(FINISHED_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
 
         let rollups = acc.drain_all();
         assert_eq!(rollups.len(), 1);
@@ -536,18 +631,40 @@ mod tests {
         let mut acc = accumulator();
         let mut sweep = ChannelSweep::new(None);
 
-        sweep.observe(&mut acc, FIRST_ID, "protest in Kyiv", ts(OPEN_MESSAGE_TS));
+        sweep.observe(
+            &mut acc,
+            FIRST_ID,
+            "protest in Kyiv",
+            ts(OPEN_MESSAGE_TS),
+            ChannelClass::Monitor,
+        );
 
         assert!(acc.drain_completed(ts(OPEN_WINDOW_NOW)).is_empty());
+    }
+
+    /// The catalog carries provenance for every entry. `Unspecified` is the
+    /// default the *type* has, so a channel left at it would silently mean
+    /// "we never said" while looking configured.
+    #[test]
+    fn every_catalog_channel_declares_a_class() {
+        assert!(
+            ALLOWED_CHANNELS
+                .iter()
+                .all(|channel| channel.class != ChannelClass::Unspecified),
+            "a catalog channel without an explicit class fabricates provenance"
+        );
     }
 
     #[test]
     fn allowed_channels_are_unique_bare_usernames() {
         assert!(!ALLOWED_CHANNELS.is_empty());
-        let unique = ALLOWED_CHANNELS.iter().collect::<BTreeSet<_>>();
+        let unique = ALLOWED_CHANNELS
+            .iter()
+            .map(|channel| channel.name)
+            .collect::<BTreeSet<_>>();
         assert_eq!(unique.len(), ALLOWED_CHANNELS.len());
         assert!(ALLOWED_CHANNELS.iter().all(|channel| {
-            !channel.contains(['@', '/']) && !channel.chars().any(char::is_whitespace)
+            !channel.name.contains(['@', '/']) && !channel.name.chars().any(char::is_whitespace)
         }));
     }
 }

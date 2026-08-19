@@ -7,7 +7,10 @@
 //!
 //! Coverage honesty: this feed is US + territories only — a documented
 //! coverage bias (docs/SAFETY_AND_PRIVACY.md), not a global weather layer.
-//! Alerts normalize as [`EventKind::Disruption`] with weather themes.
+//! Alerts normalize as [`SignalFamily::OfficialAlert`] / [`EventKind::Alert`]
+//! with weather themes. A warning is a jurisdiction announcing a hazard, not
+//! an occurrence of civil unrest, so alerts do not enter the unrest score —
+//! see docs/SIGNAL_MODEL.md.
 //!
 //! Geometry honesty: many alerts are zone-scoped with **no polygon**. We
 //! never invent coordinates, so those normalize to *zero* events by design
@@ -23,8 +26,8 @@ pub use live::NoaaSource;
 
 use chrono::{DateTime, Utc};
 use core_types::{
-    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, NormalizeError, SourceId,
-    event_id,
+    EventKind, GeoTemporalEvent, H3_RESOLUTION, LocationPrecision, LocationRole, NormalizeError,
+    SignalFamily, SourceId, event_id,
 };
 use serde_json::Value;
 
@@ -112,29 +115,34 @@ pub fn normalize_alert(v: &Value) -> Result<Vec<GeoTemporalEvent>, NormalizeErro
         .map(|s| vec![s.to_owned()])
         .unwrap_or_default();
 
-    Ok(vec![GeoTemporalEvent {
+    let ev = GeoTemporalEvent {
         id: event_id(SourceId::Noaa, &source_event_id),
         source: SourceId::Noaa,
         source_event_id,
-        kind: EventKind::Disruption,
+        family: SignalFamily::OfficialAlert,
+        kind: EventKind::Alert,
         themes,
         ts_utc,
         ingested_at: Utc::now(),
         lat,
         lon,
+        // The area the issuing office covers, not a located occurrence.
+        location_role: LocationRole::ReportingJurisdiction,
         location_precision: LocationPrecision::Admin1,
         location_confidence: 0.65,
         country_iso: "USA".to_owned(),
         admin1,
         h3_cell,
-        article_count: 1,
+        volume_count: 1,
         distinct_source_count: 1,
         severity,
         // The alert type label (e.g. "Flood Warning") — headline metadata only.
         headline: Some(event_label.to_owned()),
         outlet_domains: vec!["weather.gov".to_owned()],
         urls,
-    }])
+    };
+    ev.validate()?;
+    Ok(vec![ev])
 }
 
 /// Centroid (vertex mean) of the first exterior ring of a `Polygon` /
@@ -217,7 +225,11 @@ mod tests {
             event_id(SourceId::Noaa, "urn:oid:2.49.0.1.840.0.synthetic1")
         );
         assert_eq!(e.source, SourceId::Noaa);
-        assert_eq!(e.kind, EventKind::Disruption);
+        // An official warning is its own family, not civil unrest — this is
+        // the M9 behaviour change (docs/SIGNAL_MODEL.md).
+        assert_eq!(e.family, SignalFamily::OfficialAlert);
+        assert_eq!(e.kind, EventKind::Alert);
+        assert_eq!(e.location_role, LocationRole::ReportingJurisdiction);
         // Square centroid.
         assert!((e.lat - 38.4).abs() < 1e-9, "lat {}", e.lat);
         assert!((e.lon - -122.4).abs() < 1e-9, "lon {}", e.lon);

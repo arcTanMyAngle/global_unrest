@@ -43,15 +43,23 @@ pub fn theme_weight<'a>(themes: impl IntoIterator<Item = &'a str>) -> f64 {
     weights::THEME_WEIGHT_BASE
 }
 
-/// Per-kind weight for the unrest event-type term. `NewsAttention` never
-/// enters unrest scoring (counting semantics, docs/DATA_MODEL.md).
+/// Per-kind weight for the unrest event-type term.
+///
+/// Only `SignalFamily::RecordedEvent` reaches unrest scoring, so every other
+/// family's kind weighs zero here. That zero is a second line of defence, not
+/// the mechanism: the caller already filters on
+/// [`SignalFamily::enters_unrest`], because a zero weight would still let a
+/// record contribute to the unrest *count* term (docs/SIGNAL_MODEL.md).
 pub fn kind_weight(kind: EventKind) -> f64 {
     match kind {
         EventKind::Conflict => weights::KIND_CONFLICT,
         EventKind::Protest => weights::KIND_PROTEST,
         EventKind::Disruption => weights::KIND_DISRUPTION,
         EventKind::Other => weights::KIND_OTHER,
-        EventKind::NewsAttention => 0.0,
+        EventKind::NewsAttention
+        | EventKind::Chatter
+        | EventKind::Alert
+        | EventKind::Measurement => 0.0,
     }
 }
 

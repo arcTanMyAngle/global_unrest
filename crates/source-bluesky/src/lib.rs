@@ -23,6 +23,7 @@ pub use live::BlueskySource;
 
 use chatter::ChatterAccumulator;
 use chrono::DateTime;
+use core_types::ChannelClass;
 use serde_json::Value;
 
 /// Public Jetstream instances, tried in order and rotated on reconnect.
@@ -100,7 +101,10 @@ pub fn observe_message(raw: &str, acc: &mut ChatterAccumulator) -> MessageOutcom
         return MessageOutcome::Malformed;
     };
     MessageOutcome::Scanned {
-        matched: acc.observe(text, ts),
+        // Jetstream is one undifferentiated firehose, not a set of channels
+        // with stated provenance, so it asserts none. Defaulting it to
+        // `Monitor` would invent provenance the source never gave.
+        matched: acc.observe(text, ts, ChannelClass::Unspecified),
     }
 }
 

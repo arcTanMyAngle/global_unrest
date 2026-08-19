@@ -17,10 +17,16 @@ claim, or establish that an area is safe.
    not stored.
 3. **Attention is not truth.** Media attention, provider event data, official
    alerts, and aggregate chatter remain separate evidence classes. No single
-   blended score is presented as a factual claim.
+   blended score is presented as a factual claim. This is enforced in the
+   schema, not by convention: every record carries a `SignalFamily`, each
+   family has its own volume unit, and which components a family may enter is
+   a checked matrix ([SIGNAL_MODEL.md](SIGNAL_MODEL.md)).
 4. **Do not invent precision.** Only city/exact records become point markers.
    Country/admin records shade regions. A centroid is never described as an
-   observed location.
+   observed location. Every record also carries a `LocationRole` saying what
+   its coordinates *are* — an event site, a place merely mentioned, a
+   publisher's origin, or a reporting jurisdiction — and a publisher-origin
+   record is never drawn as though something happened there.
 5. **Credentials stay local.** Keys and sessions come from environment
    variables or local, gitignored files. They are never committed, logged, or
    included in URLs.
@@ -49,8 +55,13 @@ is generated on startup, on a timer, or in the background.
   counts, and country-level totals.
 - A bounded sample of permitted GDELT, NOAA, and IODA metadata, such as
   headlines/outlet domains or event source, label, kind, and severity.
-- Counts for ACLED and chatter sources when relevant, but never their
-  row-level data.
+- Counts for ACLED when relevant, but never its row-level data.
+
+Aggregate chatter does not leave the device through this path **at all**: the
+digest's fact queries select `family = 'media_attention'` for the attention
+section and `family IN ('recorded_event', 'official_alert')` for the event
+section, so chatter is excluded by the query rather than by a rule someone
+must remember. Chatter is shown only in the app's own UI.
 
 The request is capped by named limits in the daily-digest crate so it cannot
 become a bulk export. Article bodies, ACLED rows, post/message text, author
@@ -113,7 +124,7 @@ playback mechanism requires a new privacy and terms review.
 | NOAA/NWS active alerts | US government public-domain alerts. US and territory coverage only; alerts without usable geometry do not get guessed coordinates. |
 | IODA | Keyless outage events from Georgia Tech's Internet Intelligence Research Lab. Country precision only; use as aggregate network signal, never person-level data. |
 | Bluesky Jetstream | The ingest stream is processed only into aggregate chatter windows. The Media page may explicitly show a public video post's bounded label, URL, and visible handle transiently; it does not feed those fields back into ingest or storage. |
-| Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Ingest aggregates before storage. The explicit Media lookup uses the same allowlist and a read-only session, returning only temporary public video links, bounded labels, and channel attribution. |
+| Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Ingest aggregates before storage, keyed by channel class so classes are never summed together; a class describes a *channel's* provenance and never a person, and defaults to `unspecified` rather than claiming one. The explicit Media lookup uses the same allowlist and a read-only session, returning only temporary public video links, bounded labels, and channel attribution. |
 | Published video embeds | Use provider-published embeds or direct public media files only. Do not resolve a watch page into an underlying stream. |
 | Natural Earth | Public-domain basemap and gazetteer data, attributed in the application and README. |
 | OSM tiles | Not implemented. Any M8 tile layer needs a provider-policy, attribution, offline behavior, and user-control review before it lands. |

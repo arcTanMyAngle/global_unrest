@@ -2,8 +2,8 @@
 //! and the ingest-log window.
 
 use chrono::DateTime;
-use core_types::EventKind;
 use core_types::{AttributionSubject, attribution_for};
+use core_types::{EventKind, SignalFamily};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Vec2};
 
 use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Page, Phase, WindowLen};
@@ -247,6 +247,12 @@ impl App {
                 changed |= ui.checkbox(&mut self.filters.other, "other").changed();
                 changed |= ui
                     .checkbox(&mut self.filters.attention_markers, "attention")
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut self.filters.chatter_markers, "chatter")
+                    .on_hover_text(
+                        "Aggregate social rollups: how many posts mentioned a place,                          with no author, text, or post behind them. Volume only -                          never coverage, never a report that something happened.",
+                    )
                     .changed();
                 changed |= ui
                     .checkbox(&mut self.filters.video_only, "🎥 has video")
@@ -783,25 +789,32 @@ impl App {
             return;
         };
 
-        // Media attention vs event data — always presented separately.
-        let attention = detail
-            .counts_by_kind
-            .iter()
-            .find(|(k, _)| k.is_attention())
-            .map(|(_, c)| *c)
-            .unwrap_or(0);
+        // One section per family, never a combined total (CLAUDE.md product
+        // rule 1, docs/SIGNAL_MODEL.md). The counts below are in four
+        // different units and are deliberately never added together.
+        let family_total = |family: SignalFamily| -> u32 {
+            detail
+                .counts_by_kind
+                .iter()
+                .filter(|(k, _)| k.family() == family)
+                .map(|(_, c)| *c)
+                .sum()
+        };
+
         ui.add_space(6.0);
         ui.label(RichText::new("Media attention").strong());
         ui.label(format!(
-            "{attention} attention records · {} articles · {} distinct outlets",
-            detail.total_articles, detail.distinct_outlets
+            "{} attention records · {} articles · {} distinct outlets",
+            family_total(SignalFamily::MediaAttention),
+            detail.total_articles,
+            detail.distinct_outlets
         ));
 
         ui.add_space(6.0);
         ui.label(RichText::new("Event data").strong());
         let mut any_events = false;
         for (kind, count) in &detail.counts_by_kind {
-            if kind.is_discrete_event() {
+            if kind.family() == SignalFamily::RecordedEvent {
                 any_events = true;
                 ui.horizontal(|ui| {
                     crate::style::dot_swatch(ui, self.map.style.marker_color(*kind));
@@ -811,6 +824,39 @@ impl App {
         }
         if !any_events {
             ui.label(RichText::new("none in window").color(TEXT_DIM));
+        }
+
+        // Official alerts are events, but they are not unrest — they are a
+        // jurisdiction issuing a warning. Separate heading so a busy weather
+        // day cannot read as a busy unrest day.
+        let alerts = family_total(SignalFamily::OfficialAlert);
+        if alerts > 0 {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Official alerts").strong());
+            ui.horizontal(|ui| {
+                crate::style::dot_swatch(ui, self.map.style.marker_alert);
+                ui.label(format!("{alerts} issued by an official source"));
+            });
+        }
+
+        // Aggregate chatter: counts of posts, with no author, text, or post
+        // id behind them, and no claim that anything happened here.
+        let chatter_rollups = family_total(SignalFamily::Chatter);
+        if chatter_rollups > 0 {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Aggregate chatter").strong());
+            ui.horizontal(|ui| {
+                crate::style::dot_swatch(ui, self.map.style.marker_chatter);
+                ui.label(format!(
+                    "{} posts across {chatter_rollups} aggregate windows",
+                    detail.chatter_posts
+                ));
+            });
+            ui.label(
+                RichText::new("volume only · not coverage, not a report of an event")
+                    .color(TEXT_DIM)
+                    .size(11.0),
+            );
         }
 
         // Video is opt-in: show only URLs carried by real source metadata as
@@ -1303,7 +1349,21 @@ impl App {
         let style = &self.map.style;
 
         Self::legend_group(ui, "Marker color — what kind of thing");
-        for kind in EventKind::ALL {
+        // Each kind carries its family, because the family is what says how to
+        // read the number attached to the marker: a chatter marker counts
+        // posts and an attention marker counts articles, and those are never
+        // the same quantity (docs/SIGNAL_MODEL.md). `Measurement` is declared
+        // in the contract but has no source and no lane, so listing it would
+        // promise a channel the map never draws.
+        for kind in EventKind::ALL
+            .into_iter()
+            .filter(|k| *k != EventKind::Measurement)
+        {
+            let note = format!(
+                "{} \u{b7} counted in {}",
+                kind.family().label(),
+                kind.family().volume_unit().label(2)
+            );
             Self::legend_row(
                 ui,
                 |ui| {
@@ -1314,7 +1374,7 @@ impl App {
                     );
                 },
                 kind.label(),
-                None,
+                Some(&note),
             );
         }
 
@@ -1331,8 +1391,8 @@ impl App {
         }
         ui.label(
             RichText::new(
-                "Color and shape are independent: both chatter feeds report \
-                 news attention, so they share the violet fill and are told \
+                "Color and shape are independent: Bluesky and Telegram both \
+                 report aggregate chatter, so they share that fill and are told \
                  apart only by their shape.",
             )
             .color(TEXT_DIM)

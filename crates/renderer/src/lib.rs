@@ -64,6 +64,12 @@ pub struct MapStyle {
     pub marker_disruption: Color32,
     pub marker_other: Color32,
     pub marker_attention: Color32,
+    /// Official alerts. Deliberately close to `alert_outline` so a point and
+    /// the shaded alert area it belongs to read as the same signal.
+    pub marker_alert: Color32,
+    /// Aggregate chatter. Its own hue because it is its own family — never the
+    /// attention violet (docs/SIGNAL_MODEL.md).
+    pub marker_chatter: Color32,
     /// Spike-halo ring color — near-white/achromatic so it reads as a
     /// system overlay ("this is anomalous"), distinct from the hued kind
     /// palette and the heat ramp.
@@ -95,6 +101,8 @@ impl Default for MapStyle {
             marker_disruption: Color32::from_rgb(96, 176, 255),
             marker_other: Color32::from_rgb(158, 158, 170),
             marker_attention: Color32::from_rgb(186, 130, 255),
+            marker_alert: Color32::from_rgb(120, 208, 236),
+            marker_chatter: Color32::from_rgb(104, 206, 168),
             halo_color: Color32::from_rgb(240, 240, 250),
             alert_alpha: 80,
             alert_outline: Color32::from_rgb(176, 232, 255),
@@ -110,6 +118,11 @@ impl MapStyle {
             Conflict => self.marker_conflict,
             Disruption => self.marker_disruption,
             NewsAttention => self.marker_attention,
+            Alert => self.marker_alert,
+            Chatter => self.marker_chatter,
+            // Declared but not rendered as its own lane yet — see
+            // docs/SIGNAL_MODEL.md.
+            Measurement => self.marker_other,
             Other => self.marker_other,
         }
     }

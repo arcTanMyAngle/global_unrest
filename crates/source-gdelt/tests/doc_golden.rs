@@ -7,7 +7,10 @@
 //! `sourcecountry` to prove normalization fails **per record** rather than
 //! aborting the batch.
 
-use core_types::{EventKind, LocationPrecision, NormalizeError, RawRecord, SourceId, event_id};
+use core_types::{
+    EventKind, LocationPrecision, LocationRole, NormalizeError, RawRecord, SignalFamily, SourceId,
+    event_id,
+};
 use source_gdelt::doc;
 
 fn sample_body() -> String {
@@ -48,11 +51,14 @@ fn doc_artlist_normalizes_with_per_record_failures() {
     // Every event is a country-precision attention observation from GDELT.
     for e in &events {
         assert_eq!(e.source, SourceId::Gdelt);
+        assert_eq!(e.family, SignalFamily::MediaAttention);
         assert_eq!(e.kind, EventKind::NewsAttention);
+        // DOC resolves the *publisher's* country, not the story's place.
+        assert_eq!(e.location_role, LocationRole::PublisherOrigin);
         assert_eq!(e.location_precision, LocationPrecision::Country);
         assert!(!e.location_precision.renders_as_point());
         assert_eq!(e.themes, vec!["protest"]);
-        assert_eq!(e.article_count, 1);
+        assert_eq!(e.volume_count, 1);
         assert_eq!(e.urls.len(), 1);
     }
 

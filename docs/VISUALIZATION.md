@@ -248,6 +248,39 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
   (bold lead-in + sentence) because `egui::RichText` renders markdown markup
   literally — a test rejects any `*` that creeps back in.
 
+## M9 — what the family split changed on screen
+
+The signal-family work (docs/SIGNAL_MODEL.md) was mostly a data change, but
+five of its consequences are visible and are now part of the rendering
+contract:
+
+- **The timeline histogram lanes on `SignalFamily`, not `EventKind`.** The
+  stacked bars carry `RecordedEvent` and `OfficialAlert` records only.
+  Attention and chatter are **thin line overlays on independent scales** —
+  articles and posts are not the same quantity, so a bucket where the two
+  lines meet says nothing, and a shared scale would let post volume flatten
+  coverage into the floor. A lane with no data draws nothing rather than a
+  flat line along the floor, which would read as "measured zero everywhere"
+  for a lane that may simply not be collecting.
+- **Chatter markers are off by default**, behind their own filter toggle.
+  Chatter is an aggregate mention count, not a record of something at a
+  place, so it should not silently populate the map.
+- **Marker size normalizes within a family.** Saturation is per family (80
+  articles, 400 posts, 8 records/alerts) because one shared saturation point
+  would draw an 80-post rollup the size of an 80-article news story.
+- **Publisher-origin rows are dropped from the marker layer.** A GDELT DOC
+  row locates the outlet, not the story; drawing it as attention *at* that
+  place is a false map, so those rows are quarantined until the GDELT
+  GEO/GKG decision lands. The legend and the inspector name the family, so
+  "attention" on screen means media attention and nothing else.
+- **The legend is family-annotated**, and the inspector reports aggregate
+  chatter in posts and windows, separately from articles and outlets.
+
+The V3 note above — that Bluesky and Telegram markers were pixel-identical
+because both normalized to `NewsAttention` — describes the pre-M9 state. They
+now share the chatter fill because they are the same *family*, and are still
+told apart by shape.
+
 ## Historical sequencing and continuing guardrails
 
 - V1, V2, and V3 completed in that order. Future visualization work belongs in

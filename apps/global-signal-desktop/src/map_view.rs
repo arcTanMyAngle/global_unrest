@@ -477,8 +477,9 @@ impl MapView {
             format!("{} · {}", row.kind.label(), when),
             truncate(title, 60),
             format!(
-                "{} articles · confidence {:.0}%",
-                row.article_count,
+                "{} {} · confidence {:.0}%",
+                row.volume_count,
+                row.family.volume_unit().label(u64::from(row.volume_count)),
                 f64::from(row.confidence) * 100.0
             ),
             detail_parts.join(" · "),

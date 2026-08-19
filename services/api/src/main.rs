@@ -22,7 +22,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
-use core_types::{EventKind, LocationPrecision, bucket_start_epoch};
+use core_types::{EventKind, LocationPrecision, LocationRole, SignalFamily, bucket_start_epoch};
 use duckdb::{Connection, params};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
@@ -526,12 +526,24 @@ struct EventPointDto {
     /// `core-types` for one enum.
     #[schema(value_type = String)]
     kind: EventKind,
+    /// The observation axis this row belongs to. Serializes as its snake_case
+    /// name (e.g. `"media_attention"`). Read this before `volume_count`: the
+    /// two together are the only honest reading of the volume figure.
+    #[schema(value_type = String)]
+    family: SignalFamily,
+    /// What the coordinates are a statement about — `"event_site"`,
+    /// `"mentioned_place"`, `"publisher_origin"`, `"reporting_jurisdiction"`.
+    /// A `publisher_origin` row locates the outlet, not the story.
+    #[schema(value_type = String)]
+    location_role: LocationRole,
     /// `LocationPrecision` serializes as its snake_case name (e.g. `"city"`).
     #[schema(value_type = String)]
     precision: LocationPrecision,
     confidence: f32,
     ts_epoch_s: i64,
-    article_count: u32,
+    /// Volume in `family`'s own unit — articles, records, alerts, or posts.
+    /// Never comparable across families (docs/SIGNAL_MODEL.md).
+    volume_count: u32,
     headline: Option<String>,
 }
 
@@ -602,8 +614,8 @@ async fn events(
             ACLED_EXCLUSION_CLAUSE
         };
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, lat, lon, kind, location_precision, location_confidence,
-                    ts_epoch_s, article_count, headline, themes
+            "SELECT id, lat, lon, family, kind, location_role, location_precision,
+                    location_confidence, ts_epoch_s, volume_count, headline, themes
              FROM read_parquet('{events_glob}', hive_partitioning=1)
              WHERE ts_epoch_s >= ? AND ts_epoch_s < ?
                AND location_precision IN ('city', 'exact')
@@ -621,20 +633,39 @@ async fn events(
                     r.get::<_, f64>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
-                    r.get::<_, f32>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
-                    r.get::<_, Option<String>>(8)?,
-                    r.get::<_, String>(9)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, f32>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, String>(11)?,
                 ))
             },
         )?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, lat, lon, kind, precision, confidence, ts, articles, headline, themes_s) =
-                row?;
+            let (
+                id,
+                lat,
+                lon,
+                family,
+                kind,
+                location_role,
+                precision,
+                confidence,
+                ts,
+                volume,
+                headline,
+                themes_s,
+            ) = row?;
             let kind = EventKind::parse(&kind)
                 .ok_or_else(|| ApiError::Internal(format!("corrupt kind `{kind}`")))?;
+            let family = SignalFamily::parse(&family)
+                .ok_or_else(|| ApiError::Internal(format!("corrupt family `{family}`")))?;
+            let location_role = LocationRole::parse(&location_role).ok_or_else(|| {
+                ApiError::Internal(format!("corrupt location_role `{location_role}`"))
+            })?;
             if let Some(filter) = &kinds
                 && !filter.contains(&kind)
             {
@@ -653,10 +684,12 @@ async fn events(
                 lat,
                 lon,
                 kind,
+                family,
+                location_role,
                 precision,
                 confidence,
                 ts_epoch_s: ts,
-                article_count: articles as u32,
+                volume_count: volume as u32,
                 headline,
             });
         }

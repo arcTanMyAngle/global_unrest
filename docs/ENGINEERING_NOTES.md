@@ -218,6 +218,35 @@ The call surface both Telegram paths actually need is small and closed:
 `channels.GetChannels`/`users.GetUsers` for peer refs, `messages.GetHistory`
 for the ingest sweep, and `messages.Search` for the media leg.
 
+## Migrating a DuckDB table that needs a NOT NULL column
+
+Two things about DuckDB cost time during the signal-family migration and will
+cost it again:
+
+- **DuckDB cannot add a NOT NULL column to a table that already has rows.**
+  `ALTER TABLE ... ADD COLUMN ... NOT NULL` fails regardless of a DEFAULT.
+  The working pattern is a **shadow table**: create `events_v4`, backfill it
+  with a `SELECT` that computes the new columns, drop the original, rename.
+  `migrations/0004_signal_families.sql` is the reference. Assert in a test
+  that the shadow table is gone afterwards — a leftover `events_v4` beside
+  `events` is silent and survives every later migration.
+- **A migration must not do a full rescore inline.** Rebuilding derived rows
+  costs seconds on a real store and happens while the UI is waiting to open.
+  Set a durable flag (`storage_meta.derived_rebuild_required`) and let `open`
+  do the rebuild before serving the first query, then clear it. Test the
+  clearing explicitly: a marker left set makes *every* subsequent launch
+  rescore the world, and nothing about that failure looks like a bug — the
+  app is merely always slow to start.
+
+Also, a test-placement trap specific to this repo: `duckdb` is a **normal**
+dependency of `crates/storage`, not a dev-dependency, so integration tests in
+`crates/storage/tests/` cannot name `duckdb::Connection`. Any migration test
+that needs to hand-build an old-schema database must live in the `mod tests`
+inside `crates/storage/src/lib.rs`. Those tests rely on a second property
+worth knowing: `Drop for StorageHandle` sends `Cmd::Shutdown` and joins the
+actor thread, so after the handle is dropped the file can be reopened as a
+raw `Connection` to inspect what the migration actually left on disk.
+
 ## Profiling the store, and what the retention ceiling actually was
 
 The M8 profiling pass measured four candidate ceilings at 10x the current

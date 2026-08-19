@@ -7,8 +7,8 @@
 use std::sync::mpsc;
 
 use core_types::{
-    BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, RegionBucket, SourceId,
-    bucket_start_epoch,
+    BUCKET_SECS, EventKind, GeoTemporalEvent, IngestFailure, LocationRole, RegionBucket,
+    SignalFamily, SourceId, bucket_start_epoch,
 };
 use daily_digest::{DayDigest, DayKey, DigestFacts};
 use geo_utils::CountryIndex;
@@ -80,6 +80,13 @@ pub struct Filters {
     /// Show news-attention observations as point markers too (the heatmap
     /// always carries attention; markers default to discrete events only).
     pub attention_markers: bool,
+    /// Show aggregate chatter rollups as point markers. Off by default and
+    /// separate from `attention_markers` because posts are not coverage: the
+    /// two are counted in different units and drawn in different colours
+    /// (docs/SIGNAL_MODEL.md). `serde(default)` keeps settings saved before
+    /// this toggle existed loadable.
+    #[serde(default)]
+    pub chatter_markers: bool,
     pub min_confidence: f32,
     pub show_heatmap: bool,
     pub show_markers: bool,
@@ -124,6 +131,7 @@ impl Default for Filters {
             disruption: true,
             other: true,
             attention_markers: false,
+            chatter_markers: false,
             min_confidence: 0.0,
             show_heatmap: true,
             show_markers: true,
@@ -156,6 +164,9 @@ impl Filters {
         }
         if self.attention_markers {
             kinds.push(EventKind::NewsAttention);
+        }
+        if self.chatter_markers {
+            kinds.push(EventKind::Chatter);
         }
         kinds
     }
@@ -233,23 +244,30 @@ pub struct Timeline {
     pub custom_range_error: Option<String>,
 }
 
-/// Discrete-event kind order for the timeline histogram stack (mirrors
-/// `EventKind::ALL` minus `NewsAttention`, which is drawn as a line overlay
-/// so it never mixes with the event stack — CLAUDE.md's attention/event
-/// separation).
-pub const HISTOGRAM_STACK_KINDS: [EventKind; 4] = [
+/// Kind order for the timeline histogram stack: the `RecordedEvent` kinds
+/// plus `Alert`, which is stacked because an official alert *is* something
+/// that happened, and drawn in its own colour because it is not unrest.
+/// Attention and chatter are line overlays on their own scales, so neither
+/// can be read off the same bar as an event count (docs/SIGNAL_MODEL.md).
+pub const HISTOGRAM_STACK_KINDS: [EventKind; 5] = [
     EventKind::Protest,
     EventKind::Conflict,
     EventKind::Disruption,
+    EventKind::Alert,
     EventKind::Other,
 ];
 
-/// One column of the timeline histogram strip: discrete-event counts by
-/// kind (indexed by [`HISTOGRAM_STACK_KINDS`]) plus the attention count.
+/// One column of the timeline histogram strip: stacked record counts by kind
+/// (indexed by [`HISTOGRAM_STACK_KINDS`]), plus the two overlay counts. The
+/// three are in different units and are never added together.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HistogramBucket {
-    pub event_counts: [u32; 4],
+    pub event_counts: [u32; 5],
+    /// Articles' worth of coverage — `MediaAttention` records.
     pub attention_count: u32,
+    /// Aggregate social rollups. Its own overlay so post volume can never be
+    /// mistaken for coverage or for events.
+    pub chatter_count: u32,
 }
 
 pub struct App {
@@ -1286,8 +1304,17 @@ impl App {
         self.map.alerts = renderer::AlertLayer::new(&cells, &self.map.style);
     }
 
-    fn rebuild_markers(&mut self, points: Vec<EventPoint>) {
-        let article_norm = 81f32.ln(); // saturates at 80 articles
+    fn rebuild_markers(&mut self, mut points: Vec<EventPoint>) {
+        // Publisher-origin coordinates are a statement about the outlet, not
+        // about the place. Drawing one as a point on the map asserts something
+        // the record does not say, so it is dropped from the spatial layer
+        // entirely until the GDELT geography question is settled
+        // (docs/SIGNAL_MODEL.md, docs/ROADMAP.md § M9). Dropped before the
+        // marker inputs are built so `source_index` keeps indexing the rows
+        // the inspector actually holds.
+        let before = points.len();
+        points.retain(|p| p.location_role != LocationRole::PublisherOrigin);
+        let quarantined = before - points.len();
         // Recency fade only applies during playback — pausing always shows
         // full detail (docs/VISUALIZATION.md V1 item 4).
         let fade_window = self
@@ -1302,7 +1329,7 @@ impl App {
                 lon: p.lon,
                 lat: p.lat,
                 kind: p.kind,
-                weight: ((p.article_count + 1) as f32).ln() / article_norm,
+                weight: marker_weight(p.family, p.volume_count),
                 severity: p.severity,
                 alpha: fade_window.map_or(1.0, |(ws, we)| {
                     fade_alpha(we - p.ts_epoch_s, we - ws, FADE_FLOOR_ALPHA)
@@ -1318,6 +1345,7 @@ impl App {
         tracing::info!(
             markers = inputs.len(),
             rows = points.len(),
+            quarantined,
             "marker layer rebuilt"
         );
         self.map.markers = MarkerLayer::new(inputs);
@@ -1376,10 +1404,19 @@ impl App {
                 continue; // stale row outside the current extent
             }
             let slot = &mut dense[idx as usize];
-            if p.kind.is_attention() {
-                slot.attention_count += p.count;
-            } else if let Some(i) = HISTOGRAM_STACK_KINDS.iter().position(|&k| k == p.kind) {
-                slot.event_counts[i] += p.count;
+            // Family decides the lane, exhaustively — no catch-all arm, so a
+            // sixth family has to be placed here rather than silently joining
+            // whichever lane the fallthrough happened to be.
+            match p.family {
+                SignalFamily::MediaAttention => slot.attention_count += p.count,
+                SignalFamily::Chatter => slot.chatter_count += p.count,
+                SignalFamily::RecordedEvent | SignalFamily::OfficialAlert => {
+                    if let Some(i) = HISTOGRAM_STACK_KINDS.iter().position(|&k| k == p.kind) {
+                        slot.event_counts[i] += p.count;
+                    }
+                }
+                // Declared, with no lane of its own yet.
+                SignalFamily::Measurement => {}
             }
         }
         self.timeline_histogram = dense;
@@ -1468,6 +1505,22 @@ impl eframe::App for App {
         }
         self.persist_settings();
     }
+}
+
+/// Marker size input, normalized *within* the record's own family.
+///
+/// Volume is measured in articles, records, alerts or posts depending on
+/// family (docs/SIGNAL_MODEL.md), so a single shared saturation point would
+/// draw an 80-post chatter rollup the size of an 80-article news story. The
+/// saturation points below are per family and deliberately far apart.
+fn marker_weight(family: SignalFamily, volume: u32) -> f32 {
+    let saturation: f32 = match family {
+        SignalFamily::MediaAttention => 80.0,
+        SignalFamily::Chatter => 400.0,
+        SignalFamily::RecordedEvent | SignalFamily::OfficialAlert => 8.0,
+        SignalFamily::Measurement => 8.0,
+    };
+    ((volume as f32) + 1.0).ln() / (saturation + 1.0).ln()
 }
 
 /// Recency-fade floor during playback (docs/VISUALIZATION.md V1 item 4:

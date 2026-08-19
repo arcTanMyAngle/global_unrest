@@ -112,6 +112,7 @@ fn facts() -> DigestFacts {
         },
         events: EventFacts {
             records: 22,
+            official_alerts: 0,
             by_kind: vec![("protest".into(), 16), ("disruption".into(), 6)],
             by_source: vec![("acled".into(), 16), ("ioda".into(), 6)],
             top_places: vec![PlaceCount {

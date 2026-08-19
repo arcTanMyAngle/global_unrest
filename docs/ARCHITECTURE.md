@@ -89,17 +89,27 @@ separately. Failures are recorded in the ingest log rather than silently
 dropped.
 
 The storage actor turns events into H3 resolution-3, six-hour RegionBucket
-rows. Attention observations and discrete event records remain separate in
-both scoring and UI. Country/admin precision records shade regions; only
-city/exact records can become point markers.
+rows plus long-form per-family rows (`family_buckets`, `family_baselines`).
+Every normalized record carries a `SignalFamily` and a `LocationRole`, and
+scoring membership is decided by family, not by kind: media attention feeds
+the attention component, recorded events feed unrest, official alerts feed
+neither, and aggregate chatter feeds no shared score at all. The contract is
+[SIGNAL_MODEL.md](SIGNAL_MODEL.md). Country/admin precision records shade
+regions; only city/exact records can become point markers, and
+publisher-origin records are kept off the marker layer entirely because their
+coordinates locate an outlet rather than an event.
 
 Daily Events is intentionally outside the ingest flow. It reads a selected
 UTC day from storage, sends only bounded facts to Google Gemini when explicitly
 requested, and caches one generated digest per UTC day locally. A later
 explicit regeneration replaces that cache row. The output schema has separate
-media-attention and event-data fields. ACLED and Bluesky/Telegram rows are
-withheld from third-party processing and contribute only permitted aggregate
-counts. See [SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md).
+media-attention and event-data fields; the attention half counts media
+attention only, aggregate chatter is excluded from the digest entirely, and
+official alerts are broken out inside the event section so a warning is never
+narrated as unrest. ACLED rows are withheld from third-party processing and
+contribute only permitted aggregate counts. Cached digests carry a
+facts-schema version and are dropped when the facts they were written from
+are redefined, so stale prose cannot be shown as current. See [SAFETY_AND_PRIVACY.md](SAFETY_AND_PRIVACY.md).
 
 The Media page is a separate, deliberately narrow research flow rather than a
 SignalSource. It does not create GeoTemporalEvents, feed the map, or write

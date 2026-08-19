@@ -201,10 +201,171 @@ stylistic, and a later change should not quietly undo them:
   because materialized results are already the documented Media exception
   (product rule 7). That struct deliberately carries no sender.
 
-## M9: voluntary on-scene channels
+## M9: Truth — the signal contract
 
-Any on-scene publishing work begins with a threat model and a small,
-safety-reviewed end-to-end prototype. It must provide:
+M9 is no longer the on-scene publishing milestone. That work is deferred (kept
+below as M12) in favour of correctness: M1–M8 built machinery that runs but
+does not tell the truth about what it puts on screen first.
+
+The contract page is [SIGNAL_MODEL.md](SIGNAL_MODEL.md) — read it before
+touching a family, a unit, a location role, or a scoring membership. It is the
+machine-checkable form of product rule 1.
+
+### The defects M9 addresses
+
+- **Aggregate chatter was stored as media attention.** Every Bluesky/Telegram
+  rollup normalized to `EventKind::NewsAttention`, with post count written into
+  `article_count` and a synthetic headline the row-level licence check then
+  stripped. That is what produced Daily Events prose like *"16 media-attention
+  records across zero identified outlet domains, with no headline metadata."*
+  Product rule 1 was being violated in the database itself.
+- **`is_discrete_event()` was literally `!is_attention()`**, so any third kind
+  of observation fell into the event branch and contributed event count,
+  recency, severity, and precision to the unrest score. A zero kind weight
+  could not save it, because the count term counts records, not weights.
+- **NOAA alerts scored as civil unrest** (they normalized to `Disruption`).
+- **Attention is geocoded to the publisher, not the story** — GDELT DOC
+  resolves `sourcecountry`, so the attention layer shades the outlet's country.
+  Quarantined via `LocationRole::PublisherOrigin` until A2 decides the
+  replacement; an unlisted country still drops the record entirely.
+- **Most days read `attention 0 · events N`.** `sched::backfill_windows` is
+  written, tested, and called by nothing.
+- **Media search times out** — providers run sequentially under one 30 s
+  total-request timeout, retried only on connect errors.
+- **Bluesky's off-switch does not close the socket.**
+
+### Status
+
+| Item | State |
+|---|---|
+| A0 contract page (`docs/SIGNAL_MODEL.md`) | Done |
+| A0 types — `SignalFamily`, `LocationRole`, `ChannelClass`, `permits()`, `volume_count` | Done (`core-types`) |
+| A0 scoring — family-driven accumulator, per-family buckets and baselines | Done (`analytics`) |
+| A1 channel class in the chatter accumulator key and the derived rollup id | Done (`chatter`, `source-telegram`) |
+| A1 migration `0004_signal_families.sql` — shadow table, backfill, rebuild marker | Done; four tests migrate a real v3-shaped database and assert per-record classification, the rebuild, digest invalidation, and idempotence |
+| A1 storage propagation — queries, row structs, family predicates | Done for `crates/storage` |
+| Digest facts-schema version and cache invalidation | Done (`storage`: stamped on store, filtered on load, pruned at open) |
+| `daily-digest` attention section counts only `MediaAttention`; alerts named as warnings in the event section | Done |
+| Desktop UI family awareness; `PublisherOrigin` out of the spatial attention layer | Done (chatter lane and marker toggle, family-annotated legend, publisher-origin rows dropped from the marker layer) |
+| `services/api`, `services/workers`, Parquet schema, committed API fixture | Done (`SELECT *` snapshots carry the new columns; fixture regenerated) |
+| Same-change docs for the family split | Done (`SIGNAL_MODEL`, `DATA_MODEL`, `SCORING`, `VISUALIZATION`, `API`, `ARCHITECTURE`, `SAFETY_AND_PRIVACY`, `DEVELOPMENT`, `ENGINEERING_NOTES`, `CONTRIBUTING`, `README`, `CHANGELOG`) |
+| E — media orchestration, Bluesky lifecycle | Not started |
+| A2 — GDELT GEO/GKG spike: fixtures plus a written finding | Not started; **M9 ends at its decision** |
+
+### Ordering that is load-bearing
+
+The bucket and baseline representation is settled **before** the performance
+work (theme filtering, incremental baselines), so we do not tune a
+representation we are about to replace. Incremental baselines must also
+tolerate out-of-order arrival, because M9.1 backfill inserts into the past.
+
+### Behaviour changes that must ship with numbers
+
+Moving `OfficialAlert` out of unrest is a real change, not a free declaration:
+it visibly lowers US-heavy unrest scores. Before/after numbers on a live
+database are part of shipping it.
+
+## M9.1: the selected GDELT implementation
+
+Separately estimated, because "GEO as an explicitly-aggregate signal" and
+"seven days of GKG ingestion" are radically different sizes. Carries A3 (a
+country name/alias index — `CountryIndex` exposes only `country_at()` and
+`centroid_by_iso_a2()`, so it cannot normalize names) and A4, a **coverage
+ledger** rather than a scalar backfill marker: intervals keyed by
+`(provider, query/config hash, adapter version, start, end, status)`, because a
+scalar cannot express gaps, failed windows, truncation, or a query change.
+
+Constraints already confirmed, not to be re-derived: GEO PointData returns
+locations mentioned *near* the query with ~5 sample articles each, so a
+location count is neither an article count nor a distinct-outlet count; the
+documented GEO API takes a relative `TIMESPAN` of at most 7 days, not arbitrary
+start/end; a broad 6-hour DOC query can silently hit its 250-result cap; and
+GEO+DOC over 56 windows is 112 requests, roughly 9 minutes at the 5 s limiter.
+**No window-level pseudo-join ships** — there is no shared record key.
+
+## M10: Reach
+
+- **Scheduler**: `SignalSource` is deliberately not dyn-safe, so a
+  `Box<dyn SourceDriver>` table is out. Requirements rather than a shape:
+  bounded concurrent jobs, at most one in-flight job per source, per-source
+  cancellation, and control messages processed while a long fetch runs.
+  Migrate sources one at a time.
+- **Transport, fail closed**: an external SOCKS5 proxy via `LES_SOCKS5_PROXY`
+  (no embedded Tor). `.onion` needs proxy-side DNS — `socks5h://`, not a bare
+  `127.0.0.1:9050`; reqwest distinguishes them.
+  `tokio_tungstenite::connect_async` opens its own TCP connection and is not
+  routed automatically, so build the SOCKS stream first and hand it to the
+  WebSocket/TLS handshake. Telegram is proxyable only with the grammers
+  `proxy` feature enabled. An unreachable proxy errors the source and says so —
+  never a silent direct fallback. Redact proxy credentials from status and logs.
+- **Telegram classified packs**: a structured TOML catalog, not a handle list,
+  because a handle list cannot carry mandatory class and region. Entries
+  without explicit provenance are rejected, not defaulted. Resistance/militia,
+  junta/pro-military, Thai deep south, and narco/crime packs are in scope —
+  their `Partisan`/`Combatant`/`State` volume goes to its own claims lane via
+  the accumulator key, out of the neutral aggregate. Configured `region` is
+  channel provenance, never the geolocation of a post. The same runtime catalog
+  feeds both ingest and Telegram media search.
+- **`crates/source-feeds`**: one generic RSS/Atom/JSON adapter with the feed
+  list as configuration (url, shape, region, topic, class, cadence), reusing
+  `chatter::PlaceMatcher` and `TOPICS`. Liveuamap regional feeds and Deep South
+  Watch become config rows. Verify each endpoint is machine-readable and its
+  terms permit reuse first; if Liveuamap has no public feed, use the
+  `liveuamap` Telegram channel already on the allowlist rather than scraping.
+- **Nostr + fediverse**, behind an experimental flag, feeding the existing
+  `ChatterAccumulator`. Bounded id/URI deduplication *before* counting is built
+  in from the start — the same Nostr event appears on many relays and the same
+  post on many instances. Mastodon public timelines may need auth, may be
+  disabled per instance, and cap at 40 statuses per call, so "keyless" is
+  instance-dependent. A relay/instance list is sampled coverage, not a
+  firehose, and must be labelled as such wherever counts appear. Nostr is
+  sybil- and spam-sensitive: verify signatures and reflect that in confidence.
+
+### DrugsData: blocked, not dropped
+
+DrugsData requires **written permission** before its data is reused in another
+software system, and expects **no new samples before 2027** — zero
+DrugsData-origin results for 2026 — so "continuous lab ingestion" does not
+match the source's current state. M9 declares the `Measurement` family in the
+matrix and in validation, which is genuinely free under long-form storage. It
+builds no adapter, no source, and no renderer lane. Revisit only with written
+permission.
+
+## M11: Silence zones
+
+A composite absence layer: several signals dropping together against their own
+28-day baselines, rendered as its own inspectable layer.
+
+The naïve version could not have worked. `BaselineRow` holds one *combined*
+baseline per cell/slot, so it cannot say which signal changed; sparse buckets
+omit zeros, so absence is invisible; and **source failure is indistinguishable
+from silence** — a GDELT timeout or a disabled Bluesky would paint the world
+dark.
+
+A0's `family_buckets` and `family_baselines` are the prerequisite, and are the
+reason those tables are long-form. Still required:
+
+- a **dense candidate universe** built from warm baselines, not from rows that
+  happen to exist;
+- **per-slot source coverage and health**, suppressing whenever a contributing
+  source is disabled, reconnecting, degraded, truncated, or late — suppression
+  is per source-family deficit, not the whole region — and emitting silence
+  only above a minimum number of healthy eligible signals;
+- **precision awareness**, so one country-centroid H3 cell cannot stand for a
+  whole country;
+- **minimum expected volume**, not merely minimum history;
+- **corroboration as positive evidence only** — an observed IODA outage counts;
+  *absence of a weather alert is normal* and is not corroboration.
+
+Rendered hollow or hatched: silence must not read as a hotspot. It cannot ship
+straight after M10, because new sources need `MIN_BASELINE_DAYS` of *healthy*
+collection first; until then the layer shows "warming up" rather than a number.
+
+## M12: voluntary on-scene channels (deferred)
+
+Formerly M9, deferred by decision rather than dropped. Any on-scene publishing
+work begins with a threat model and a small, safety-reviewed end-to-end
+prototype. It must provide:
 
 - publisher and newsroom authentication, provenance, and capture-time history;
 - explicit states such as unreviewed, identity verified, corroborated,
