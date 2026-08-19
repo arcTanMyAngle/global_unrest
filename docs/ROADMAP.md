@@ -230,9 +230,12 @@ machine-checkable form of product rule 1.
   replacement; an unlisted country still drops the record entirely.
 - **Most days read `attention 0 · events N`.** `sched::backfill_windows` is
   written, tested, and called by nothing.
-- **Media search times out** — providers run sequentially under one 30 s
-  total-request timeout, retried only on connect errors.
-- **Bluesky's off-switch does not close the socket.**
+- ~~**Media search times out** — providers run sequentially under one 30 s
+  total-request timeout, retried only on connect errors.~~ Fixed: the three
+  provider legs run concurrently under per-provider deadlines.
+- ~~**Bluesky's off-switch does not close the socket.**~~ Fixed: the
+  socket is now started and stopped by the same switches as every other
+  source.
 
 ### Status
 
@@ -249,7 +252,9 @@ machine-checkable form of product rule 1.
 | Desktop UI family awareness; `PublisherOrigin` out of the spatial attention layer | Done (chatter lane and marker toggle, family-annotated legend, publisher-origin rows dropped from the marker layer) |
 | `services/api`, `services/workers`, Parquet schema, committed API fixture | Done (`SELECT *` snapshots carry the new columns; fixture regenerated) |
 | Same-change docs for the family split | Done (`SIGNAL_MODEL`, `DATA_MODEL`, `SCORING`, `VISUALIZATION`, `API`, `ARCHITECTURE`, `SAFETY_AND_PRIVACY`, `DEVELOPMENT`, `ENGINEERING_NOTES`, `CONTRIBUTING`, `README`, `CHANGELOG`) |
-| E — media orchestration, Bluesky lifecycle | Not started |
+| E — media orchestration | Done (three concurrent provider legs, per-leg deadlines, generation-stamped results, supersession) |
+| E — Bluesky lifecycle | Done (`start_stream`/`stop_stream`; the socket is the switch, pending windows discarded, five lifecycle tests) |
+| E — theme filtering and incremental baselines | Deferred to the performance section, which is sequenced after A2 |
 | A2 — GDELT GEO/GKG spike: fixtures plus a written finding | Not started; **M9 ends at its decision** |
 
 ### Ordering that is load-bearing

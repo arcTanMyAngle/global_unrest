@@ -33,7 +33,7 @@ async fn main() {
         .unwrap_or(60);
 
     let source = BlueskySource::from_env().expect("build source");
-    let stream = source.spawn_stream();
+    source.start_stream();
     println!("streaming for {secs}s...");
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 
@@ -75,5 +75,5 @@ async fn main() {
         }
     }
     println!("{events} events normalized");
-    stream.abort();
+    source.stop_stream().await;
 }

@@ -210,18 +210,14 @@ mod ioda {
     }
 }
 
-/// Feature-gated Bluesky handle — same stub pattern, with one difference:
-/// `make()` also starts the long-lived socket task, because a stream that is
-/// never started would drain empty forever with no visible error.
+/// Feature-gated Bluesky handle. Unlike the other sources the socket is a
+/// lifecycle of its own, so `make()` only builds the source: [`sync_stream`]
+/// starts and stops it from the same switches that gate every other source.
 #[cfg(feature = "bluesky-live")]
 mod bluesky {
     pub use source_bluesky::BlueskySource;
     pub fn make() -> Result<Option<BlueskySource>, core_types::SourceError> {
-        let src = BlueskySource::from_env()?;
-        // Detached on purpose: it reconnects on its own and lives as long as
-        // the worker's runtime.
-        src.spawn_stream();
-        Ok(Some(src))
+        Ok(Some(BlueskySource::from_env()?))
     }
 }
 #[cfg(not(feature = "bluesky-live"))]
@@ -234,6 +230,14 @@ mod bluesky {
     pub struct BlueskySource;
     pub fn make() -> Result<Option<BlueskySource>, SourceError> {
         Ok(None)
+    }
+    impl BlueskySource {
+        pub fn start_stream(&self) -> bool {
+            unreachable!("built without the bluesky-live feature")
+        }
+        pub async fn stop_stream(&self) -> bool {
+            unreachable!("built without the bluesky-live feature")
+        }
     }
     impl SignalSource for BlueskySource {
         fn id(&self) -> SourceId {
@@ -508,10 +512,11 @@ async fn worker(
     let mut ioda_next = Instant::now();
     let mut ioda_status = SourceStatus::offline(SourceId::Ioda, "IODA");
 
-    // Bluesky (feature-gated, keyless): aggregate chatter volume. `make()`
-    // already started the socket; these cycles only drain what it counted, so
-    // the first drain waits a full flush window rather than firing instantly
-    // on an empty accumulator.
+    // Bluesky (feature-gated, keyless): aggregate chatter volume. The socket
+    // is started and stopped by `sync_stream` from the same switches as every
+    // other source; these cycles only drain what it counted, so the first
+    // drain waits a full flush window rather than firing instantly on an
+    // empty accumulator.
     let bluesky_src = match bluesky::make() {
         Ok(src) => src,
         Err(e) => {
@@ -631,6 +636,9 @@ async fn worker(
                             }
                         }
                     }
+                    // Pausing live updates closes the firehose rather than
+                    // leaving it counting into an accumulator nobody drains.
+                    sync_stream(bluesky_src.as_ref(), on && enabled.bluesky).await;
                     let _ = tx.send(IngestMsg::Status(status.clone()));
                     if acled::BUILT {
                         let _ = tx.send(IngestMsg::Status(acled_status.clone()));
@@ -727,6 +735,13 @@ async fn worker(
                             st.next_attempt_epoch_s = None;
                         }
                         let _ = tx.send(IngestMsg::Status(st.clone()));
+                        if source == SourceId::Bluesky {
+                            // Switching Bluesky off closes the socket. Until
+                            // this existed, "off" only stopped the draining:
+                            // the firehose kept arriving and the accumulator
+                            // kept growing behind a switch that read as off.
+                            sync_stream(bluesky_src.as_ref(), on && online).await;
+                        }
                         wake();
                     }
                 }
@@ -763,28 +778,18 @@ async fn worker(
                     &ioda_limiter, &mut ioda_backoff, &mut ioda_status, &tx, &wake).await;
                 ioda_next = Instant::now() + delay;
             }
-            _ = sleep_until(bluesky_next), if online && bluesky_src.is_some() => {
+            _ = sleep_until(bluesky_next), if online && enabled.bluesky && bluesky_src.is_some() => {
                 let bluesky_src = bluesky_src.as_ref().unwrap();
                 // Nominal window: draining a stream has no addressable past,
                 // the accumulator simply holds everything since the last drain.
+                // Nothing is counted while the source is off, so unlike every
+                // earlier version this arm no longer has to run to throw away
+                // what a socket kept collecting behind an off switch.
                 let now = Utc::now();
                 let window = TimeWindow::new(now - ChronoDuration::seconds(BLUESKY_POLL_SECS as i64), now);
-                if enabled.bluesky {
-                    let delay = live_cycle(bluesky_src, "bluesky", window, BLUESKY_POLL_SECS,
-                        &bluesky_limiter, &mut bluesky_backoff, &mut bluesky_status, &tx, &wake).await;
-                    bluesky_next = Instant::now() + delay;
-                } else {
-                    // Bluesky is the one source whose arm still runs while it
-                    // is switched off. The firehose socket is opened once by
-                    // `make()` and has no teardown path, so the accumulator
-                    // keeps counting either way; draining and dropping it on
-                    // cadence is what keeps that accumulator bounded and
-                    // guarantees nothing counted while off is ever stored.
-                    // No network request is made here — the drain is local.
-                    let _ = bluesky_src.fetch(window, &SourceFilters::default()).await;
-                    bluesky_next =
-                        Instant::now() + std::time::Duration::from_secs(BLUESKY_POLL_SECS);
-                }
+                let delay = live_cycle(bluesky_src, "bluesky", window, BLUESKY_POLL_SECS,
+                    &bluesky_limiter, &mut bluesky_backoff, &mut bluesky_status, &tx, &wake).await;
+                bluesky_next = Instant::now() + delay;
             }
             _ = sleep_until(telegram_next), if online && enabled.telegram && telegram_src.is_some() => {
                 let telegram_src = telegram_src.as_ref().unwrap();
@@ -797,6 +802,24 @@ async fn worker(
                 telegram_next = Instant::now() + delay;
             }
         }
+    }
+}
+
+/// Bring the Bluesky socket in line with the switches: it runs exactly when
+/// live updates are on *and* the source is enabled in Settings, and is closed
+/// otherwise.
+///
+/// `start_stream` is idempotent and `stop_stream` returns only once the task
+/// is gone, so this can be called on every switch change without tracking
+/// whether the socket is already in the wanted state. Stopping also discards
+/// the partly-counted window, so nothing counted before the switch can be
+/// published after it comes back on.
+async fn sync_stream(src: Option<&bluesky::BlueskySource>, want_running: bool) {
+    let Some(src) = src else { return };
+    if want_running {
+        src.start_stream();
+    } else {
+        src.stop_stream().await;
     }
 }
 

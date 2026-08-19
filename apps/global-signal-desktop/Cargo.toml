@@ -61,6 +61,7 @@ directories.workspace = true
 dotenvy.workspace = true
 eframe.workspace = true
 egui.workspace = true
+futures-util.workspace = true
 geo-utils.workspace = true
 media-search.workspace = true
 renderer.workspace = true

@@ -2596,6 +2596,7 @@ dependencies = [
  "dotenvy",
  "eframe",
  "egui",
+ "futures-util",
  "geo-utils",
  "media-search",
  "renderer",

@@ -116,7 +116,10 @@ SignalSource. It does not create GeoTemporalEvents, feed the map, or write
 DuckDB, Parquet, API, or cache data. An explicit user query may return a
 public video link, short display label, time, and outlet/channel attribution
 for one place and bounded time window. News results and unverified public
-social posts are displayed separately. On Windows, supported links can use a
+social posts are displayed separately. The three provider legs run
+concurrently rather than in sequence, each under its own deadline, and results
+render as they arrive; a second search supersedes the one in flight instead of
+queueing behind it, so the page still handles one lookup at a time. On Windows, supported links can use a
 provider's published embed inside the app; unsupported links and non-Windows
 builds keep the browser fallback. The feature does not extract media streams
 or add post-level data to the aggregate chatter ingest path.
@@ -209,7 +212,8 @@ eframe 0.36 and wgpu 30 move together. Do not upgrade wgpu independently.
 - Credentials live in the process environment and nowhere else. The settings
   database and the Settings screen carry environment variable *names* and a
   configured yes/no — never a value, a masked prefix, or a length.
-- Bluesky's accumulator keeps counting while the source is switched off,
-  because the firehose socket has no teardown path. Its cadence still drains
-  and discards, so the accumulator stays bounded and nothing counted while
-  off is ever stored.
+- Switching a source off stops the collection, not just the storing. For
+  Bluesky that means the firehose socket itself: it is opened when live
+  updates are on *and* the source is enabled, and closed otherwise. Stopping
+  discards the partly-counted window, so nothing counted before the switch
+  can be published after it comes back on.

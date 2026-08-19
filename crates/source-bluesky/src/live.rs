@@ -13,6 +13,7 @@ use core_types::{
     SourceId, TimeWindow,
 };
 use futures_util::StreamExt;
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{JETSTREAM_ENDPOINTS, MessageOutcome, observe_message, subscribe_url};
@@ -27,11 +28,35 @@ const STATS_EVERY_MSGS: u64 = 50_000;
 
 /// Live Bluesky Jetstream adapter.
 ///
-/// Cloneable handle onto a shared accumulator: the stream task and the
-/// polling caller hold the same `Arc`.
+/// Handle onto a shared accumulator: the stream task and the polling caller
+/// hold the same `Arc`.
+///
+/// # Switching it off means switching it off
+///
+/// The socket used to be started once and detached, so "off" only stopped
+/// the draining, not the counting - the firehose kept arriving, the
+/// accumulator kept growing, and the only thing between a switched-off
+/// source and stored data was a caller remembering to throw each drain
+/// away. [`start_stream`](Self::start_stream) and
+/// [`stop_stream`](Self::stop_stream) make the socket itself the switch:
+/// stopping closes the connection, discards what was counted but never
+/// drained, and returns only once the task is actually gone.
 pub struct BlueskySource {
     endpoint: Option<String>,
     accumulator: Arc<Mutex<ChatterAccumulator>>,
+    /// The running socket task, or `None` when the source is stopped.
+    /// Interior mutability because starting and stopping happen through the
+    /// same `&self` every other source method takes.
+    stream: Mutex<Option<StreamTask>>,
+}
+
+/// A running socket task and the switch that stops it.
+struct StreamTask {
+    handle: tokio::task::JoinHandle<()>,
+    /// Watched by both the read loop and the reconnect sleep, so a stop is
+    /// noticed at either - a source switched off during a five-minute
+    /// backoff must not keep the task alive until that sleep expires.
+    stop: watch::Sender<bool>,
 }
 
 impl BlueskySource {
@@ -45,6 +70,7 @@ impl BlueskySource {
         Ok(Self {
             endpoint: None,
             accumulator: Arc::new(Mutex::new(accumulator)),
+            stream: Mutex::new(None),
         })
     }
 
@@ -79,16 +105,58 @@ impl BlueskySource {
         }
     }
 
-    /// Spawn the long-lived stream task.
+    /// Start the long-lived stream task, unless one is already running.
     ///
-    /// Call once, before the first [`SignalSource::fetch`] — without it the
+    /// Call before the first [`SignalSource::fetch`] - without it the
     /// accumulator stays empty and every drain returns nothing. The task
-    /// reconnects on its own and only ends when the returned handle is
-    /// dropped or aborted.
-    pub fn spawn_stream(&self) -> tokio::task::JoinHandle<()> {
+    /// reconnects on its own until [`stop_stream`](Self::stop_stream) is
+    /// called or the source is dropped.
+    ///
+    /// Returns whether this call is the one that started it. Idempotent on
+    /// purpose: the UI can re-assert "on" without opening a second socket
+    /// counting the same firehose into the same accumulator, which would
+    /// double every number this source publishes.
+    pub fn start_stream(&self) -> bool {
+        let mut slot = Self::lock_stream(&self.stream);
+        if slot.as_ref().is_some_and(|t| !t.handle.is_finished()) {
+            return false;
+        }
+        let (stop, stop_rx) = watch::channel(false);
         let endpoints = self.endpoints();
         let acc = Arc::clone(&self.accumulator);
-        tokio::spawn(async move { stream_forever(endpoints, acc).await })
+        let handle = tokio::spawn(async move { stream_forever(endpoints, acc, stop_rx).await });
+        *slot = Some(StreamTask { handle, stop });
+        true
+    }
+
+    /// Stop the stream task, close its socket, and discard what it counted
+    /// but never published.
+    ///
+    /// Returns whether a task was running. Awaiting the join handle is the
+    /// point rather than an afterthought: when this returns the task has
+    /// been dropped, so the socket is closed and the server has seen the
+    /// connection go - a caller can rely on "stopped" meaning stopped.
+    ///
+    /// The pending discard is a correctness requirement, not tidiness. A
+    /// half-counted window left in the accumulator would be published by the
+    /// first drain after the source came back on, presenting posts counted
+    /// while it was off as part of a later window.
+    pub async fn stop_stream(&self) -> bool {
+        let Some(task) = Self::lock_stream(&self.stream).take() else {
+            return false;
+        };
+        let _ = task.stop.send(true);
+        let _ = task.handle.await;
+        let dropped = Self::lock(&self.accumulator).drain_all().len();
+        tracing::info!(dropped, "bluesky stream stopped; pending windows discarded");
+        true
+    }
+
+    /// Whether a stream task is running right now.
+    pub fn is_streaming(&self) -> bool {
+        Self::lock_stream(&self.stream)
+            .as_ref()
+            .is_some_and(|t| !t.handle.is_finished())
     }
 
     /// Posts scanned and posts matched since the stream started.
@@ -107,6 +175,37 @@ impl BlueskySource {
     fn lock(acc: &Mutex<ChatterAccumulator>) -> std::sync::MutexGuard<'_, ChatterAccumulator> {
         acc.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// Lock the task slot, surviving a poisoned mutex for the same reason.
+    fn lock_stream(
+        slot: &Mutex<Option<StreamTask>>,
+    ) -> std::sync::MutexGuard<'_, Option<StreamTask>> {
+        slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Drop for BlueskySource {
+    /// Dropping the source stops the socket too. `Drop` cannot await, so the
+    /// task is aborted rather than joined; the signal is still sent first so
+    /// a task sitting between await points can end on its own terms.
+    fn drop(&mut self) {
+        let slot = self
+            .stream
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(task) = slot.take() {
+            let _ = task.stop.send(true);
+            task.handle.abort();
+        }
+    }
+}
+
+/// Why a connection ended.
+enum Closed {
+    /// The socket ended by itself, after this many messages; reconnect.
+    Ended(u64),
+    /// [`BlueskySource::stop_stream`] asked for it; do not reconnect.
+    Stopped,
 }
 
 /// Connect, read until the socket dies, back off, reconnect — forever.
@@ -115,14 +214,19 @@ impl BlueskySource {
 /// but replayed posts would be counted a second time and inflate the very
 /// aggregates this source publishes. A gap while disconnected undercounts
 /// instead, which is the honest direction to fail in.
-async fn stream_forever(endpoints: Vec<String>, acc: Arc<Mutex<ChatterAccumulator>>) {
+async fn stream_forever(
+    endpoints: Vec<String>,
+    acc: Arc<Mutex<ChatterAccumulator>>,
+    mut stop: watch::Receiver<bool>,
+) {
     let mut attempt: u32 = 0;
     let mut next_endpoint = 0usize;
-    loop {
+    while !*stop.borrow() {
         let endpoint = &endpoints[next_endpoint % endpoints.len()];
         next_endpoint = next_endpoint.wrapping_add(1);
-        match run_once(endpoint, &acc).await {
-            Ok(messages) => {
+        match run_once(endpoint, &acc, &mut stop).await {
+            Ok(Closed::Stopped) => return,
+            Ok(Closed::Ended(messages)) => {
                 tracing::info!(endpoint, messages, "bluesky stream closed; reconnecting");
                 attempt = 0;
             }
@@ -134,7 +238,13 @@ async fn stream_forever(endpoints: Vec<String>, acc: Arc<Mutex<ChatterAccumulato
         let delay = RECONNECT_MIN_SECS
             .saturating_mul(1u64 << attempt.min(7))
             .min(RECONNECT_MAX_SECS);
-        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        // The wait is cancellable. At the far end of the backoff this is a
+        // five-minute sleep, and a source switched off in Settings must not
+        // stay alive that long after the fact.
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+            _ = stop.changed() => return,
+        }
     }
 }
 
@@ -153,8 +263,12 @@ fn install_crypto_provider() {
     });
 }
 
-/// One connection's lifetime. Returns the number of messages read.
-async fn run_once(endpoint: &str, acc: &Mutex<ChatterAccumulator>) -> Result<u64, SourceError> {
+/// One connection's lifetime.
+async fn run_once(
+    endpoint: &str,
+    acc: &Mutex<ChatterAccumulator>,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Closed, SourceError> {
     install_crypto_provider();
     let url = subscribe_url(endpoint);
     // The stream is not split: `WebSocketStream` answers protocol pings
@@ -167,7 +281,23 @@ async fn run_once(endpoint: &str, acc: &Mutex<ChatterAccumulator>) -> Result<u64
 
     let mut messages: u64 = 0;
     let mut malformed: u64 = 0;
-    while let Some(frame) = socket.next().await {
+    loop {
+        // Both arms are cancel-safe: `changed()` records nothing until it
+        // resolves and `next()` only polls the socket, so losing the race
+        // costs nothing - no frame is consumed and then dropped.
+        let frame = tokio::select! {
+            biased;
+            // Returning here drops `socket`, which closes the connection.
+            // No close frame is sent: writing one needs `futures_util`'s
+            // sink half, which this crate does not otherwise compile, and a
+            // read-only subscription dropping its socket is a case the
+            // server already has to handle - it is what a lost network does.
+            _ = stop.changed() => return Ok(Closed::Stopped),
+            frame = socket.next() => match frame {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
         let frame = frame.map_err(|e| SourceError::Http(format!("jetstream read: {e}")))?;
         let text = match frame {
             Message::Text(t) => t,
@@ -198,7 +328,7 @@ async fn run_once(endpoint: &str, acc: &Mutex<ChatterAccumulator>) -> Result<u64
             );
         }
     }
-    Ok(messages)
+    Ok(Closed::Ended(messages))
 }
 
 impl SignalSource for BlueskySource {

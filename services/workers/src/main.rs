@@ -157,13 +157,15 @@ mod ioda {
 
 /// Feature-gated Bluesky handle — same stub pattern, except `make()` also
 /// starts the socket task, since a stream nobody started would drain empty
-/// forever without surfacing an error.
+/// forever without surfacing an error. The worker has no per-source
+/// switches, so unlike the desktop it starts the socket once and never
+/// stops it.
 #[cfg(feature = "bluesky-live")]
 mod bluesky {
     pub use source_bluesky::BlueskySource;
     pub fn make() -> Result<Option<BlueskySource>, core_types::SourceError> {
         let src = BlueskySource::from_env()?;
-        src.spawn_stream();
+        src.start_stream();
         Ok(Some(src))
     }
 }

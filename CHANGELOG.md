@@ -80,6 +80,31 @@ for the item-by-item state.
 - Storage queries split on `family` instead of `kind = 'news_attention'`. Both
   halves name the families they want, so chatter and measurement reach
   neither.
+- **Media search runs its providers concurrently.** GDELT, Bluesky, and
+  Telegram were sequential legs under a single 30 s total-request timeout, so
+  one slow provider delayed every result and the page could sit blank until
+  everything finished. The three legs now run together, each under its own
+  deadline: a slow-provider notice at 10 s, a per-provider cutoff at 30 s, and
+  a hard completion deadline at 45 s after which the stragglers are cancelled
+  and reported as timed out. Results merge as they arrive, and the selected
+  hit is tracked by URL rather than list position so it survives a late
+  arrival re-ordering the list.
+- **Every media search carries a generation id.** Clicking Search again
+  supersedes the one in flight rather than queueing behind it: the old legs
+  are dropped, the page is told that generation finished, and results that
+  arrive late from a superseded search are discarded instead of being merged
+  into the new list.
+- **Switching Bluesky off closes the firehose socket.** The stream was started
+  once at ingest startup and detached, so "off" only stopped the draining, not
+  the counting — the socket kept arriving and the accumulator kept growing
+  behind a switch that read as off, with only the cadence arm's drain-and-
+  discard keeping it bounded. `BlueskySource::start_stream`/`stop_stream` now
+  run from the same two switches as every other source (live updates on, and
+  the source enabled in Settings). Stopping closes the connection, waits for
+  the task to actually be gone, and discards the partly-counted window so
+  nothing counted before the switch is published after it comes back on. The
+  reconnect backoff is cancellable, so a source switched off during a
+  five-minute wait stops then and not five minutes later.
 
 ### Migration
 

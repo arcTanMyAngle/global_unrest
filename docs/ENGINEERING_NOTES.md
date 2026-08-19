@@ -63,6 +63,17 @@ read [ROADMAP.md](ROADMAP.md); for what changed read
   lines that do not contain ` 0 failed`.
 - **Commit messages via `git commit -F <file>`**, not an inline here-string;
   PowerShell splatting mangles the latter.
+- **A mock HTTP server must read the request before answering.** Closing a
+  TCP socket that still has unread inbound data sends an RST rather than a
+  FIN, and the peer loses the response it was already handed. On Windows the
+  client sees `os error 10054`, "an existing connection was forcibly closed
+  by the remote host" — which arrives as a provider *failure* and hides
+  whatever the test was actually about. Seven media-worker tests failed this
+  way. Drain to the end of the headers first, then reply.
+- **The workspace tokio pin has no `io-util`**, so `AsyncReadExt`/
+  `AsyncWriteExt` do not exist in test code either. Use `TcpStream`'s
+  inherent `readable()`/`try_read()` and `writable()`/`try_write()` and loop
+  on `WouldBlock` rather than adding a feature for a mock.
 - **Map before you read.** These files are long. Get a line-number map of
   symbols first, then read only that range, rather than opening a 3,000-line
   file to find one type. Keep `grep -C` narrow on core files.
@@ -136,13 +147,35 @@ immediately at startup and drains rollups on the first cycle. Bluesky needs
 its full first window before its first drain. Launch from the workspace root
 — `LES_TELEGRAM_SESSION_FILE` is a relative path.
 
-Switching Bluesky off in Settings does not stop its cadence arm. The Jetstream
-firehose socket has no teardown path, so its accumulator keeps filling whether
-or not the source is enabled; the arm still fires on cadence and drains the
-window, discarding it instead of storing it. Gating that arm like the other
-five would leave the accumulator growing without bound. The other five sources
-are gated normally because each is a request the worker either makes or does
-not.
+### Bluesky's off switch is the socket, not the drain
+
+The other five sources are gated by simply not making a request. Bluesky is a
+socket, so for a long time "off" meant something weaker: the Jetstream
+connection had no teardown path, the accumulator kept filling whether or not
+the source was enabled, and the cadence arm had to keep running purely to
+drain and discard — otherwise the accumulator grew without bound. The only
+thing standing between a switched-off source and stored data was a caller
+remembering to throw each drain away.
+
+`start_stream`/`stop_stream` make the socket the switch. Three details are
+load-bearing and easy to lose:
+
+- **`stop_stream` awaits the task's join handle**, so "stopped" means the
+  socket has been dropped rather than "a stop was requested". The test asserts
+  the mock *server* observes the connection close; the server noticing still
+  needs its own task to be scheduled, so the test waits for that rather than
+  asserting instantly.
+- **The reconnect sleep is cancellable.** At the top of the backoff it is a
+  five-minute sleep, and a source switched off in Settings must not stay
+  connected until it expires. Both the read loop and the sleep watch the same
+  `tokio::sync::watch` channel.
+- **No WebSocket Close frame is sent** — writing one needs `futures-util`'s
+  sink half, which this crate does not otherwise compile. Dropping the socket
+  is a case the server already handles; it is what a lost network looks like.
+
+`start_stream` is idempotent because re-asserting "on" must not open a second
+socket counting the same firehose into the same accumulator, which would
+double every number the source publishes.
 
 ### Correction to the chatter backlog: Burmese topic tokens will not work
 

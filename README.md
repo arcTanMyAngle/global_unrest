@@ -155,8 +155,10 @@ requested digest; ACLED row-level data is withheld and remains counts-only. Read
 The **media** page is a separate, user-directed research action. Pick a place,
 an optional topic, and a bounded time window; only then does the app search
 GDELT, public Bluesky posts, and the configured Telegram allowlist for video.
-Nothing is fetched on a timer or written to the database. News videos and
-unverified public posts are labelled separately. On Windows, supported
+Nothing is fetched on a timer or written to the database. The providers are
+searched in parallel and results appear as each one answers, with a notice for
+any that is slow and a per-provider timeout rather than one long wait. News
+videos and unverified public posts are labelled separately. On Windows, supported
 provider embeds can play inside the app; every result retains a browser
 fallback.
 

@@ -68,8 +68,11 @@ egui = "0.36"
 # pure Rust). `zip`'s deflate-flate2 feature pulls flate2 but not a backend.
 flate2 = "1"
 # Bluesky Jetstream's WebSocket stream. futures-util supplies the StreamExt
-# the socket is polled through.
-futures-util = { version = "0.3", default-features = false }
+# the socket is polled through. `alloc` adds FuturesUnordered, which the
+# desktop's media worker runs its three provider legs under -- they borrow a
+# client on a current-thread runtime, so they are `!Send` and cannot be
+# spawned into a JoinSet.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 geo = "0.33"
 geojson = "1.0"
 governor = "0.10"

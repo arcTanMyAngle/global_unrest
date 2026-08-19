@@ -12,7 +12,6 @@ use core_types::{
 };
 use daily_digest::{DayDigest, DayKey, DigestFacts};
 use geo_utils::CountryIndex;
-use media_search::MediaHit;
 use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
 use serde::{Deserialize, Serialize};
 use storage::{
@@ -23,7 +22,7 @@ use storage::{
 use crate::digest::{DigestHandle, DigestMsg};
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
 use crate::map_view::MapView;
-use crate::media::{MediaHandle, MediaMsg};
+use crate::media::{MediaHandle, MediaMsg, MediaSession};
 use crate::video::VideoPlayer;
 
 /// Natural Earth 1:110m countries (public domain; attribution in README).
@@ -408,14 +407,12 @@ pub struct App {
     pub media_place: String,
     pub media_topic: String,
     pub media_window_hours: i64,
-    pub media_hits: Vec<MediaHit>,
-    /// Providers that failed on the last search, named so one rate-limited API
-    /// reads as "news is unavailable" rather than "nothing happened here".
-    pub media_problems: Vec<String>,
-    pub media_searching: bool,
-    /// Index into `media_hits` of the clip in the player.
-    pub media_selected: Option<usize>,
-    pub media_status: Option<String>,
+    /// Results, per-provider progress, and the selected clip for the search on
+    /// screen. Its own type because the providers now answer independently and
+    /// out of order, so which message belongs to which search - and what that
+    /// does to the list and the selection - is a rule worth testing without an
+    /// egui context. See `crate::media::MediaSession`.
+    pub media: MediaSession,
     /// Owns the child webview for the whole session — built lazily on first
     /// play, then reused.
     pub media_player: VideoPlayer,
@@ -576,11 +573,7 @@ impl App {
             media_place: String::new(),
             media_topic: String::new(),
             media_window_hours: crate::media_page::WINDOWS[0].1,
-            media_hits: Vec::new(),
-            media_problems: Vec::new(),
-            media_searching: false,
-            media_selected: None,
-            media_status: None,
+            media: MediaSession::default(),
             media_player: VideoPlayer::new(),
         };
 
@@ -932,41 +925,26 @@ impl App {
         self.poll_media();
     }
 
-    /// Drain the media worker. Nothing here touches storage — a search's
-    /// results live in these fields until the next search replaces them.
+    /// Drain the media worker. Nothing here touches storage - a search's
+    /// results live in `self.media` until the next search replaces them.
+    ///
+    /// Messages arrive per provider and out of order, so every one is folded
+    /// in rather than assigned: [`MediaSession::apply`] drops anything from a
+    /// superseded search and re-merges what is left.
     fn poll_media(&mut self) {
         let Some(rx) = &self.media_rx else { return };
+        let window = crate::media_page::window_label(self.media_window_hours);
         loop {
             match rx.try_recv() {
-                Ok(MediaMsg::Results {
-                    query,
-                    hits,
-                    problems,
-                }) => {
-                    self.media_searching = false;
-                    self.media_selected = None;
-                    self.media_status = Some(if hits.is_empty() {
-                        format!(
-                            "no video found for {} in the {}",
-                            query.place.trim(),
-                            crate::media_page::window_label(self.media_window_hours)
-                        )
-                    } else {
-                        format!(
-                            "{} result{} for {} · {}",
-                            hits.len(),
-                            if hits.len() == 1 { "" } else { "s" },
-                            query.place.trim(),
-                            crate::media_page::window_label(self.media_window_hours)
-                        )
-                    });
-                    self.media_hits = hits;
-                    self.media_problems = problems;
+                Ok(msg) => {
+                    self.media.apply(msg, window);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    // The worker thread is gone; nothing further will arrive,
+                    // so stop showing a spinner for a search nobody is running.
                     self.media_rx = None;
-                    self.media_searching = false;
+                    self.media.searching = false;
                     break;
                 }
             }

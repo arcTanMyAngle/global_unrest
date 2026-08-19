@@ -139,25 +139,25 @@ impl App {
                         ui.selectable_value(&mut self.media_window_hours, hours, label);
                     }
                 });
-            let ready = self.media_handle.available() && !self.media_searching;
+            let ready = self.media_handle.available() && !self.media.searching;
             if ui.add_enabled(ready, egui::Button::new("search")).clicked() {
                 submit = true;
             }
-            if self.media_searching {
+            if self.media.searching {
                 ui.spinner();
             }
         });
-        if submit && self.media_handle.available() && !self.media_searching {
+        if submit && self.media_handle.available() && !self.media.searching {
             self.start_media_search();
         }
 
         ui.add_space(6.0);
-        if let Some(status) = &self.media_status {
+        if let Some(status) = &self.media.status {
             ui.label(RichText::new(status).color(TEXT_DIM).small());
         }
         // One provider failing is not "nothing happened here", so a rate-limited
         // API is named rather than folded into an empty result list.
-        for problem in &self.media_problems {
+        for problem in &self.media.problems {
             ui.colored_label(ERROR_FG, RichText::new(problem).small());
         }
         ui.separator();
@@ -170,8 +170,8 @@ impl App {
     }
 
     fn media_results_list(&mut self, ui: &mut egui::Ui) {
-        if self.media_hits.is_empty() {
-            if !self.media_searching {
+        if self.media.hits.is_empty() {
+            if !self.media.searching {
                 ui.label(
                     RichText::new("No results on screen yet.")
                         .color(TEXT_DIM)
@@ -189,7 +189,8 @@ impl App {
 
     fn media_section(&mut self, ui: &mut egui::Ui, heading: &str, color: Color32, social: bool) {
         let indices: Vec<usize> = self
-            .media_hits
+            .media
+            .hits
             .iter()
             .enumerate()
             .filter(|(_, hit)| hit.provider.is_social() == social)
@@ -208,8 +209,11 @@ impl App {
             );
         }
         for i in indices {
-            let hit = &self.media_hits[i];
-            let selected = self.media_selected == Some(i);
+            // Cloned rather than borrowed: selecting mutates the session,
+            // and late results renumber the list under it anyway - which is
+            // why the selection is held by URL rather than by this index.
+            let hit = self.media.hits[i].clone();
+            let selected = self.media.is_selected(&hit);
             let label = format!("{}  {}", hit.ts_utc.format("%m-%d %H:%M"), hit.title);
             let hover = format!("{} · {}\n{}", hit.provider.label(), hit.origin, hit.url);
             if ui
@@ -217,7 +221,7 @@ impl App {
                 .on_hover_text(hover)
                 .clicked()
             {
-                self.media_selected = Some(i);
+                self.media.select(&hit);
             }
         }
     }
@@ -237,11 +241,7 @@ impl App {
             return;
         }
 
-        let Some(hit) = self
-            .media_selected
-            .and_then(|i| self.media_hits.get(i))
-            .cloned()
-        else {
+        let Some(hit) = self.media.selected_hit().cloned() else {
             self.media_player.hide();
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
@@ -348,21 +348,19 @@ impl App {
             limit: RESULT_LIMIT,
         };
         if !query.is_valid() {
-            self.media_status = Some("Type a place to search for.".into());
+            self.media.reject("Type a place to search for.");
             return;
         }
-        // The previous place's results are cleared rather than left on screen:
-        // a stale list under a new place's heading is worse than an empty one.
-        self.media_hits.clear();
-        self.media_problems.clear();
-        self.media_selected = None;
         self.media_player.hide();
-        self.media_searching = true;
-        self.media_status = Some(format!(
+        // The generation comes back from the dispatch itself, so the page
+        // knows which search it is showing before the first provider answers;
+        // anything stamped with an older one is discarded on arrival.
+        let generation = self.media_handle.search(query);
+        self.media.begin(generation, &self.media_place);
+        self.media.status = Some(format!(
             "searching {} · {}…",
             self.media_place.trim(),
             window_label(self.media_window_hours)
         ));
-        self.media_handle.search(query);
     }
 }
