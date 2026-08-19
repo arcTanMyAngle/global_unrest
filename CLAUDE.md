@@ -179,3 +179,21 @@ Read docs/ENGINEERING_NOTES.md before a dependency, linking, or live-source
 change; it records failures that repeat otherwise. Do not reintroduce a dated
 session journal — CHANGELOG.md and `git log` carry history, ROADMAP.md carries
 open items, and ENGINEERING_NOTES.md carries durable lessons.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `arcTanMyAngle/global_unrest`, driven by the
+`gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles use their default label strings (`needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one root `CONTEXT.md` plus `docs/adr/`, both created lazily.
+See `docs/agents/domain.md`.
