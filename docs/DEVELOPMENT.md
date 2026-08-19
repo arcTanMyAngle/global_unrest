@@ -170,6 +170,16 @@ they cannot embed playback. Do not extract stream URLs from a watch page.
   is a one-time cost per database and is expected, not a fault. There is no
   downgrade path: an older build will not read a v4 store.
 
+### Spike evidence fixtures
+
+`crates/source-gdelt/tests/data/spike-a2/` holds raw upstream captures backing
+the A2 finding in [GDELT_GEO_GKG.md](GDELT_GEO_GKG.md). They are **evidence,
+not test inputs**: no test reads them, nothing in the workspace depends on
+them, and they are deliberately unmodified — response headers, tab delimiters
+and all. Do not reformat them, and do not delete them as unused; their whole
+value is being byte-for-byte what the service returned on 2026-08-19. That
+directory's `README.md` carries per-file provenance and checksums.
+
 ## Services
 
 The service stack is implemented and runs separately from the desktop:

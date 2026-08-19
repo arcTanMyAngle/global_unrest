@@ -226,8 +226,9 @@ machine-checkable form of product rule 1.
 - **NOAA alerts scored as civil unrest** (they normalized to `Disruption`).
 - **Attention is geocoded to the publisher, not the story** — GDELT DOC
   resolves `sourcecountry`, so the attention layer shades the outlet's country.
-  Quarantined via `LocationRole::PublisherOrigin` until A2 decides the
-  replacement; an unlisted country still drops the record entirely.
+  Quarantined via `LocationRole::PublisherOrigin`. A2 has now chosen the
+  replacement: GKG 2.1 `V2ENHANCEDLOCATIONS` as `MentionedPlace`. An unlisted
+  country still drops the record entirely — see A3 below, re-scoped.
 - **Most days read `attention 0 · events N`.** `sched::backfill_windows` is
   written, tested, and called by nothing.
 - ~~**Media search times out** — providers run sequentially under one 30 s
@@ -255,7 +256,7 @@ machine-checkable form of product rule 1.
 | E — media orchestration | Done (three concurrent provider legs, per-leg deadlines, generation-stamped results, supersession) |
 | E — Bluesky lifecycle | Done (`start_stream`/`stop_stream`; the socket is the switch, pending windows discarded, five lifecycle tests) |
 | E — theme filtering and incremental baselines | Deferred to the performance section, which is sequenced after A2 |
-| A2 — GDELT GEO/GKG spike: fixtures plus a written finding | Not started; **M9 ends at its decision** |
+| A2 — GDELT GEO/GKG spike: fixtures plus a written finding | Done (`docs/GDELT_GEO_GKG.md`, fixtures in `crates/source-gdelt/tests/data/spike-a2/`). **Decision: option (b), GKG 2.1** — GEO 2.0 is a hard 404 and has no live endpoint. **M9 closes here.** |
 
 ### Ordering that is load-bearing
 
@@ -272,20 +273,56 @@ database are part of shipping it.
 
 ## M9.1: the selected GDELT implementation
 
-Separately estimated, because "GEO as an explicitly-aggregate signal" and
-"seven days of GKG ingestion" are radically different sizes. Carries A3 (a
+Separately estimated. A2 has now chosen GKG ingestion over the GEO aggregate,
+so this is the larger of the two shapes. Carries A3 (a
 country name/alias index — `CountryIndex` exposes only `country_at()` and
 `centroid_by_iso_a2()`, so it cannot normalize names) and A4, a **coverage
 ledger** rather than a scalar backfill marker: intervals keyed by
 `(provider, query/config hash, adapter version, start, end, status)`, because a
 scalar cannot express gaps, failed windows, truncation, or a query change.
 
-Constraints already confirmed, not to be re-derived: GEO PointData returns
-locations mentioned *near* the query with ~5 sample articles each, so a
-location count is neither an article count nor a distinct-outlet count; the
-documented GEO API takes a relative `TIMESPAN` of at most 7 days, not arbitrary
-start/end; a broad 6-hour DOC query can silently hit its 250-result cap; and
-GEO+DOC over 56 windows is 112 requests, roughly 9 minutes at the 5 s limiter.
+A2 settled the dataset: **GKG 2.1**, not GEO. Full measurements and evidence
+are in `docs/GDELT_GEO_GKG.md`; the load-bearing results are:
+
+- **GEO 2.0 returns 404** for every mode, format, scheme, and path tried, from
+  two networks, while sibling `/api/v2/` endpoints serve. Every GEO-based
+  estimate previously recorded here was written against an endpoint that no
+  longer exists.
+- **GKG gives real linkage**: one 15-minute English window holds 781 articles,
+  173 domains, 676 distinct places and 1,639 distinct (domain, place) edges,
+  with a headline on 100% of rows and geography on 78.7%.
+- **Precision is per-mention**: 30.7% city-or-finer, 17.2% admin, 52.1%
+  country. Country-type mentions carry centroid coordinates and must never
+  render as points.
+- **Themes are document-level.** GKG has no theme-to-location edge; offset
+  proximity yields a median of 2 and a p90 of 7 candidate themes per location,
+  with 20.5% having none within +/-100 characters.
+- **Idempotency is clean**: `GKGRECORDID` is unique, adjacent and 24h-apart
+  windows share zero URLs, files are immutable, and the ETag is the object MD5.
+  The 15-minute filename is the natural A4 ledger unit.
+- **Volume**: ~470 MB/day English, ~1.28 GB/day with translation, ~8.8 GB for
+  seven days combined. Parsing is ~0.07 s per file; download dominates.
+  Sizing the desktop/worker split against this is the first M9.1 question.
+- **History** reaches back to 2015-02-18 by direct filename addressing.
+
+Corrections to constraints previously recorded here as settled:
+
+- DOC **does** accept arbitrary explicit `startdatetime`/`enddatetime`,
+  verified 60 days and ~2 years back. The 7-day ceiling applied to the
+  relative `TIMESPAN` parameter only.
+- The DOC 250-result cap bites far earlier than "a broad 6-hour query": a
+  **one-hour** `DEFAULT_QUERY` window returned 250 articles all from a single
+  15-minute slot, and that slot was *outside* the requested window.
+- The "112 requests, roughly 9 minutes at the 5 s limiter" figure is void.
+  DOC 429s are **server-side load shedding, not client rate limiting** —
+  6 of 8 requests spaced 20 s apart were rejected. Any DOC backfill needs
+  backoff, a coverage ledger, and no promise of bounded completion.
+
+A3 is **re-scoped**: with GKG as the spatial record, expanding the country
+name index is no longer the point. The defect worth fixing is that an unknown
+country name fails normalization and discards the whole DOC article rather
+than leaving it ungeocoded (9.6% of records in a real sample).
+
 **No window-level pseudo-join ships** — there is no shared record key.
 
 ## M10: Reach

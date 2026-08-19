@@ -140,6 +140,50 @@ read [ROADMAP.md](ROADMAP.md); for what changed read
   `CDLA-Permissive-2.0` have all been missed by guessing. `[graph] targets`
   must list all three shipped OSes or Linux-only advisories stay hidden.
 
+### GDELT: what the A2 spike cost, so it is not re-paid
+
+Measured 2026-08-19, evidence in `crates/source-gdelt/tests/data/spike-a2/`,
+full finding in `docs/GDELT_GEO_GKG.md`. Four traps, each of which burned real
+time:
+
+- **GEO 2.0 is a 404, and the documentation still describes it.** Every mode
+  (`PointData`, `ADM1`, `Country`), both formats, both schemes, and the paths
+  `api/v2/geo`, `api/v2/geo/geo`, `api/v2/geo/geo.php` and `api/v1/geo/geo`
+  return Apache's stock 404 from `Server: GDELT Server`. It is not a UA, a
+  `Referer`, a CDN, or our network — `tv/tv`, `doc/doc`, `summary/summary` and
+  `context/context` all serve from the same host and prefix, and the 404
+  reproduces from a second network. If you find yourself debugging a GEO
+  request, stop: the endpoint is gone.
+- **A DOC 429 tells you nothing about your request rate.** Eight requests
+  spaced 20 s apart — four times more conservative than the documented
+  one-per-five-seconds — returned six 429s and two 200s, interleaved. A cold
+  request after eleven hours idle also 429'd. The 429 body is *plain text*
+  (not JSON) and always recites the 5 s limit regardless of what you actually
+  did. Treat DOC throughput as server-controlled: back off, record which
+  windows landed, and never cost a backfill as "N requests x 5 s".
+  `curl --retry --retry-all-errors` does **not** retry a 429.
+- **DOC silently truncates a window and leaks past its end.** `DEFAULT_QUERY`
+  over a one-hour window at `maxrecords=250` returned 250 articles that all
+  shared one 15-minute `seendate` — and that slot was *outside* the requested
+  window. There is no truncation flag in the response. Always inspect
+  `seendate` before believing a window is covered.
+- **DOC explicit historical windows do work**, 60 days and 2 years back. The
+  7-day ceiling is on the relative `TIMESPAN` parameter, not on explicit
+  `startdatetime`/`enddatetime`. Earlier notes claiming otherwise were wrong.
+
+GKG 2.1 by contrast is a static-file dataset on Google Cloud Storage: immutable
+15-minute files, ETag = object MD5, byte-identical re-downloads, addressable
+back to 2015-02-18. When a choice exists, prefer the file server over
+`api.gdeltproject.org`.
+
+One field-layout trap for whoever writes the parser: the GKG column order is
+idx7 `V1THEMES`, idx8 `V2ENHANCEDTHEMES`, idx9 `V1LOCATIONS`,
+idx10 `V2ENHANCEDLOCATIONS` — themes come *before* locations, and the V1/V2
+pairs interleave rather than grouping. Location type codes are
+1 COUNTRY, 2 USSTATE, 3 USCITY, 4 WORLDCITY, 5 WORLDSTATE; 4 and 5 are not in
+the order you would guess. Every type carries lat/lon, including COUNTRY,
+where the coordinate is a centroid and must not become a point.
+
 ### Live-run timing facts
 
 Established by real runs, not predicted: Telegram's first sweep fires

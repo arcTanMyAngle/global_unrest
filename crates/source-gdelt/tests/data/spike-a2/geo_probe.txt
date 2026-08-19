@@ -1,0 +1,141 @@
+### GET https://api.gdeltproject.org/api/v2/geo/geo?query=protest&format=GeoJSON&mode=PointData&timespan=1d
+    HTTP/1.1 404 Not Found
+    Date: Wed, 19 Aug 2026 04:35:45 GMT
+    Server: GDELT Server
+    Content-Length: 236
+    Content-Type: text/html; charset=iso-8859-1
+    
+    --- body ---
+    <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+    <html><head>
+    <title>404 Not Found</title>
+    </head><body>
+    <h1>Not Found</h1>
+    <p>The requested URL was not found on this server.</p>
+    </body></html>
+
+
+### GET https://api.gdeltproject.org/api/v2/geo/geo?query=protest&format=GeoJSON&mode=ADM1&timespan=1d
+    HTTP/1.1 404 Not Found
+    Date: Wed, 19 Aug 2026 04:35:55 GMT
+    Server: GDELT Server
+    Content-Length: 236
+    Content-Type: text/html; charset=iso-8859-1
+    
+    --- body ---
+    <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+    <html><head>
+    <title>404 Not Found</title>
+    </head><body>
+    <h1>Not Found</h1>
+    <p>The requested URL was not found on this server.</p>
+    </body></html>
+
+
+### GET https://api.gdeltproject.org/api/v2/geo/geo?query=protest&format=CSV&mode=Country&timespan=1d
+    HTTP/1.1 404 Not Found
+    Date: Wed, 19 Aug 2026 04:36:05 GMT
+    Server: GDELT Server
+    Content-Length: 236
+    Content-Type: text/html; charset=iso-8859-1
+    
+    --- body ---
+    <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+    <html><head>
+    <title>404 Not Found</title>
+    </head><body>
+    <h1>Not Found</h1>
+    <p>The requested URL was not found on this server.</p>
+    </body></html>
+
+
+### GET http://api.gdeltproject.org/api/v2/geo/geo?query=protest&format=GeoJSON&mode=PointData&timespan=1d
+    HTTP/1.1 404 Not Found
+    Date: Wed, 19 Aug 2026 04:36:05 GMT
+    Server: GDELT Server
+    Content-Length: 236
+    Content-Type: text/html; charset=iso-8859-1
+    
+    --- body ---
+    <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+    <html><head>
+    <title>404 Not Found</title>
+    </head><body>
+    <h1>Not Found</h1>
+    <p>The requested URL was not found on this server.</p>
+    </body></html>
+
+
+### GET https://api.gdeltproject.org/api/v2/geo/geo
+    HTTP/1.1 404 Not Found
+    Date: Wed, 19 Aug 2026 04:36:15 GMT
+    Server: GDELT Server
+    Content-Length: 236
+    Content-Type: text/html; charset=iso-8859-1
+    
+    --- body ---
+    <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+    <html><head>
+    <title>404 Not Found</title>
+    </head><body>
+    <h1>Not Found</h1>
+    <p>The requested URL was not found on this server.</p>
+    </body></html>
+
+
+### GET https://api.gdeltproject.org/api/v2/doc/doc?query=protest&mode=artlist&format=json&maxrecords=1
+    HTTP/1.1 429 Too Many Requests
+    Date: Wed, 19 Aug 2026 04:36:26 GMT
+    Server: GDELT Server
+    Content-Length: 444
+    
+    --- body ---
+    Please limit requests to one every 5 seconds or contact kalev.leetaru5@gmail.com for larger queries. All high-traffic users should switch to our ngrams dataset: https://blog.gdeltproject.org/using-the-new-web-ngrams-dataset-to-find-relevant-coverage/. For trend analysis, please see our daily newslet
+
+### GET https://api.gdeltproject.org/api/v2/tv/tv?query=protest&mode=clipgallery&format=json
+    HTTP/1.1 200 OK
+    Date: Wed, 19 Aug 2026 04:36:39 GMT
+    Server: GDELT Server
+    Access-Control-Allow-Origin: *
+    Timing-Allow-Origin: *
+    X-XSS-Protection: 1; mode=block
+    Cache-Control: public, max-age=900
+    Content-Length: 46
+    Content-Type: text/html; charset=utf-8
+    
+    --- body ---
+    Your query must contain at least one station.
+
+
+### GET https://api.gdeltproject.org/api/v2/doc/doc?query=protest&mode=artlist&format=json&maxrecords=1  (control, retried after backoff)
+    HTTP/1.1 429 Too Many Requests
+    Date: Wed, 19 Aug 2026 04:38:04 GMT
+    Server: GDELT Server
+    Content-Length: 444
+    
+    --- body ---
+    Please limit requests to one every 5 seconds or contact kalev.leetaru5@gmail.com for larger queries. All high-traffic users should switch to our ngrams dataset: https://blog.gdeltproject.org/using-the-new-web-ngrams-dataset-to-find-relevant-coverage/. For trend analysis, please see our daily newslet
+
+### GET https://api.gdeltproject.org/api/v2/doc/doc?query=protest&mode=artlist&format=json&maxrecords=1  (control, after 70s idle)
+    HTTP/1.1 429 Too Many Requests
+    Date: Wed, 19 Aug 2026 15:28:33 GMT
+    Server: GDELT Server
+    Content-Length: 444
+    
+    --- body (first 200 bytes) ---
+    Please limit requests to one every 5 seconds or contact kalev.leetaru5@gmail.com for larger queries. All high-traffic users should switch to our ngrams dataset: https://blog.gdeltproject.org/using-the
+
+### 429 cooldown timing (single request per minute after the burst above)
+    t+1min idle -> HTTP 200  ({"articles": [ { "url": "https://www.diariodeleon.es/leon/26)
+    RECOVERED after 1 min of single-request-per-minute polling
+
+### DOC 429 is not client-rate-driven: 8 requests spaced 20s apart (4x more conservative than the documented 1-per-5s limit), 2026-08-19 ~15:30Z
+    attempt 1 (spaced 20s, well under 1/5s): HTTP 429
+    attempt 2 (spaced 20s, well under 1/5s): HTTP 429
+    attempt 3 (spaced 20s, well under 1/5s): HTTP 429
+    attempt 4 (spaced 20s, well under 1/5s): HTTP 429
+    attempt 5 (spaced 20s, well under 1/5s): HTTP 200
+    attempt 6 (spaced 20s, well under 1/5s): HTTP 200
+    attempt 7 (spaced 20s, well under 1/5s): HTTP 429
+    attempt 8 (spaced 20s, well under 1/5s): HTTP 429
+    RESULT: 6/8 429, 2/8 200, interleaved. Server-side load shedding, not a client rate limiter.

@@ -116,6 +116,17 @@ them publisher-origin coverage. A map that shades the publisher's country and
 calls it attention for that place is wrong, and labelling it honestly is
 cheaper than leaving it wrong while a spike runs.
 
+The M9 A2 spike has since chosen what replaces it: **GKG 2.1
+`V2ENHANCEDLOCATIONS`**, entering as `MediaAttention` with
+`LocationRole::MentionedPlace`. Two constraints from that finding bind this
+contract — precision is carried **per mention**, not per article (only 30.7% of
+mentions are city-or-finer, and country-type mentions ship centroid
+coordinates that must never render as points), and themes stay
+**document-level**, because GKG exposes no theme-to-location edge and inferring
+one from character offsets is ambiguous. See
+[GDELT_GEO_GKG.md](GDELT_GEO_GKG.md). The implementation is M9.1; the
+quarantine above stays in force until it lands.
+
 NOAA alerts are `ReportingJurisdiction`. ACLED, GDELT Events, and IODA are
 `EventSite`. Chatter rollups are `MentionedPlace` — a place named in posts, not
 a location taken from any person.

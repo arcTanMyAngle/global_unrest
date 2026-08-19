@@ -48,9 +48,31 @@ for the item-by-item state.
 - `storage::DIGEST_FACTS_SCHEMA_VERSION`: cached Daily Events prose is tagged
   with the facts schema it was generated from, so prose written when chatter
   counted as media attention can never be presented as current.
+- `docs/GDELT_GEO_GKG.md` and `crates/source-gdelt/tests/data/spike-a2/`: the
+  A2 spike finding and the raw captures backing it. **GDELT GEO 2.0 no longer
+  exists** — it returns 404 for every mode, format, scheme and path, from two
+  networks, while its sibling endpoints serve — so the spike's decision is
+  GKG 2.1 for real article/location/domain linkage. Measured on one 15-minute
+  window: 781 articles across 173 domains, 676 distinct places, 1,639 distinct
+  (domain, place) edges, headlines on 100% of rows, geography on 78.7%, and a
+  precision mix of 30.7% city-or-finer / 17.2% admin / 52.1% country. GKG
+  enters as `MediaAttention` with `MentionedPlace` locations, per-mention
+  precision, and document-level themes — it exposes no theme-to-location edge,
+  so none is invented. No window-level pseudo-join ships. This closes M9.
 
 ### Changed
 
+- **Corrected three GDELT DOC assumptions the roadmap recorded as settled.**
+  Explicit historical `startdatetime`/`enddatetime` windows *do* work (verified
+  60 days and 2 years back; the 7-day ceiling is on the relative `TIMESPAN`
+  parameter only). The 250-result cap bites at a one-hour window, not a
+  six-hour one, and the truncated response silently returns a single
+  15-minute slot that can fall *outside* the requested window. And DOC 429s
+  are server-side load shedding rather than rate limiting — six of eight
+  requests spaced 20 s apart were rejected — so backfill cost cannot be
+  modelled as "N requests x 5 s". Details in
+  [docs/GDELT_GEO_GKG.md](docs/GDELT_GEO_GKG.md) and
+  [docs/ENGINEERING_NOTES.md](docs/ENGINEERING_NOTES.md).
 - **Aggregate chatter is no longer stored as media attention.** Bluesky and
   Telegram rollups were normalized as `EventKind::NewsAttention` with post
   count in `article_count` and a synthetic headline that the row-level licence
