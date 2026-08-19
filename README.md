@@ -177,8 +177,8 @@ http://localhost:8080. See [docs/API.md](docs/API.md) for /health, /meta,
 The worker owns its DuckDB database and publishes immutable Parquet snapshots.
 The API reads only those snapshots; it never opens the worker database. The
 worker loads fixtures at startup for its service/test path, then can ingest
-GDELT and any enabled live-source features. Do not expose ACLED-bearing
-snapshots publicly.
+GDELT and any enabled live-source features; set LES_SEED_FIXTURES=0 for a
+live-only worker. Do not expose ACLED-bearing snapshots publicly.
 
 ## Architecture
 

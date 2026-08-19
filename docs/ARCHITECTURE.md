@@ -145,9 +145,9 @@ read-only Axum API"]
     WORKER --> SNAP --> API
 ~~~
 
-The worker loads fixtures at startup, then ingests GDELT and any live-source
-features compiled for the worker. It publishes an immutable snapshot whenever
-a successful cycle adds data. Each snapshot has date-partitioned events and
+The worker loads fixtures at startup unless LES_SEED_FIXTURES is off, then
+ingests GDELT and any live-source features compiled for the worker. It
+publishes an immutable snapshot whenever a successful cycle adds data. Each snapshot has date-partitioned events and
 region buckets, baselines, a manifest, and an atomically updated LATEST
 pointer.
 

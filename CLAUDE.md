@@ -100,10 +100,10 @@ ingest, not a person clicking Search.
 
 ## Services
 
-The worker owns a separate DuckDB database, loads fixture data at startup, and
-publishes immutable versioned Parquet snapshots. The API opens an in-memory
-DuckDB connection per request and reads only those snapshots. It never opens a
-worker DuckDB file. Media hits and Daily Events cache rows are desktop-only
+The worker owns a separate DuckDB database, loads fixture data at startup
+unless LES_SEED_FIXTURES is off, and publishes immutable versioned Parquet
+snapshots. The API opens an in-memory DuckDB connection per request and reads
+only those snapshots. It never opens a worker DuckDB file. Media hits and Daily Events cache rows are desktop-only
 and never appear in a snapshot or API response.
 
 Use Docker Compose for the normal service stack. The worker binary does not

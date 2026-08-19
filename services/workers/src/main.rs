@@ -242,9 +242,6 @@ fn main() -> anyhow::Result<()> {
     let data_dir = env_path("LES_WORKER_DATA_DIR").unwrap_or_else(default_data_dir);
     std::fs::create_dir_all(&data_dir)?;
     let publish_root = env_path("LES_PUBLISH_DIR").unwrap_or_else(|| data_dir.join("publish"));
-    let fixtures_dir = env_path("LES_FIXTURES_DIR")
-        .or_else(find_fixtures_dir)
-        .ok_or_else(|| anyhow::anyhow!("no fixtures dir found; set LES_FIXTURES_DIR"))?;
     let retention_days: Option<u32> = std::env::var("LES_RETENTION_DAYS")
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -255,15 +252,39 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(DEFAULT_KEEP_LAST_SNAPSHOTS);
     // The worker's whole job is live ingestion, so it defaults to online;
     // LES_ONLINE=0 pins it to fixtures-only (e.g. offline dev/CI smoke runs).
-    let online = std::env::var("LES_ONLINE")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
-        .unwrap_or(true);
+    let online = env_flag("LES_ONLINE", true);
+    // The fixture seed is the offline base the Compose smoke stack asserts on,
+    // so it stays on by default. LES_SEED_FIXTURES=0 gives a live-only worker
+    // whose store and snapshots contain nothing but what it actually ingested.
+    let seed_fixtures = env_flag("LES_SEED_FIXTURES", true);
+    if !online && !seed_fixtures {
+        anyhow::bail!(
+            "LES_ONLINE=0 with LES_SEED_FIXTURES=0 leaves the worker with nothing to \
+             ingest and nothing to publish; enable one of them"
+        );
+    }
 
+    // Resolved only when it will be read: with seeding off the worker must not
+    // refuse to start over a fixtures directory it was told not to use.
+    let fixtures_dir = if seed_fixtures {
+        Some(
+            env_path("LES_FIXTURES_DIR")
+                .or_else(find_fixtures_dir)
+                .ok_or_else(|| anyhow::anyhow!("no fixtures dir found; set LES_FIXTURES_DIR"))?,
+        )
+    } else {
+        None
+    };
+
+    let fixtures_display = fixtures_dir
+        .as_deref()
+        .map_or_else(|| "(none)".to_string(), |p| p.display().to_string());
     tracing::info!(
         data_dir = %data_dir.display(),
         publish_root = %publish_root.display(),
-        fixtures_dir = %fixtures_dir.display(),
+        fixtures_dir = %fixtures_display,
         online,
+        seed_fixtures,
         keep_last,
         "worker starting"
     );
@@ -277,20 +298,30 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(run(store, fixtures_dir, publish_root, keep_last, online))
 }
 
+/// `fixtures_dir` is `Some` exactly when `LES_SEED_FIXTURES` is on; `None`
+/// skips the offline seed entirely.
 async fn run(
     store: StorageHandle,
-    fixtures_dir: PathBuf,
+    fixtures_dir: Option<PathBuf>,
     publish_root: PathBuf,
     keep_last: usize,
     online: bool,
 ) -> anyhow::Result<()> {
-    // 1. Offline base: load and ingest fixtures once. Fatal if missing —
-    // there would be nothing to ever publish.
-    let (events, failures) = load_fixtures(&fixtures_dir).await?;
-    let n = events.len();
-    let report = store.ingest(events, failures).wait()?;
-    tracing::info!(loaded = n, ?report, "fixtures ingested");
-    publish(&store, &publish_root, keep_last)?;
+    // 1. Offline base: load and ingest fixtures once, then publish so the API
+    // has a snapshot before the first live cycle lands. Fatal if the fixtures
+    // are missing — seeding was asked for and cannot be honoured. With seeding
+    // off, the seed *and* this first publish are skipped together: publishing
+    // here would pin LATEST to an empty snapshot, whereas no LATEST at all is
+    // the clean `ApiError::NoSnapshot` the API already answers with.
+    if let Some(dir) = &fixtures_dir {
+        let (events, failures) = load_fixtures(dir).await?;
+        let n = events.len();
+        let report = store.ingest(events, failures).wait()?;
+        tracing::info!(loaded = n, ?report, "fixtures ingested");
+        publish(&store, &publish_root, keep_last)?;
+    } else {
+        tracing::info!("LES_SEED_FIXTURES=0 — no fixture seed; only live cycles publish");
+    }
 
     let gdelt = if online {
         match GdeltSource::new() {
@@ -708,6 +739,17 @@ fn env_path(var: &str) -> Option<PathBuf> {
     std::env::var(var).ok().map(PathBuf::from)
 }
 
+/// Shell-boolean convention shared by every worker toggle: only `1`, `true`,
+/// or `yes` turn something on, any other value present turns it off, and an
+/// absent variable falls back to `default`.
+fn env_flag(var: &str, default: bool) -> bool {
+    parse_flag(std::env::var(var).ok().as_deref(), default)
+}
+
+fn parse_flag(raw: Option<&str>, default: bool) -> bool {
+    raw.map_or(default, |v| matches!(v.trim(), "1" | "true" | "yes"))
+}
+
 /// Mirrors the desktop's fixtures lookup: `LES_FIXTURES_DIR` env override,
 /// then `fixtures/` in the working directory or any ancestor.
 fn find_fixtures_dir() -> Option<PathBuf> {
@@ -723,4 +765,25 @@ fn default_data_dir() -> PathBuf {
     directories::ProjectDirs::from("org", "LiveEarthSignals", "live-earth-signals-worker")
         .map(|d| d.data_local_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("data"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_flag;
+
+    #[test]
+    fn absent_flag_takes_the_default() {
+        assert!(parse_flag(None, true));
+        assert!(!parse_flag(None, false));
+    }
+
+    #[test]
+    fn only_the_affirmative_spellings_turn_a_flag_on() {
+        for on in [" 1 ", "true", "yes"] {
+            assert!(parse_flag(Some(on), false), "{on:?} should be on");
+        }
+        for off in ["0", "false", "no", "", "TRUE"] {
+            assert!(!parse_flag(Some(off), true), "{off:?} should be off");
+        }
+    }
 }

@@ -15,7 +15,14 @@ services:
       # Overridable from the shell so CI's compose-smoke job can force
       # fixtures-only mode (LES_ONLINE=0) without touching this file.
       LES_ONLINE: "${LES_ONLINE:-1}"
-      LES_RETENTION_DAYS: "35"
+      # Seeding the offline fixture base on by default keeps the smoke stack's
+      # "events > 0" assertion true; 0 gives a live-only store. Both off at
+      # once is rejected at startup (nothing to ingest, nothing to publish).
+      LES_SEED_FIXTURES: "${LES_SEED_FIXTURES:-1}"
+      # Comfortably longer than analytics' 28-day baseline window so the
+      # trailing median is not clipped to the first retained day for most of
+      # the store (crates/analytics/src/baseline.rs).
+      LES_RETENTION_DAYS: "90"
       LES_PUBLISH_KEEP_LAST: "3"
     volumes:
       - worker-data:/data

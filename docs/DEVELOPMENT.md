@@ -190,9 +190,32 @@ docker compose up
 
 Compose starts a worker that owns its DuckDB database and publishes Parquet
 snapshots, then an API on http://localhost:8080 that reads only those
-snapshots. The Compose worker starts with fixture data and GDELT; the optional
-worker source features are opt-in at build time. For a no-network smoke run,
-set LES_ONLINE=0 in the shell before invoking Compose.
+snapshots. The Compose worker starts with fixture data and GDELT (set
+LES_SEED_FIXTURES=0 to skip the fixture base); the optional worker source
+features are opt-in at build time. For a no-network smoke run, set
+LES_ONLINE=0 in the shell before invoking Compose.
+
+### Worker environment variables
+
+The worker reads the desktop's shared knobs (LES_ONLINE, LES_RETENTION_DAYS,
+and each source's endpoint/credential variables) plus these of its own.
+
+| Variable | Purpose |
+|---|---|
+| LES_WORKER_DATA_DIR | The worker's own DuckDB directory. Never point it at the desktop's data directory or mount it into the api container. |
+| LES_PUBLISH_DIR | Snapshot publish root. Workers and api must agree on it; api mounts it read-only. |
+| LES_PUBLISH_KEEP_LAST | Versioned snapshots retained under the publish root; default 3. 0 keeps every version. |
+| LES_SEED_FIXTURES | Seed the offline fixture base at startup. Default on; 0, false, or no starts a live-only worker whose store and snapshots hold nothing but what it ingested. |
+
+With LES_SEED_FIXTURES off, the startup fixture ingest and the first snapshot
+publish are skipped together — publishing there would pin LATEST to an empty
+snapshot, whereas no LATEST at all is the NoSnapshot error the API already
+answers with. The fixtures directory is then never resolved, so a worker told
+not to seed no longer refuses to start when no fixtures/ directory exists.
+
+LES_ONLINE=0 together with LES_SEED_FIXTURES=0 is rejected at startup: that
+worker would ingest nothing and publish nothing for as long as it ran. Enable
+one of the two.
 
 The worker binary does not load .env itself. For a manual service run, supply
 credentials and feature flags through the process/container environment; set

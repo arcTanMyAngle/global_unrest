@@ -14,6 +14,14 @@ for the item-by-item state.
 
 ### Added
 
+- `LES_SEED_FIXTURES` for `services/workers`: default on, preserving today's
+  behaviour. Set to `0` for a live-only worker that neither ingests the
+  offline fixture base nor publishes the snapshot that used to follow it, so
+  the first snapshot the API sees is a live one instead of a fixture one.
+  With it off the fixtures directory is never resolved, so the worker no
+  longer refuses to start over a resource it was told not to use.
+  `LES_ONLINE=0` with `LES_SEED_FIXTURES=0` is rejected at startup rather
+  than running as a worker that silently publishes nothing.
 - `docs/SIGNAL_MODEL.md`: the signal contract. Product rule 1 says media
   attention, discrete events, official alerts, aggregate chatter, generated
   prose, and transient media research stay separate; this page is the
@@ -62,6 +70,12 @@ for the item-by-item state.
 
 ### Changed
 
+- `docker-compose.yml`: the worker's `LES_RETENTION_DAYS` moves from `35` to
+  `90`. Analytics takes a trailing 28-day median clipped to the store's first
+  retained day, so at 35 days a steady-state store held roughly 7 warm days,
+  21 truncated ones, and 7 cold ones with no spike signal at all — three
+  regimes mixed into any distribution sampled across it. At 90 the warm region
+  is 62 days. (`LES_RETENTION_DAYS=0` is still unbounded, not zero-retention.)
 - **Corrected three GDELT DOC assumptions the roadmap recorded as settled.**
   Explicit historical `startdatetime`/`enddatetime` windows *do* work (verified
   60 days and 2 years back; the 7-day ceiling is on the relative `TIMESPAN`
