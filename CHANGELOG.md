@@ -22,6 +22,18 @@ project with no published crate API to stabilize against.
   the new path, discovered through the existing `lastupdate.txt` pointer. DOC's
   `PublisherOrigin` quarantine stays in force (docs/SIGNAL_MODEL.md).
 
+### Changed
+
+- The desktop's top-bar navigation is now a left sidebar: **Map**, **Timeline**,
+  **Daily Events**, **Media**, **Settings**, and **About** are each one click
+  away. **Timeline** is a full-page copy of the map's time-window strip (the
+  map keeps its compact bottom strip), and **Settings** and **About** are
+  pages rather than modal windows.
+- Clicking a point on the map now opens a small popup over the point listing
+  that record's source and outlet domains (the marker query now carries
+  `outlet_domains`), instead of routing through the side inspector. Clicking
+  empty map still selects the cell.
+
 ## [0.9.0] — 2026-09-02 — M9: Truth — the signal contract
 
 M9 turns product rule 1 into a machine-checked contract

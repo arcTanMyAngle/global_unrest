@@ -73,6 +73,17 @@ pub struct MapInputs<'a> {
     /// Resolves the hovered point to a country, for border emphasis and the
     /// label cache.
     pub countries: &'a CountryIndex,
+    /// A marker the user clicked, shown as a small source/outlet popup over
+    /// the point (UI/UX item 1b). Owned by the app; re-projected each frame
+    /// so it stays glued to the point through pan and zoom.
+    pub pinned: Option<&'a PinnedMarker>,
+}
+
+/// A marker the user clicked, pinned as a small popup listing that record's
+/// source and outlets instead of routing through the side inspector.
+#[derive(Debug, Clone)]
+pub struct PinnedMarker {
+    pub point: EventPoint,
 }
 
 pub struct MapView {
@@ -127,6 +138,10 @@ pub struct MapActions {
     pub selected_cell: Option<u64>,
     /// Geo position of the click, for country labeling.
     pub clicked_lonlat: Option<(f64, f64)>,
+    /// Click hit a marker instead of empty map: the index into
+    /// `MapView::marker_rows`. The app pins a popup over that point and does
+    /// not change the cell selection.
+    pub clicked_marker: Option<usize>,
 }
 
 impl MapView {
@@ -326,16 +341,34 @@ impl MapView {
                 self.draw_tooltip(&painter, rect, hover, row);
             }
             if response.clicked() {
-                let local = hover - rect.min;
-                let (lon, lat) = vp.unproject(local.x, local.y);
-                let lon = wrap_lon(lon);
-                if (-90.0..=90.0).contains(&lat)
-                    && let Ok(cell) = geo_utils::cell_for_latlon(lat, lon, H3_RESOLUTION)
-                {
-                    actions.selected_cell = Some(cell);
-                    actions.clicked_lonlat = Some((lon, lat));
+                // A click on a marker pins a source/outlet popup over it and
+                // leaves the cell selection alone; a click on empty map keeps
+                // the existing cell-selection path (docs/VISUALIZATION.md).
+                let marker_hit = inputs
+                    .show_markers
+                    .then(|| self.markers.hit_test(&aff, rect.width(), hover, 8.0))
+                    .flatten();
+                if let Some(hit) = marker_hit {
+                    actions.clicked_marker = Some(hit.source_index);
+                } else {
+                    let local = hover - rect.min;
+                    let (lon, lat) = vp.unproject(local.x, local.y);
+                    let lon = wrap_lon(lon);
+                    if (-90.0..=90.0).contains(&lat)
+                        && let Ok(cell) = geo_utils::cell_for_latlon(lat, lon, H3_RESOLUTION)
+                    {
+                        actions.selected_cell = Some(cell);
+                        actions.clicked_lonlat = Some((lon, lat));
+                    }
                 }
             }
+        }
+
+        // The pinned popup paints above every layer: it is the thing the user
+        // just asked about, so it never sits under a marker or a halo.
+        if let Some(pinned) = inputs.pinned {
+            let (x, y) = aff.apply(pinned.point.lon, pinned.point.lat);
+            self.draw_pinned_popup(&painter, rect, Pos2::new(x, y), &pinned.point);
         }
 
         actions
@@ -473,22 +506,92 @@ impl MapView {
         if row.has_video {
             detail_parts.push("🎥 video".to_string());
         }
-        let lines = [
-            format!("{} · {}", row.kind.label(), when),
-            truncate(title, 60),
-            format!(
-                "{} {} · confidence {:.0}%",
-                row.volume_count,
-                row.family.volume_unit().label(u64::from(row.volume_count)),
-                f64::from(row.confidence) * 100.0
+        let lines: Vec<(String, Color32)> = vec![
+            (
+                format!("{} · {}", row.kind.label(), when),
+                self.style.marker_color(row.kind),
             ),
-            detail_parts.join(" · "),
+            (truncate(title, 60), Color32::from_rgb(220, 224, 232)),
+            (
+                format!(
+                    "{} {} · confidence {:.0}%",
+                    row.volume_count,
+                    row.family.volume_unit().label(u64::from(row.volume_count)),
+                    f64::from(row.confidence) * 100.0
+                ),
+                Color32::from_rgb(220, 224, 232),
+            ),
+            (detail_parts.join(" · "), Color32::from_rgb(220, 224, 232)),
         ];
+        Self::paint_info_box(
+            painter,
+            rect,
+            at,
+            Stroke::new(1.0, self.style.marker_color(row.kind)),
+            &lines,
+        );
+    }
 
+    /// The pinned source/outlet popup (UI/UX item 1b): what a clicked record
+    /// is, who reported it, and which outlets carried it — directly over the
+    /// point instead of buried in the side inspector.
+    fn draw_pinned_popup(&self, painter: &egui::Painter, rect: Rect, at: Pos2, row: &EventPoint) {
+        let when = chrono::DateTime::from_timestamp(row.ts_epoch_s, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_default();
+        let kind_color = self.style.marker_color(row.kind);
+        let mut lines: Vec<(String, Color32)> = vec![
+            (format!("{} · {}", row.kind.label(), when), kind_color),
+            (
+                format!("source: {}", row.source),
+                Color32::from_rgb(220, 224, 232),
+            ),
+        ];
+        const MAX_OUTLET_LINES: usize = 3;
+        let outlets = &row.outlet_domains;
+        if outlets.is_empty() {
+            lines.push((
+                "outlet: none recorded".to_string(),
+                Color32::from_rgb(148, 155, 168),
+            ));
+        } else {
+            for domain in outlets.iter().take(MAX_OUTLET_LINES) {
+                lines.push((
+                    format!("outlet: {domain}"),
+                    Color32::from_rgb(220, 224, 232),
+                ));
+            }
+            if outlets.len() > MAX_OUTLET_LINES {
+                lines.push((
+                    format!("…and {} more outlets", outlets.len() - MAX_OUTLET_LINES),
+                    Color32::from_rgb(148, 155, 168),
+                ));
+            }
+        }
+        if let Some(title) = &row.headline {
+            lines.push((truncate(title, 60), Color32::from_rgb(220, 224, 232)));
+        }
+        lines.push((
+            "click the map to close".to_string(),
+            Color32::from_rgb(148, 155, 168),
+        ));
+        Self::paint_info_box(painter, rect, at, Stroke::new(1.0, kind_color), &lines);
+    }
+
+    /// Paint a bordered dark box of labelled lines, offset from `at` and
+    /// clamped to stay inside `rect`. Shared by the hover tooltip and the
+    /// pinned source popup — same placement rules, same per-frame cost.
+    fn paint_info_box(
+        painter: &egui::Painter,
+        rect: Rect,
+        at: Pos2,
+        stroke: Stroke,
+        lines: &[(String, Color32)],
+    ) {
         let font = FontId::proportional(12.0);
         let width = lines
             .iter()
-            .map(|l| {
+            .map(|(l, _)| {
                 painter
                     .layout_no_wrap(l.clone(), font.clone(), Color32::WHITE)
                     .rect
@@ -507,24 +610,14 @@ impl MapView {
         }
         let tip = Rect::from_min_size(origin, box_size);
         painter.rect_filled(tip, 4.0, Color32::from_rgba_unmultiplied(16, 20, 28, 235));
-        painter.rect_stroke(
-            tip,
-            4.0,
-            Stroke::new(1.0, self.style.marker_color(row.kind)),
-            egui::StrokeKind::Inside,
-        );
-        for (i, line) in lines.iter().enumerate() {
-            let color = if i == 0 {
-                self.style.marker_color(row.kind)
-            } else {
-                Color32::from_rgb(220, 224, 232)
-            };
+        painter.rect_stroke(tip, 4.0, stroke, egui::StrokeKind::Inside);
+        for (i, (line, color)) in lines.iter().enumerate() {
             painter.text(
                 tip.min + Vec2::new(pad, pad + line_h * i as f32),
                 Align2::LEFT_TOP,
                 line,
                 font.clone(),
-                color,
+                *color,
             );
         }
     }

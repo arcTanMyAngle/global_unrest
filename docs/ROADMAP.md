@@ -422,6 +422,35 @@ prototype. It must provide:
 Voluntary publishing is in scope. Covert tracking, location inference, and
 tactical targeting are not.
 
+## UI/UX polish — planned (from live review)
+
+Captured from a live run; unassigned to a milestone, each independently
+scoped and pickable in any order.
+
+- **Country labels are missing or wrong in some areas.** The renderer's
+  country-label pass (`crates/renderer`) does not label every region
+  correctly. Investigate label coverage, collision, and placement for the
+  affected areas, and fix the label pass or the underlying shape/centroid
+  data rather than papering over it.
+- **Dashboard should be a side bar.** ✅ Done (2026-09-02): navigation is now
+  a left sidebar with Map, Timeline, Daily Events, Media, Settings, and About
+  each one click away. Settings and About are pages rather than modal
+  windows, and Timeline is a full-page copy of the map's time-window strip
+  (`apps/global-signal-desktop/src` `app.rs`, `panels.rs`,
+  `timeline_strip.rs`).
+- **Media page reliability.** Media search has trouble fetching sources and
+  playing results in-app (fetch/load/playback failures). Harden the provider
+  legs and error handling (`crates/media-search`,
+  `apps/global-signal-desktop/src/media_page.rs`, `media.rs`) and the in-app
+  player (`video.rs`, the `video-embed` feature), and make failures visible
+  rather than silent. See the wry/WebView2 notes in
+  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md).
+- **On-map source popup.** ✅ Done (2026-09-02): clicking a point opens a small
+  popup over the point listing that record's source and outlet domains,
+  instead of the indirect side inspector; clicking empty map still selects
+  the cell. (`apps/global-signal-desktop/src/map_view.rs`, `panels.rs`;
+  `crates/storage` `EventPoint.outlet_domains`.)
+
 ## Standing risks
 
 1. Bundled DuckDB MSVC builds are slow — mitigated by a workspace-level

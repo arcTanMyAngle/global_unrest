@@ -21,7 +21,7 @@ use storage::{
 
 use crate::digest::{DigestHandle, DigestMsg};
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
-use crate::map_view::MapView;
+use crate::map_view::{MapView, PinnedMarker};
 use crate::media::{MediaHandle, MediaMsg, MediaSession};
 use crate::video::VideoPlayer;
 
@@ -40,19 +40,25 @@ pub enum Phase {
     Error(String),
 }
 
-/// Which top-level view is on screen. The map and the digest are separate
-/// pages rather than a panel inside the map: one paints stored records, the
-/// other shows generated prose about them, and putting them side by side
-/// would invite reading the second as a caption for the first.
+/// Which top-level view is on screen. Every page is one click away from the
+/// sidebar. The map, digest, and media pages stay separate pages rather than
+/// panels inside the map: the digest shows generated prose, not stored
+/// records, and the embedded player is a native child window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Map,
+    /// The time-window controls and per-bucket history at full size. The map
+    /// keeps a compact copy of the same controls, because scrubbing time is
+    /// how the map is used; this page is the roomier version.
+    Timeline,
     DailyEvents,
     /// On-demand video lookup for one named place (`crate::media_page`). Its
     /// own page for a mechanical reason as well as an editorial one: the
     /// embedded player is a native child window that paints over any egui
     /// layout sharing its rectangle.
     Media,
+    Settings,
+    About,
 }
 
 /// One normalized batch awaiting ingest (events + normalization failures).
@@ -303,11 +309,6 @@ pub struct App {
     /// "How to read this map" (docs/VISUALIZATION.md V3 item 10). Opens once
     /// on first run and on `?` thereafter.
     pub show_how_to_read: bool,
-    /// Settings window: per-source state (compiled in / configured / enabled),
-    /// last fetch, next poll, cadence.
-    pub show_settings: bool,
-    /// About window: verbatim attributions, licence, version, links.
-    pub show_about: bool,
     /// Sources the user has switched off in Settings. Persisted, and replayed
     /// to the ingest worker at startup; a source absent here is enabled.
     /// Storing the *off* set rather than the on set means a source added in a
@@ -356,6 +357,9 @@ pub struct App {
 
     pub selected_cell: Option<u64>,
     pub selected_label: Option<String>,
+    /// A marker the user clicked on the map, pinned as a source/outlet popup
+    /// over the point (UI/UX item 1b). Cleared when a click lands elsewhere.
+    pub pinned_marker: Option<PinnedMarker>,
     pending_detail: Option<Reply<RegionDetail>>,
     pub detail: Option<RegionDetail>,
 
@@ -515,8 +519,6 @@ impl App {
             ingest_log: None,
             show_log_window: false,
             show_how_to_read: !how_to_read_seen,
-            show_settings: false,
-            show_about: false,
             disabled_sources,
             pending_extent,
             extent: None,
@@ -548,6 +550,7 @@ impl App {
             top_movers: Vec::new(),
             selected_cell: None,
             selected_label: None,
+            pinned_marker: None,
             pending_history: None,
             region_history: Vec::new(),
             history_span: None,
@@ -1443,27 +1446,38 @@ impl eframe::App for App {
         }
 
         // Panel order matters in egui 0.35: sides first, central last.
-        self.top_bar(ui);
+        self.sidebar(ui);
         match self.page {
             // The player is a native child window, so leaving the Media page
             // has to take it down explicitly — otherwise it keeps painting
             // over whatever replaces it.
             Page::Map => {
                 self.media_player.hide();
+                self.map_filter_bar(ui);
                 self.timeline_panel(ui);
                 self.inspector_panel(ui);
                 self.central_map(ui);
+            }
+            Page::Timeline => {
+                self.media_player.hide();
+                self.timeline_page(ui);
             }
             Page::DailyEvents => {
                 self.media_player.hide();
                 self.daily_events_page(ui);
             }
             Page::Media => self.media_page(ui, frame),
+            Page::Settings => {
+                self.media_player.hide();
+                self.settings_page(ui);
+            }
+            Page::About => {
+                self.media_player.hide();
+                self.about_page(ui);
+            }
         }
         self.log_window(&ctx);
         self.how_to_read_window(&ctx);
-        self.settings_window(&ctx);
-        self.about_window(&ctx);
 
         // Zoom crossed a rollup threshold → re-aggregate the cached buckets
         // at the new display resolution (no storage round-trip).

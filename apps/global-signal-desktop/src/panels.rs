@@ -89,29 +89,57 @@ fn score_bar(ui: &mut egui::Ui, label: &str, value: f32, text: String) {
 }
 
 impl App {
-    pub fn top_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("topbar").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+    /// Left navigation rail. Every top-level page is one click away, and the
+    /// application-wide live controls sit below the nav. Map-specific filters
+    /// stay in `map_filter_bar` on the Map page, so this rail only ever
+    /// carries navigation and the controls that apply to the whole app
+    /// (ingest runs regardless of what is on screen).
+    pub fn sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("sidebar")
+            .resizable(false)
+            .default_size(180.0)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
                 ui.label(RichText::new("Live Earth Signals").strong());
+                ui.add_space(10.0);
 
-                // Page switcher. Live-source controls stay on both pages
-                // (ingest runs regardless of what is on screen); everything
-                // below the separator is map-specific and hidden on the
-                // Daily Events page.
-                let mut page = self.page;
-                ui.selectable_value(&mut page, Page::Map, "map");
-                ui.selectable_value(&mut page, Page::DailyEvents, "daily events")
-                    .on_hover_text(
-                        "A model-written summary of one day of stored records, with media \
-                         attention and event data kept in separate sections.",
-                    );
-                ui.selectable_value(&mut page, Page::Media, "media")
-                    .on_hover_text(
-                        "Look up public video for one place and time window, and play it \
-                         in the app. Fetched only when you ask; nothing is stored.",
-                    );
-                self.set_page(page);
+                self.nav_item(
+                    ui,
+                    Page::Map,
+                    "Map",
+                    "Stored records: heatmap, markers, alerts.",
+                );
+                self.nav_item(
+                    ui,
+                    Page::Timeline,
+                    "Timeline",
+                    "The time window and per-bucket history at full size.",
+                );
+                self.nav_item(
+                    ui,
+                    Page::DailyEvents,
+                    "Daily Events",
+                    "A model-written summary of one day of stored records, with media \
+                     attention and event data kept in separate sections.",
+                );
+                self.nav_item(
+                    ui,
+                    Page::Media,
+                    "Media",
+                    "Look up public video for one place and time window, and play it \
+                     in the app. Fetched only when you ask; nothing is stored.",
+                );
+                self.nav_item(
+                    ui,
+                    Page::Settings,
+                    "Settings",
+                    "per-source state: compiled in, configured, cadence",
+                );
+                self.nav_item(ui, Page::About, "About", "attributions, licence, version");
+
+                ui.add_space(10.0);
                 ui.separator();
+                ui.add_space(10.0);
 
                 // Pause/resume network polling. Cached rows are always real;
                 // the desktop runtime never loads synthetic fixtures.
@@ -128,35 +156,46 @@ impl App {
                 }
                 if self.online
                     && ui
-                        .button("↻")
+                        .button("↻ fetch now")
                         .on_hover_text("fetch the latest live data now")
                         .clicked()
                 {
                     self.fetch_now();
                 }
+                ui.add_space(6.0);
                 self.source_status_label(ui);
-                // Placed before the page early-return below: source state and
-                // attributions are properties of the application, not of the
-                // map, and must be reachable from Daily Events and Media too.
-                if ui
-                    .button("settings")
-                    .on_hover_text("per-source state: compiled in, configured, cadence")
-                    .clicked()
-                {
-                    self.show_settings = !self.show_settings;
-                }
-                if ui
-                    .button("about")
-                    .on_hover_text("attributions, licence, version")
-                    .clicked()
-                {
-                    self.show_about = !self.show_about;
-                }
-                if matches!(self.page, Page::DailyEvents | Page::Media) {
-                    return;
-                }
-                ui.separator();
+            });
+    }
 
+    /// One full-width nav row: a frameless button that fills the rail when it
+    /// is the selected page, so the whole row is clickable and visibly active.
+    fn nav_item(&mut self, ui: &mut egui::Ui, page: Page, label: &str, hover: &str) {
+        let selected = self.page == page;
+        let (bg, fg) = if selected {
+            let v = ui.visuals().selection;
+            (v.bg_fill, v.stroke.color)
+        } else {
+            (Color32::TRANSPARENT, ui.visuals().text_color())
+        };
+        let response = ui
+            .add_sized(
+                [ui.available_width(), 24.0],
+                egui::Button::new(RichText::new(label).color(fg))
+                    .fill(bg)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(4.0),
+            )
+            .on_hover_text(hover);
+        if response.clicked() {
+            self.set_page(page);
+        }
+    }
+
+    /// Map-only filters and data actions, shown as a top bar over the map.
+    /// Navigation and the application-wide live controls live in the sidebar.
+    pub fn map_filter_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("map_filters").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
                 let mut changed = false;
                 changed |= ui
                     .checkbox(&mut self.filters.show_heatmap, "heatmap")
@@ -385,129 +424,156 @@ impl App {
 
     pub fn timeline_panel(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("timeline").show(ui, |ui| {
-            let Some((extent_start, extent_end)) = self.extent else {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("timeline — waiting for data").color(TEXT_DIM));
-                });
-                return;
-            };
-            let total = self.total_buckets();
-            let len = self.timeline.len.buckets(total);
-            let max_start = (total - len).max(0);
-            self.timeline.start_bucket = self.timeline.start_bucket.clamp(0, max_start);
+            self.timeline_content(ui, 40.0);
+        });
+    }
 
-            ui.horizontal(|ui| {
-                let icon = if self.timeline.playing { "⏸" } else { "▶" };
-                if ui.button(icon).clicked() {
-                    self.timeline.playing = !self.timeline.playing;
-                    self.timeline.accum = 0.0;
-                    if self.timeline.playing {
-                        // Starting playback is explicit manual navigation —
-                        // an ingest tick mid-playback must not yank the
-                        // scrub position back to "now".
-                        self.timeline.auto_follow = false;
-                    }
-                }
-
-                let mut len_choice = self.timeline.len;
-                egui::ComboBox::from_id_salt("window-len")
-                    .selected_text(len_choice.label())
-                    .show_ui(ui, |ui| {
-                        for choice in WindowLen::CHOICES {
-                            ui.selectable_value(&mut len_choice, choice, choice.label());
-                        }
-                    });
-                if len_choice != self.timeline.len {
-                    self.timeline.len = len_choice;
-                    if self.timeline.auto_follow {
-                        self.sync_window_to_now();
-                    } else {
-                        let len = self.timeline.len.buckets(total);
-                        self.timeline.start_bucket =
-                            self.timeline.start_bucket.min((total - len).max(0));
-                    }
-                    self.mark_dirty();
-                }
-
-                if !self.timeline.auto_follow
-                    && ui
-                        .button("⏵ now")
-                        .on_hover_text("resume tracking the current moment")
-                        .clicked()
-                {
-                    self.timeline.auto_follow = true;
-                    self.sync_window_to_now();
-                    self.mark_dirty();
-                }
-
-                if let Some((ws, we)) = self.current_window() {
-                    ui.label(
-                        RichText::new(format!("{}  →  {}", fmt_ts(ws), fmt_ts(we)))
-                            .color(Color32::from_rgb(210, 214, 224))
-                            .monospace(),
-                    );
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("custom range (UTC):").color(TEXT_DIM).small());
-                let start_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.timeline.custom_start_input)
-                        .hint_text("YYYY-MM-DD HH:MM")
-                        .desired_width(130.0),
-                );
-                ui.label(RichText::new("→").color(TEXT_DIM));
-                let end_edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.timeline.custom_end_input)
-                        .hint_text("YYYY-MM-DD HH:MM")
-                        .desired_width(130.0),
-                );
-                let applied_on_enter = (start_edit.lost_focus() || end_edit.lost_focus())
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if start_edit.changed() || end_edit.changed() {
-                    self.timeline.custom_range_error = None;
-                }
-                if ui.button("apply").clicked() || applied_on_enter {
-                    self.apply_custom_range();
-                }
-                if let Some(err) = &self.timeline.custom_range_error {
-                    ui.label(
-                        RichText::new(err)
-                            .color(Color32::from_rgb(255, 140, 120))
-                            .small(),
-                    );
-                }
-            });
-
-            let strip_width = ui.available_width();
-            let changed = crate::timeline_strip::show(
-                ui,
-                strip_width,
-                &self.timeline_histogram,
-                &self.map.style,
-                &mut self.timeline,
-                len,
-                max_start,
+    /// The same timeline as the map's bottom strip, full-page: a taller
+    /// histogram and the window controls, for reading the whole time axis at
+    /// once. The map keeps its compact copy because the time window is how
+    /// the map is used — this page is the roomier version, not a replacement.
+    pub fn timeline_page(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default_margins().show(ui, |ui| {
+            ui.heading("Timeline");
+            ui.label(
+                RichText::new(
+                    "Six-hour buckets across everything stored. The stacked bars are \
+                     recorded events and official alerts; the two lines are media \
+                     attention and aggregate chatter, each on its own scale \
+                     (docs/VISUALIZATION.md V1 item 1).",
+                )
+                .color(TEXT_DIM)
+                .small(),
             );
-            if changed {
-                // A drag/click scrub is explicit manual navigation, same as
-                // starting playback or applying a typed custom range.
-                self.timeline.auto_follow = false;
+            ui.add_space(8.0);
+            self.timeline_content(ui, 220.0);
+        });
+    }
+
+    fn timeline_content(&mut self, ui: &mut egui::Ui, strip_height: f32) {
+        let Some((extent_start, extent_end)) = self.extent else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("timeline — waiting for data").color(TEXT_DIM));
+            });
+            return;
+        };
+        let total = self.total_buckets();
+        let len = self.timeline.len.buckets(total);
+        let max_start = (total - len).max(0);
+        self.timeline.start_bucket = self.timeline.start_bucket.clamp(0, max_start);
+
+        ui.horizontal(|ui| {
+            let icon = if self.timeline.playing { "⏸" } else { "▶" };
+            if ui.button(icon).clicked() {
+                self.timeline.playing = !self.timeline.playing;
+                self.timeline.accum = 0.0;
+                if self.timeline.playing {
+                    // Starting playback is explicit manual navigation —
+                    // an ingest tick mid-playback must not yank the
+                    // scrub position back to "now".
+                    self.timeline.auto_follow = false;
+                }
+            }
+
+            let mut len_choice = self.timeline.len;
+            egui::ComboBox::from_id_salt("window-len")
+                .selected_text(len_choice.label())
+                .show_ui(ui, |ui| {
+                    for choice in WindowLen::CHOICES {
+                        ui.selectable_value(&mut len_choice, choice, choice.label());
+                    }
+                });
+            if len_choice != self.timeline.len {
+                self.timeline.len = len_choice;
+                if self.timeline.auto_follow {
+                    self.sync_window_to_now();
+                } else {
+                    let len = self.timeline.len.buckets(total);
+                    self.timeline.start_bucket =
+                        self.timeline.start_bucket.min((total - len).max(0));
+                }
                 self.mark_dirty();
             }
 
-            ui.horizontal(|ui| {
+            if !self.timeline.auto_follow
+                && ui
+                    .button("⏵ now")
+                    .on_hover_text("resume tracking the current moment")
+                    .clicked()
+            {
+                self.timeline.auto_follow = true;
+                self.sync_window_to_now();
+                self.mark_dirty();
+            }
+
+            if let Some((ws, we)) = self.current_window() {
                 ui.label(
-                    RichText::new(format!(
-                        "data: {} → {} · {} six-hour buckets",
-                        fmt_ts(extent_start),
-                        fmt_ts(extent_end),
-                        total
-                    ))
-                    .color(TEXT_DIM)
-                    .small(),
+                    RichText::new(format!("{}  →  {}", fmt_ts(ws), fmt_ts(we)))
+                        .color(Color32::from_rgb(210, 214, 224))
+                        .monospace(),
                 );
-            });
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("custom range (UTC):").color(TEXT_DIM).small());
+            let start_edit = ui.add(
+                egui::TextEdit::singleline(&mut self.timeline.custom_start_input)
+                    .hint_text("YYYY-MM-DD HH:MM")
+                    .desired_width(130.0),
+            );
+            ui.label(RichText::new("→").color(TEXT_DIM));
+            let end_edit = ui.add(
+                egui::TextEdit::singleline(&mut self.timeline.custom_end_input)
+                    .hint_text("YYYY-MM-DD HH:MM")
+                    .desired_width(130.0),
+            );
+            let applied_on_enter = (start_edit.lost_focus() || end_edit.lost_focus())
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if start_edit.changed() || end_edit.changed() {
+                self.timeline.custom_range_error = None;
+            }
+            if ui.button("apply").clicked() || applied_on_enter {
+                self.apply_custom_range();
+            }
+            if let Some(err) = &self.timeline.custom_range_error {
+                ui.label(
+                    RichText::new(err)
+                        .color(Color32::from_rgb(255, 140, 120))
+                        .small(),
+                );
+            }
+        });
+
+        let strip_width = ui.available_width();
+        let changed = crate::timeline_strip::show(
+            ui,
+            strip_width,
+            strip_height,
+            &self.timeline_histogram,
+            &self.map.style,
+            &mut self.timeline,
+            len,
+            max_start,
+        );
+        if changed {
+            // A drag/click scrub is explicit manual navigation, same as
+            // starting playback or applying a typed custom range.
+            self.timeline.auto_follow = false;
+            self.mark_dirty();
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "data: {} → {} · {} six-hour buckets",
+                    fmt_ts(extent_start),
+                    fmt_ts(extent_end),
+                    total
+                ))
+                .color(TEXT_DIM)
+                .small(),
+            );
         });
     }
 
@@ -1530,6 +1596,7 @@ impl App {
         filters: &crate::app::Filters,
         selected_cell: Option<u64>,
         countries: &'a geo_utils::CountryIndex,
+        pinned: Option<&'a crate::map_view::PinnedMarker>,
     ) -> crate::map_view::MapInputs<'a> {
         crate::map_view::MapInputs {
             selected_cell,
@@ -1541,6 +1608,7 @@ impl App {
             show_labels: filters.show_labels,
             focus_selection: filters.focus_selection,
             countries,
+            pinned,
         }
     }
 
@@ -1559,10 +1627,13 @@ impl App {
                     Phase::Loading(msg) => {
                         // Keep painting the basemap under a loading notice.
                         let msg = msg.clone();
-                        let actions = self.map.show(
-                            ui,
-                            &Self::map_inputs(&self.filters, self.selected_cell, &self.countries),
+                        let inputs = Self::map_inputs(
+                            &self.filters,
+                            self.selected_cell,
+                            &self.countries,
+                            self.pinned_marker.as_ref(),
                         );
+                        let actions = self.map.show(ui, &inputs);
                         let _ = actions; // no selection while loading
                         let rect = ui.max_rect();
                         ui.painter().text(
@@ -1576,11 +1647,19 @@ impl App {
                     }
                     Phase::Ready => {}
                 }
-                let actions = self.map.show(
-                    ui,
-                    &Self::map_inputs(&self.filters, self.selected_cell, &self.countries),
+                let inputs = Self::map_inputs(
+                    &self.filters,
+                    self.selected_cell,
+                    &self.countries,
+                    self.pinned_marker.as_ref(),
                 );
-                if let Some(cell) = actions.selected_cell {
+                let actions = self.map.show(ui, &inputs);
+                if let Some(idx) = actions.clicked_marker {
+                    if let Some(point) = self.map.marker_rows.get(idx).cloned() {
+                        self.pinned_marker = Some(crate::map_view::PinnedMarker { point });
+                    }
+                } else if let Some(cell) = actions.selected_cell {
+                    self.pinned_marker = None;
                     self.select_cell(cell, actions.clicked_lonlat);
                 }
             });
@@ -1611,40 +1690,29 @@ impl App {
         }
     }
 
-    /// Settings: per-source state and the enable switch.
+    /// Settings as a page (sidebar → Settings) rather than a modal window.
     ///
     /// `settings_screen::show` borrows the app immutably (it reads status
     /// lines the worker already sent) and hands back the toggle the user
     /// flipped, which is applied here where `&mut self` is available.
-    pub fn settings_window(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
-        }
-        let mut open = true;
-        let mut toggled = None;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .default_width(560.0)
-            .show(ctx, |ui| {
-                toggled = crate::settings_screen::show(self, ui);
-            });
-        if let Some((source, on)) = toggled {
-            self.set_source_enabled(source, on);
-        }
-        self.show_settings = open;
+    pub fn settings_page(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default_margins().show(ui, |ui| {
+            ui.heading("Settings");
+            ui.add_space(4.0);
+            let toggled = crate::settings_screen::show(self, ui);
+            if let Some((source, on)) = toggled {
+                self.set_source_enabled(source, on);
+            }
+        });
     }
 
-    /// About: attributions, licence, version.
-    pub fn about_window(&mut self, ctx: &egui::Context) {
-        if !self.show_about {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("About")
-            .open(&mut open)
-            .default_width(600.0)
-            .show(ctx, |ui| crate::about::show(self, ui));
-        self.show_about = open;
+    /// About as a page (sidebar → About): attributions, licence, version.
+    pub fn about_page(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default_margins().show(ui, |ui| {
+            ui.heading("About");
+            ui.add_space(4.0);
+            crate::about::show(self, ui);
+        });
     }
 
     pub fn log_window(&mut self, ctx: &egui::Context) {

@@ -15,7 +15,6 @@ use renderer::MapStyle;
 
 use crate::app::{HISTOGRAM_STACK_KINDS, HistogramBucket, Timeline};
 
-const HEIGHT: f32 = 40.0;
 const V_PAD: f32 = 3.0;
 const BRUSH_COLOR: Color32 = Color32::from_rgba_premultiplied(110, 140, 220, 70);
 const PLAYHEAD_COLOR: Color32 = Color32::from_rgb(240, 240, 250);
@@ -27,14 +26,17 @@ const EMPTY_TEXT_COLOR: Color32 = Color32::from_rgb(148, 155, 168);
 pub fn show(
     ui: &mut Ui,
     width: f32,
+    height: f32,
     histogram: &[HistogramBucket],
     style: &MapStyle,
     timeline: &mut Timeline,
     window_len_buckets: i64,
     max_start: i64,
 ) -> bool {
-    let (response, painter) =
-        ui.allocate_painter(Vec2::new(width.max(1.0), HEIGHT), Sense::click_and_drag());
+    let (response, painter) = ui.allocate_painter(
+        Vec2::new(width.max(1.0), height.max(1.0)),
+        Sense::click_and_drag(),
+    );
     let rect = response.rect;
     let total = histogram.len() as i64;
 
@@ -50,7 +52,7 @@ pub fn show(
     }
 
     let col_w = rect.width() / total as f32;
-    let plot_h = HEIGHT - 2.0 * V_PAD;
+    let plot_h = height.max(1.0) - 2.0 * V_PAD;
     let max_stack = histogram
         .iter()
         .map(|b| b.event_counts.iter().sum::<u32>())

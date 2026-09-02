@@ -104,6 +104,9 @@ pub struct EventPoint {
     /// posts. Never summed across families.
     pub volume_count: u32,
     pub headline: Option<String>,
+    /// Outlet domains behind a media-attention record; empty for records with
+    /// no outlet (chatter, alerts, ACLED). Used by the on-map source popup.
+    pub outlet_domains: Vec<String>,
     /// 0.0–1.0 when the source provides one (docs/VISUALIZATION.md V1 item 3).
     pub severity: Option<f32>,
     pub source: SourceId,
@@ -1500,7 +1503,7 @@ fn do_query_points(
     let mut stmt = conn.prepare(
         "SELECT id, lat, lon, family, kind, location_role, location_precision,
                 location_confidence, ts_epoch_s, volume_count, headline, themes,
-                severity, source, urls
+                severity, source, urls, outlet_domains
          FROM events
          WHERE ts_epoch_s >= ? AND ts_epoch_s < ?
            AND location_precision IN ('city', 'exact')
@@ -1527,6 +1530,7 @@ fn do_query_points(
                 r.get::<_, Option<f32>>(12)?,
                 r.get::<_, String>(13)?,
                 r.get::<_, String>(14)?,
+                r.get::<_, String>(15)?,
             ))
         },
     )?;
@@ -1548,6 +1552,7 @@ fn do_query_points(
             severity,
             source_s,
             urls_s,
+            outlet_s,
         ) = row?;
         let kind = parse_kind(&kind)?;
         if let Some(filter) = kinds
@@ -1562,6 +1567,7 @@ fn do_query_points(
             }
         }
         let urls: Vec<String> = serde_json::from_str(&urls_s).unwrap_or_default();
+        let outlet_domains: Vec<String> = serde_json::from_str(&outlet_s).unwrap_or_default();
         let has_video = urls.iter().any(|u| core_types::is_video_url(u));
         if video_only && !has_video {
             continue;
@@ -1578,6 +1584,7 @@ fn do_query_points(
             ts_epoch_s: ts,
             volume_count: volume as u32,
             headline,
+            outlet_domains,
             severity,
             source: parse_source(&source_s)?,
             has_video,
