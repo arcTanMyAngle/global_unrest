@@ -25,3 +25,6 @@
 # Editor noise
 .vscode/
 .idea/
+
+# Claude Code runtime lock files (not project state)
+.claude/*.lock

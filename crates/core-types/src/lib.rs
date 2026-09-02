@@ -748,6 +748,9 @@ pub enum RawRecord {
     GdeltDocJson(serde_json::Value),
     /// One CSV row from a GDELT Events 15-minute dump (M3).
     GdeltEventCsv(String),
+    /// One CSV row from a GDELT GKG 2.1 15-minute dump (M9.1): one article,
+    /// whose `V2EnhancedLocations` name the places it mentions.
+    GdeltGkgCsv(String),
     /// One event record from the ACLED API (M5, authorized access only).
     AcledJson(serde_json::Value),
     /// One GeoJSON alert feature from the NOAA/NWS active-alerts API (M5).
@@ -805,7 +808,7 @@ impl RawRecord {
             | RawRecord::AcledJson(v)
             | RawRecord::NoaaAlertJson(v)
             | RawRecord::IodaEventJson(v) => v.to_string(),
-            RawRecord::GdeltEventCsv(s) => s.clone(),
+            RawRecord::GdeltEventCsv(s) | RawRecord::GdeltGkgCsv(s) => s.clone(),
             // Built by hand rather than derived-Debug'd so this can never
             // start echoing a future field into the ingest log.
             RawRecord::ChatterRollup(r) => format!(

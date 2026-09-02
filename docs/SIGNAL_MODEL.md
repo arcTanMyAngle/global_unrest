@@ -124,8 +124,10 @@ mentions are city-or-finer, and country-type mentions ship centroid
 coordinates that must never render as points), and themes stay
 **document-level**, because GKG exposes no theme-to-location edge and inferring
 one from character offsets is ambiguous. See
-[GDELT_GEO_GKG.md](GDELT_GEO_GKG.md). The implementation is M9.1; the
-quarantine above stays in force until it lands.
+[GDELT_GEO_GKG.md](GDELT_GEO_GKG.md). The implementation is M9.1, behind the
+opt-in `gkg-live` feature: GKG rows enter as `MediaAttention` with
+`MentionedPlace` and render spatially, while the DOC `PublisherOrigin`
+exclusion stays in force — DOC still resolves only the publisher.
 
 NOAA alerts are `ReportingJurisdiction`. ACLED, GDELT Events, and IODA are
 `EventSite`. Chatter rollups are `MentionedPlace` — a place named in posts, not

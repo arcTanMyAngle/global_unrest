@@ -8,9 +8,29 @@ project with no published crate API to stabilize against.
 
 ## [Unreleased]
 
-M9 "Truth" is in progress. See [docs/SIGNAL_MODEL.md](docs/SIGNAL_MODEL.md)
-for the contract and [docs/ROADMAP.md](docs/ROADMAP.md#m9-truth--the-signal-contract)
-for the item-by-item state.
+### Added
+
+- GDELT GKG 2.1 story-location attention (M9.1), behind the opt-in `gkg-live`
+  feature on both `global-signal-desktop` and `workers` (off by default: ~470
+  MB/day of download when on). `source-gdelt::gkg` parses
+  `V2EnhancedLocations` per-mention precision and emits `MediaAttention`
+  records with `LocationRole::MentionedPlace` — attention at the places a
+  story is *about*, not the outlet's country. Country-type mentions stay
+  `Country` precision (they shade, never render as points), one record is
+  emitted per distinct (article, place) mention, and themes stay
+  document-level. `RawRecord::GdeltGkgCsv` and `GdeltSource::fetch_gkg` carry
+  the new path, discovered through the existing `lastupdate.txt` pointer. DOC's
+  `PublisherOrigin` quarantine stays in force (docs/SIGNAL_MODEL.md).
+
+## [0.9.0] — 2026-09-02 — M9: Truth — the signal contract
+
+M9 turns product rule 1 into a machine-checked contract
+([docs/SIGNAL_MODEL.md](docs/SIGNAL_MODEL.md)): aggregate chatter becomes its
+own signal family, NOAA alerts leave the unrest score, attention rows carry a
+`LocationRole`, and the A2 spike settles GKG 2.1 as GDELT's spatial
+replacement ([docs/GDELT_GEO_GKG.md](docs/GDELT_GEO_GKG.md)). Item-by-item
+state is recorded in
+[docs/ROADMAP.md](docs/ROADMAP.md#m9-truth--the-signal-contract).
 
 ### Added
 
@@ -563,6 +583,7 @@ for the item-by-item state.
 - eframe desktop shell: cached-mesh basemap/heatmap/marker layers, time
   slider, region inspector, E2E pipeline test.
 
-[Unreleased]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/arcTanMyAngle/global_unrest/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.9.0
 [0.8.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.8.0
 [0.7.0]: https://github.com/arcTanMyAngle/global_unrest/releases/tag/v0.7.0

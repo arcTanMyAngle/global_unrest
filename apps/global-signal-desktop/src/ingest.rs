@@ -961,6 +961,24 @@ async fn fetch_cycle(
             events_err = Some(e);
         }
     }
+    // GKG is a supplementary attention leg: a failure here is recorded in
+    // `ingest_log` but does not degrade the app — DOC attention and Events
+    // still stand on their own.
+    #[cfg(feature = "gkg-live")]
+    match gdelt.fetch_gkg().await {
+        Ok(raws) => {
+            let (e, f) = storage::partition_normalized(gdelt, &raws);
+            events.extend(e);
+            failures.extend(f);
+        }
+        Err(e) => {
+            failures.push(fetch_failure(
+                "gkg",
+                &e,
+                source_gdelt::EVENTS_LASTUPDATE_URL.to_owned(),
+            ));
+        }
+    }
 
     let both_failed = doc_err.is_some() && events_err.is_some();
     let delay = if both_failed {

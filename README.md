@@ -70,7 +70,7 @@ synthetic data.
 | Map and analysis | Available | Heat modes for attention, events, source diversity, and attention-vs-unrest divergence; a six-hour timeline with replay, now-follow, and typed UTC ranges. |
 | Evidence inspection | Available | Per-region score components, source links and video candidates, source-shaped markers, legend, top movers, sparklines, and a paged event ledger. |
 | NOAA alert layer | Available | A US NWS weather-alert overlay separated visually from unrest signals, with graticule, country labels, and an in-app reading guide. |
-| GDELT | Live | Global news metadata and CAMEO event records. Coverage is not confirmation. |
+| GDELT | Live | Global news metadata and CAMEO event records, plus opt-in GKG story-location attention (`gkg-live`). Coverage is not confirmation. |
 | ACLED | Live with authorized credentials | Curated conflict and civic-event records. Account access and available dates vary by tier. |
 | NOAA/NWS | Live | Active US and territory alerts with usable polygon geometry. |
 | IODA | Live | Country-precision internet-outage severity. It shades regions and never creates a point marker. |
@@ -86,7 +86,7 @@ synthetic data.
 
 | Source | Normal cadence | Important limit |
 |---|---:|---|
-| GDELT | 15 minutes | Upstream DOC and Events feeds can be partial, delayed, or unavailable. |
+| GDELT | 15 minutes | Upstream DOC, Events, and (opt-in) GKG feeds can be partial, delayed, or unavailable. |
 | NOAA/NWS | 10 minutes | US and territories only; zone-only alerts are not mapped. |
 | IODA | 15 minutes | Country precision only; never rendered as a point. |
 | ACLED | 12 hours | Requires authorized credentials; licensing and account date restrictions apply. |

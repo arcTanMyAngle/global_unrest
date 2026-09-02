@@ -68,7 +68,7 @@ cargo deny check
 Feature-wiring changes also need no-default-features coverage:
 
 ~~~sh
-cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
 ~~~
 
 The CI workflow runs each source feature separately, the desktop-only

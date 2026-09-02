@@ -121,7 +121,9 @@ pub fn cameo_kind(root_code: &str) -> Option<EventKind> {
 
 /// ActionGeo type → precision + confidence. Types: 1 COUNTRY, 2 US-state,
 /// 3 US-city, 4 world-city, 5 world-state. `None` = ungeocoded (skip the row).
-fn geo_precision(type_code: &str) -> Option<(LocationPrecision, f32)> {
+/// Shared with the GKG path ([`crate::gkg`]), whose location types use the
+/// same taxonomy.
+pub(crate) fn geo_precision(type_code: &str) -> Option<(LocationPrecision, f32)> {
     match type_code.trim() {
         "1" => Some((LocationPrecision::Country, 0.4)),
         "2" | "5" => Some((LocationPrecision::Admin1, 0.6)),

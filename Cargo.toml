@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 # Version is milestone-tied (0.<milestone>.0), not SemVer — see
 # CHANGELOG.md and docs/ROADMAP.md's M6 version-bump policy.
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.96"

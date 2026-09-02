@@ -26,6 +26,9 @@ bluesky-live = ["dep:source-bluesky", "source-bluesky/live"]
 # same posture as Bluesky. Needs a one-time interactive login (see
 # crates/source-telegram/examples/login_setup.rs) before it activates.
 telegram-live = ["dep:source-telegram", "source-telegram/live"]
+# GKG 2.1 story-location attention (M9.1): opt-in, off by default. Adds the
+# GKG ingest leg on top of the always-on DOC + Events legs.
+gkg-live = []
 
 [dependencies]
 # Only used by examples/gen_api_test_fixture.rs, to compute a real H3 cell

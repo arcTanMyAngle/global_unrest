@@ -67,10 +67,11 @@ jobs:
             "ioda-live",
             "bluesky-live",
             "telegram-live",
+            "gkg-live",
             "global-signal-desktop/gemini-live",
             "global-signal-desktop/media-live",
             "global-signal-desktop/video-embed",
-            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed",
+            "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed",
           ]
     runs-on: ubuntu-latest
     steps:

@@ -59,7 +59,7 @@ Other documents link here rather than restating the list.
 Feature-wiring changes also need no-default-features coverage:
 
 ~~~sh
-cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
 ~~~
 
 `cargo check` and `cargo clippy` do not link. After a dependency or linking
@@ -112,8 +112,10 @@ regardless of batch size.
 
 ## Desktop environment variables
 
-The desktop loads .env during startup. Process environment variables take
-precedence; credentials and session files must never be committed.
+The desktop loads .env during startup, then .env.local as a supplemental
+override layer (it only fills variables .env left unset). Process environment
+variables take precedence over both; credentials and session files must never
+be committed.
 
 | Variable | Purpose |
 |---|---|
@@ -231,7 +233,7 @@ desktop-only gemini-live, media-live, and video-embed features. When changing
 feature wiring, mirror the workflow's no-default-features posture:
 
 ~~~sh
-cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
 ~~~
 
 The exact per-feature matrix and mock suites live in .github/workflows/ci.yml.

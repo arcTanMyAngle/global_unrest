@@ -639,6 +639,17 @@ async fn fetch_cycle(
         }
         Err(e) => events_err = Some(e),
     }
+    // GKG is a supplementary attention leg: a failure here is logged but does
+    // not count toward degraded — DOC attention and Events stand on their own.
+    #[cfg(feature = "gkg-live")]
+    match gdelt.fetch_gkg().await {
+        Ok(raws) => {
+            let (e, f) = storage::partition_normalized(gdelt, &raws);
+            events.extend(e);
+            failures.extend(f);
+        }
+        Err(e) => tracing::warn!(error = %e, "gkg fetch failed"),
+    }
 
     let both_failed = doc_err.is_some() && events_err.is_some();
     let delay = if both_failed {

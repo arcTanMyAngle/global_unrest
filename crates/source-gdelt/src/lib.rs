@@ -17,6 +17,7 @@
 pub mod country;
 pub mod doc;
 pub mod events;
+pub mod gkg;
 pub mod sched;
 
 use core_types::{
@@ -146,6 +147,36 @@ impl GdeltSource {
         Ok(out)
     }
 
+    /// Fetch the current 15-minute GKG 2.1 dump: read `lastupdate.txt`, pull
+    /// the `gkg.csv.zip`, unzip it, and hand back one
+    /// [`RawRecord::GdeltGkgCsv`] per row. This is the story-location
+    /// attention path (M9.1), independent of DOC and Events. Like
+    /// [`fetch_events`](Self::fetch_events), always fetches the latest file.
+    pub async fn fetch_gkg(&self) -> Result<Vec<RawRecord>, SourceError> {
+        let lastupdate = self.get(&self.events_lastupdate_url).await?;
+        let txt = lastupdate
+            .text()
+            .await
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
+        let refs = events::parse_lastupdate(&txt)?;
+        let url = gkg::gkg_url(&refs)
+            .ok_or_else(|| SourceError::Other("lastupdate.txt has no gkg dump".into()))?;
+
+        let bytes = self
+            .get(url)
+            .await?
+            .bytes()
+            .await
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
+        let csv = events::unzip_csv(&bytes)?;
+
+        let out: Vec<RawRecord> = events::rows(&csv)
+            .map(|r| RawRecord::GdeltGkgCsv(r.to_owned()))
+            .collect();
+        tracing::info!(records = out.len(), "gdelt gkg fetched");
+        Ok(out)
+    }
+
     /// GET a URL, mapping a 429 to [`SourceError::RateLimited`] (with any
     /// `Retry-After`) and other non-2xx to [`SourceError::Http`], so the
     /// scheduler can back off. Both fetch paths share this.
@@ -250,6 +281,7 @@ impl SignalSource for GdeltSource {
         match raw {
             RawRecord::GdeltDocJson(v) => doc::normalize(v).map(|e| vec![e]),
             RawRecord::GdeltEventCsv(row) => events::normalize(row),
+            RawRecord::GdeltGkgCsv(row) => gkg::normalize(row),
             other => Err(NormalizeError::InvalidValue {
                 field: "record",
                 detail: format!("gdelt source received a foreign record: {other:?}"),

@@ -1,48 +1,47 @@
 ---
 name: run
-description: Launch the Live Earth Signals desktop app (offline fixture mode) and visually verify it on this Windows machine — window screenshot and scripted clicks included. Use when asked to run, demo, screenshot, or confirm the app works.
+description: Launch the Live Earth Signals desktop app (live data) and visually verify it on this Windows machine — window screenshot and scripted clicks included. Use when asked to run, demo, screenshot, or confirm the app works.
 ---
 
 # Running the desktop app
 
 ```powershell
 cd c:\Users\bornt\Desktop\whats_overhead\live-earth-signals
-cargo run -p global-signal-desktop        # must run from workspace root (finds ./fixtures)
+cargo run -p global-signal-desktop
 ```
 
-No network needed. Env overrides: `LES_FIXTURES_DIR`, `LES_DATA_DIR`,
-`RUST_LOG` (e.g. `info`), `WGPU_BACKEND` (dx12/vulkan/gl) for driver issues.
-M3 live-mode knobs: `LES_ONLINE=1` (auto-start live GDELT), `LES_RETENTION_DAYS`,
-`LES_GDELT_DOC_ENDPOINT` / `LES_GDELT_EVENTS_URL` (point the loop at a mock).
+The desktop is live-data-only: it never loads synthetic fixtures. Live
+updates start by default; set `LES_ONLINE=0` to start with polling paused.
+An empty database waits for live records rather than falling back to
+synthetic data.
+
+Env overrides: `LES_DATA_DIR`, `RUST_LOG` (e.g. `info`), `WGPU_BACKEND`
+(dx12/vulkan/gl) for driver issues. See `docs/DEVELOPMENT.md` for the full
+desktop env table (`LES_ONLINE`, `LES_RETENTION_DAYS`, per-source knobs).
 Reset all state: delete `%LOCALAPPDATA%\LiveEarthSignals\live-earth-signals\data`.
 
-## Verify M3 graceful degradation headlessly (no clicks)
+## Verify graceful degradation headlessly (no clicks)
 
-The network-kill path is verifiable **without synthetic input**: auto-start
-online mode and point the loop at a dead port, then confirm the app keeps its
-cached fixtures and logs a degraded state.
+The network-kill path is verifiable without synthetic input: start online and
+point GDELT at a dead port, then confirm the app logs a degraded state instead
+of failing.
 
 ```powershell
 $env:LES_ONLINE = "1"
 $env:LES_GDELT_DOC_ENDPOINT = "http://127.0.0.1:9/api/v2/doc/doc"
 $env:LES_GDELT_EVENTS_URL   = "http://127.0.0.1:9/gdeltv2/lastupdate.txt"
 $env:RUST_LOG = "info"
-# launch as above, Start-Sleep 8, then grep the stderr log:
-#   expect "ingest complete inserted=11043" (cached data present) and
-#   WARN "gdelt fetch failed; degraded, showing cached data … retry_in_s=…"
+# launch as below, Start-Sleep 8, then grep the stdout log:
+#   expect WARN "gdelt fetch failed; degraded … retry_in_s=…"
 ```
 
 Success (real GDELT reachable) would instead log `gdelt cycle ok records=…`.
 
-Expected startup logs (RUST_LOG=info): basemap tessellated (~10.6k
-vertices), fixtures fetched (3 files, ~11k records), fixtures normalized
-(2 failures — planted malformed records), ingest complete.
-
 ## Headless launch with captured logs
 
-**`tracing_subscriber::fmt()` writes to stdout, not stderr** — redirecting
-only stderr captures an *empty* file and looks exactly like an app that
-started but never ingested. Redirect both:
+`tracing_subscriber::fmt()` writes to stdout, not stderr — redirecting only
+stderr captures an empty file and looks exactly like an app that started but
+never ingested. Redirect both:
 
 ```powershell
 $env:RUST_LOG = "info"
@@ -50,9 +49,13 @@ $proc = Start-Process -FilePath ".\target\debug\global-signal-desktop.exe" `
   -WorkingDirectory (Get-Location) -PassThru `
   -RedirectStandardOutput "$env:TEMP\les_app_out.log" `
   -RedirectStandardError  "$env:TEMP\les_app_err.log"
-Start-Sleep -Seconds 14   # startup + ingest
+Start-Sleep -Seconds 14   # startup + first live ingest cycles
 # check: $proc.HasExited, Get-Content $env:TEMP\les_app_out.log -Tail 30
 ```
+
+Expected startup logs (RUST_LOG=info): basemap tessellated (~10.6k vertices)
+and the first per-source ingest-cycle lines as each live source fetches. With
+`LES_ONLINE=0` the app opens with polling paused.
 
 ## Screenshot / click verification (this machine: 2560×1600, DPI-scaled)
 
@@ -72,7 +75,7 @@ Hard-won gotchas — follow exactly:
    process; `SetForegroundWindow(handle)` first, small sleeps between steps.
 5. Kill when done: `Stop-Process -Id $proc.Id -Force -Confirm:$false`.
 
-Additional lessons from the M2 verification session:
+Additional lessons from past verification sessions:
 
 6. The eframe window can open **small and offset**, not maximized —
    `[Win32]::ShowWindow($h, 3)` (SW_SHOWMAXIMIZED) first, take a fresh
@@ -91,8 +94,8 @@ Additional lessons from the M2 verification session:
 9. Each PowerShell tool invocation is a fresh process: `Add-Type` for the
    Win32 helpers must be re-run in every call (types don't persist).
 
-A good end-to-end check: click a hotspot city (e.g. the Nairobi marker) and
-confirm the right-hand inspector fills with the country name, separate
-"Media attention" / "Event data" sections, the four M2 score bars
-(attention / unrest / spike / combined) with cold-start badge on early-day
-windows, confidence bar, themes, and headlines.
+A good end-to-end check: open Settings and About from the top bar to confirm
+per-source state and attribution render, then click a hotspot city (e.g. the
+Nairobi marker) and confirm the right-hand inspector fills with the country
+name, separate "Media attention" / "Event data" sections, the score bars
+(attention / unrest / spike / combined), confidence, themes, and headlines.

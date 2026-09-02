@@ -50,6 +50,11 @@ video-embed = ["dep:wry"]
 # because the page and its types are built either way — the feature adds only
 # the network half, so a build without it shows an honest "search unavailable".
 media-live = ["media-search/live"]
+# GKG 2.1 story-location attention (M9.1): opt-in, off by default. `source-gdelt`
+# is not optional, so this is a pure cfg switch that adds the GKG ingest leg on
+# top of the always-on DOC + Events legs — ~470 MB/day of download when on,
+# which is why it is deliberately absent from `default`.
+gkg-live = []
 
 [dependencies]
 analytics.workspace = true
