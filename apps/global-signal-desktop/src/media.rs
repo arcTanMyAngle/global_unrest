@@ -320,6 +320,23 @@ impl MediaSession {
         self.status = Some(problem.into());
     }
 
+    /// Reset the session to a clean, empty state — the place field's clear
+    /// button removes the typed place *and* its results, not just the text
+    /// that named them. Bumping the generation discards any in-flight reply
+    /// to the previous search, so a slow provider cannot repopulate the list
+    /// after the person has cleared it.
+    pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.place.clear();
+        self.hits.clear();
+        self.problems.clear();
+        self.waiting.clear();
+        self.selected_url = None;
+        self.searching = false;
+        self.status = None;
+        self.slow = false;
+    }
+
     /// Fold one worker message in. Returns `false` if it belonged to a
     /// superseded search and was discarded.
     pub fn apply(&mut self, msg: MediaMsg, window: &str) -> bool {
@@ -387,10 +404,17 @@ impl MediaSession {
         let n = self.hits.len();
         let plural = if n == 1 { "" } else { "s" };
         if !self.searching {
-            return if n == 0 {
-                format!("no video found for {place} in the {window}")
-            } else {
-                format!("{n} result{plural} for {place} · {window}")
+            if n > 0 {
+                return format!("{n} result{plural} for {place} · {window}");
+            }
+            // "No video found" would be a lie when the search never got to
+            // run. Distinguish an honest empty result from a failed search,
+            // so a rate-limited provider cannot read as "nothing happened
+            // here" (docs/SAFETY_AND_PRIVACY.md coverage-bias rule).
+            return match self.problems.as_slice() {
+                [] => format!("no video found for {place} in the {window}"),
+                [one] => format!("no results for {place} — {one}"),
+                many => format!("no results for {place} — all {} sources failed", many.len()),
             };
         }
         let waiting: Vec<&str> = self.waiting.iter().map(|p| p.label()).collect();
@@ -770,6 +794,36 @@ mod tests {
     }
 
     #[test]
+    fn clear_empties_results_and_drops_the_in_flight_search() {
+        let mut s = session();
+        s.apply(
+            MediaMsg::ProviderFinished {
+                generation: 7,
+                provider: Provider::Gdelt,
+                hits: vec![hit("https://youtu.be/a", Provider::Gdelt, 10)],
+            },
+            "last 24h",
+        );
+        assert!(!s.hits.is_empty());
+        s.clear();
+        assert!(s.hits.is_empty());
+        assert!(s.status.is_none());
+        assert!(!s.searching);
+        assert!(s.place.is_empty());
+        // A late reply to the cleared search is discarded, not re-appended.
+        let applied = s.apply(
+            MediaMsg::ProviderFinished {
+                generation: 7,
+                provider: Provider::Bluesky,
+                hits: vec![hit("https://youtu.be/b", Provider::Bluesky, 20)],
+            },
+            "last 24h",
+        );
+        assert!(!applied);
+        assert!(s.hits.is_empty());
+    }
+
+    #[test]
     fn later_results_merge_in_by_time_instead_of_trailing_the_first_provider() {
         let mut s = session();
         s.apply(
@@ -887,6 +941,51 @@ mod tests {
         assert_eq!(
             s.status.as_deref(),
             Some("no video found for Paris in the last 6h")
+        );
+    }
+
+    #[test]
+    fn an_all_failed_search_says_failed_rather_than_empty() {
+        let mut s = session();
+        s.apply(
+            MediaMsg::ProviderFailed {
+                generation: 7,
+                provider: Provider::Gdelt,
+                problem: "HTTP 429 rate limited".into(),
+            },
+            "last 24h",
+        );
+        s.apply(
+            MediaMsg::ProviderFailed {
+                generation: 7,
+                provider: Provider::Bluesky,
+                problem: "could not reach the provider".into(),
+            },
+            "last 24h",
+        );
+        s.apply(MediaMsg::Finished { generation: 7 }, "last 24h");
+        assert!(!s.searching);
+        assert_eq!(
+            s.status.as_deref(),
+            Some("no results for Paris — all 2 sources failed")
+        );
+    }
+
+    #[test]
+    fn a_single_failed_source_is_named_in_the_status() {
+        let mut s = session();
+        s.apply(
+            MediaMsg::ProviderFailed {
+                generation: 7,
+                provider: Provider::Bluesky,
+                problem: "429 rate limited".into(),
+            },
+            "last 24h",
+        );
+        s.apply(MediaMsg::Finished { generation: 7 }, "last 24h");
+        assert_eq!(
+            s.status.as_deref(),
+            Some("no results for Paris — bluesky: 429 rate limited")
         );
     }
 

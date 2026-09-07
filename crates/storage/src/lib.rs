@@ -34,6 +34,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../migrations/0002_scores.sql")),
     (3, include_str!("../migrations/0003_daily_digest.sql")),
     (4, include_str!("../migrations/0004_signal_families.sql")),
+    (5, include_str!("../migrations/0005_coverage_ledger.sql")),
 ];
 
 /// Version of the *facts* a cached Daily Events digest was generated from.
@@ -255,6 +256,54 @@ pub struct IngestLogRow {
     pub raw_excerpt: String,
 }
 
+/// Outcome of one coverage attempt, persisted in `coverage_ledger`
+/// (docs/ROADMAP.md § M9.1 A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageStatus {
+    /// The window was fetched completely.
+    Ok,
+    /// The window could not be fetched (transport error, rate limit).
+    Failed,
+    /// The window was fetched but the provider served only part of it
+    /// (DOC's silent one-slot truncation, docs/GDELT_GEO_GKG.md).
+    Truncated,
+}
+
+impl CoverageStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CoverageStatus::Ok => "ok",
+            CoverageStatus::Failed => "failed",
+            CoverageStatus::Truncated => "truncated",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ok" => Some(CoverageStatus::Ok),
+            "failed" => Some(CoverageStatus::Failed),
+            "truncated" => Some(CoverageStatus::Truncated),
+            _ => None,
+        }
+    }
+}
+
+/// One coverage-ledger row (docs/ROADMAP.md § M9.1 A4). `provider`,
+/// `config_hash`, and `adapter_version` are opaque identities supplied by the
+/// caller — storage only persists and queries them. The window is `[start,
+/// end)` epoch seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageWindow {
+    pub provider: String,
+    pub config_hash: String,
+    pub adapter_version: String,
+    pub window_start: i64,
+    pub window_end: i64,
+    pub status: CoverageStatus,
+    /// ETag / 15-minute filename / error excerpt, as supplied by the caller.
+    pub detail: Option<String>,
+}
+
 /// Result of a Parquet session export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportReport {
@@ -352,6 +401,16 @@ enum Cmd {
     IngestLog {
         limit: usize,
         reply: mpsc::Sender<Result<(u64, Vec<IngestLogRow>), StorageError>>,
+    },
+    RecordCoverage {
+        window: CoverageWindow,
+        reply: mpsc::Sender<Result<(), StorageError>>,
+    },
+    CoverageCovered {
+        provider: String,
+        config_hash: String,
+        adapter_version: String,
+        reply: mpsc::Sender<Result<Vec<EpochWindow>, StorageError>>,
     },
     Baselines {
         h3_cell: u64,
@@ -629,6 +688,33 @@ impl StorageHandle {
         Reply(rx)
     }
 
+    /// Record one coverage window (idempotent: recording the same
+    /// (provider, config, version, window, status) twice is a no-op).
+    pub fn record_coverage(&self, window: CoverageWindow) -> Reply<()> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::RecordCoverage { window, reply });
+        Reply(rx)
+    }
+
+    /// The `[start, end)` windows successfully covered (`status = 'ok'`) for a
+    /// provider/config/adapter identity, oldest first. The GKG backfill driver
+    /// subtracts these from the full range to learn what still needs fetching.
+    pub fn coverage_covered(
+        &self,
+        provider: String,
+        config_hash: String,
+        adapter_version: String,
+    ) -> Reply<Vec<EpochWindow>> {
+        let (reply, rx) = mpsc::channel();
+        self.send(Cmd::CoverageCovered {
+            provider,
+            config_hash,
+            adapter_version,
+            reply,
+        });
+        Reply(rx)
+    }
+
     /// The four persisted time-of-day baselines for one cell.
     pub fn baselines(&self, h3_cell: u64) -> Reply<Vec<BaselineDbRow>> {
         let (reply, rx) = mpsc::channel();
@@ -798,6 +884,22 @@ fn actor_loop(mut conn: Connection, rx: mpsc::Receiver<Cmd>, notifier: Box<dyn F
             }
             Cmd::IngestLog { limit, reply } => {
                 let _ = reply.send(do_ingest_log(&conn, limit));
+            }
+            Cmd::RecordCoverage { window, reply } => {
+                let _ = reply.send(do_record_coverage(&conn, &window));
+            }
+            Cmd::CoverageCovered {
+                provider,
+                config_hash,
+                adapter_version,
+                reply,
+            } => {
+                let _ = reply.send(do_coverage_covered(
+                    &conn,
+                    &provider,
+                    &config_hash,
+                    &adapter_version,
+                ));
             }
             Cmd::Baselines { h3_cell, reply } => {
                 let _ = reply.send(do_baselines(&conn, h3_cell));
@@ -1864,6 +1966,69 @@ fn do_ingest_log(
     Ok((total.max(0) as u64, rows.collect::<Result<Vec<_>, _>>()?))
 }
 
+/// Persist one coverage window. Idempotent per (provider, config, version,
+/// window, status): a retried fetch of an already-recorded outcome adds no
+/// row, so the ledger can be refreshed without growing on every poll.
+fn do_record_coverage(conn: &Connection, window: &CoverageWindow) -> Result<(), StorageError> {
+    let exists: i64 = conn.query_row(
+        "SELECT count(*) FROM coverage_ledger
+         WHERE provider = ? AND config_hash = ? AND adapter_version = ?
+           AND window_start = ? AND window_end = ? AND status = ?",
+        params![
+            window.provider.as_str(),
+            window.config_hash.as_str(),
+            window.adapter_version.as_str(),
+            window.window_start,
+            window.window_end,
+            window.status.as_str(),
+        ],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO coverage_ledger
+            (provider, config_hash, adapter_version, window_start, window_end,
+             status, detail, recorded_at_epoch_s)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            window.provider.as_str(),
+            window.config_hash.as_str(),
+            window.adapter_version.as_str(),
+            window.window_start,
+            window.window_end,
+            window.status.as_str(),
+            window.detail.as_deref(),
+            Utc::now().timestamp(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The windows a provider/config/adapter identity has fully covered.
+fn do_coverage_covered(
+    conn: &Connection,
+    provider: &str,
+    config_hash: &str,
+    adapter_version: &str,
+) -> Result<Vec<EpochWindow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT window_start, window_end FROM coverage_ledger
+         WHERE provider = ? AND config_hash = ? AND adapter_version = ?
+           AND status = 'ok'
+         ORDER BY window_start",
+    )?;
+    let rows = stmt.query_map(params![provider, config_hash, adapter_version], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 fn do_baselines(conn: &Connection, h3_cell: u64) -> Result<Vec<BaselineDbRow>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT tod_bucket, baseline, sample_days, computed_at_epoch_s
@@ -2477,6 +2642,73 @@ mod tests {
 
     fn open_mem() -> StorageHandle {
         StorageHandle::open(None, Box::new(|| {})).unwrap()
+    }
+
+    fn coverage(provider: &str, start: i64, status: CoverageStatus) -> CoverageWindow {
+        CoverageWindow {
+            provider: provider.into(),
+            config_hash: "cfghash".into(),
+            adapter_version: "1".into(),
+            window_start: start,
+            window_end: start + 900,
+            status,
+            detail: Some("etag".into()),
+        }
+    }
+
+    #[test]
+    fn coverage_ledger_records_idempotently_and_lists_only_ok_windows() {
+        let store = open_mem();
+
+        // One ok window, one failed, one truncated, and a duplicate of the ok
+        // window (idempotent re-record).
+        store
+            .record_coverage(coverage("gkg", 1000, CoverageStatus::Ok))
+            .wait()
+            .unwrap();
+        store
+            .record_coverage(coverage("gkg", 1900, CoverageStatus::Failed))
+            .wait()
+            .unwrap();
+        store
+            .record_coverage(coverage("gkg", 2800, CoverageStatus::Truncated))
+            .wait()
+            .unwrap();
+        store
+            .record_coverage(coverage("gkg", 1000, CoverageStatus::Ok))
+            .wait()
+            .unwrap();
+
+        // Only the ok window is "covered"; failed/truncated windows are gaps.
+        let covered = store
+            .coverage_covered("gkg".into(), "cfghash".into(), "1".into())
+            .wait()
+            .unwrap();
+        assert_eq!(covered, vec![(1000, 1900)]);
+
+        // A different config hash sees none of the above.
+        let other = store
+            .coverage_covered("gkg".into(), "otherhash".into(), "1".into())
+            .wait()
+            .unwrap();
+        assert!(other.is_empty());
+    }
+
+    #[test]
+    fn coverage_windows_are_sorted_oldest_first() {
+        let store = open_mem();
+        for start in [3700, 1000, 2800, 1900] {
+            store
+                .record_coverage(coverage("events", start, CoverageStatus::Ok))
+                .wait()
+                .unwrap();
+        }
+        let covered = store
+            .coverage_covered("events".into(), "cfghash".into(), "1".into())
+            .wait()
+            .unwrap();
+        let starts: Vec<i64> = covered.iter().map(|(s, _)| *s).collect();
+        assert_eq!(starts, vec![1000, 1900, 2800, 3700]);
     }
 
     /// The alert overlay's claim is "this is weather, not unrest". That holds
@@ -3854,7 +4086,10 @@ mod tests {
             let version: i64 = conn
                 .query_row("SELECT max(version) FROM schema_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 4);
+            // Every migration applied: the seed provides 1..=3, open applies
+            // the rest. Tied to the list, not a literal, so a new migration
+            // bumps this expectation with it.
+            assert_eq!(version, MIGRATIONS.len() as i64);
             let marker: String = conn
                 .query_row(
                     "SELECT value FROM storage_meta WHERE key = 'derived_rebuild_required'",

@@ -64,15 +64,31 @@ impl PlaybackRequest {
 ///
 /// `.m3u8` is included in [`core_types::embed_for`]'s playable extensions
 /// because Safari-family webviews play HLS natively — Chromium/WebView2 does
-/// not, and there is no bundled hls.js here, so an HLS file shows the
-/// `<video>` element's own error state rather than silently blank. The
-/// browser fallback stays reachable for exactly that case.
+/// not, and there is no bundled hls.js here. Rather than render a dead
+/// `<video>` that sits black, an HLS file renders a one-line note and keeps
+/// the browser link as the honest escape.
 ///
 /// Only the real webview calls this, so builds without it would warn on an
 /// unused function; the test cfg keeps the escaping test running everywhere.
 #[cfg(any(test, all(target_os = "windows", feature = "video-embed")))]
 fn file_player_html(url: &str) -> String {
     let escaped = escape_attr(url);
+    // Match `core_types::embed_for`, which classifies by URL *path* (a
+    // signed HLS playlist often carries a query string after `.m3u8`).
+    let is_hls = url::Url::parse(url)
+        .map(|p| p.path().to_ascii_lowercase().ends_with(".m3u8"))
+        .unwrap_or(false);
+    if is_hls {
+        return format!(
+            "<!doctype html><meta charset=\"utf-8\">\
+             <style>html,body{{margin:0;height:100%;background:#000;color:#cfd3dc;\
+             display:flex;align-items:center;justify-content:center;\
+             font:14px system-ui,sans-serif;text-align:center;padding:2em}}\
+             a{{color:#8db8ff}}</style>\
+             <p>This HLS stream cannot play in the embedded window.<br>\
+             <a href=\"{escaped}\">Open it in your browser ↗</a></p>"
+        );
+    }
     format!(
         "<!doctype html><meta charset=\"utf-8\">\
          <style>html,body{{margin:0;height:100%;background:#000;\
@@ -226,13 +242,22 @@ mod imp {
             let nav = needs_load.then(|| self.arm(&embed));
 
             let webview = self.webview.as_ref().expect("just checked");
-            let _ = webview.set_bounds(bounds);
+            if let Err(e) = webview.set_bounds(bounds) {
+                // A stale child window still works (wrong place), but the
+                // failure must not be silently swallowed: the UI paints the
+                // rect black, so a failed move looks exactly like a broken
+                // player with no explanation.
+                tracing::warn!("player set_bounds: {e}");
+            }
             if !self.visible {
-                let _ = webview.set_visible(true);
+                if let Err(e) = webview.set_visible(true) {
+                    tracing::warn!("player set_visible: {e}");
+                }
                 self.visible = true;
             }
             if let Some(nav) = nav {
                 if let Err(e) = webview.load_url(&nav) {
+                    tracing::warn!("player load_url({nav}): {e}");
                     return Err(format!("could not load player: {e}"));
                 }
                 self.loaded = Some(key);
@@ -299,8 +324,13 @@ mod imp {
             {
                 // Blank the page as well as hiding the window: a hidden
                 // webview keeps playing audio otherwise.
-                let _ = webview.load_html("<!doctype html><body style=\"background:#000\">");
-                let _ = webview.set_visible(false);
+                if let Err(e) = webview.load_html("<!doctype html><body style=\"background:#000\">")
+                {
+                    tracing::warn!("player blank: {e}");
+                }
+                if let Err(e) = webview.set_visible(false) {
+                    tracing::warn!("player hide: {e}");
+                }
                 self.loaded = None;
             }
             self.visible = false;
@@ -377,5 +407,21 @@ mod tests {
         assert!(!html.contains("<script>"));
         assert!(html.contains("&amp;"));
         assert!(html.contains("&quot;"));
+    }
+
+    #[test]
+    fn hls_files_get_a_visible_browser_fallback_not_a_dead_video() {
+        let html = file_player_html("https://x.example/playlist.m3u8");
+        assert!(!html.contains("<video"));
+        assert!(html.contains("HLS"));
+        assert!(html.contains("https://x.example/playlist.m3u8"));
+        // The original URL is still present as a link, not stripped.
+        assert!(html.contains("href"));
+
+        // A query string after the extension is still HLS — classification
+        // is on the path, matching `core_types::embed_for`.
+        let signed = file_player_html("https://x.example/playlist.m3u8?sig=abc");
+        assert!(!signed.contains("<video"));
+        assert!(signed.contains("HLS"));
     }
 }

@@ -43,6 +43,22 @@ pub const WINDOWS: [(&str, i64); 4] = [
 /// Per-provider result cap for one search.
 pub const RESULT_LIMIT: usize = 25;
 
+/// One-click topic chips for the Media page: the categories people most often
+/// want on-the-ground footage for. The text is a plain search term, so it is
+/// sanitised exactly like anything a person types (no provider operators).
+///
+/// Each chip is a distinct event type — no parent terms that would duplicate
+/// a child ("natural disaster" would overlap "flood"/"earthquake"/"wildfire").
+pub const TOPIC_PRESETS: [&str; 7] = [
+    "war",
+    "crime",
+    "protest",
+    "flood",
+    "earthquake",
+    "wildfire",
+    "storm",
+];
+
 /// How many "busiest place" shortcuts to offer.
 const BUSIEST_PLACES: usize = 6;
 
@@ -56,6 +72,20 @@ pub fn window_label(hours: i64) -> &'static str {
         .find(|(_, h)| *h == hours)
         .map(|(label, _)| *label)
         .unwrap_or("custom window")
+}
+
+/// External YouTube search for the current place (+ topic). The on-demand
+/// legs are bounded and can come back thin for a region, so this is the
+/// one-click browser path to the widest footage corpus — labelled for what it
+/// is rather than folded into the in-app results.
+fn youtube_search_url(place: &str, topic: &str) -> String {
+    let terms = [place.trim(), topic.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let encoded: String = url::form_urlencoded::byte_serialize(terms.as_bytes()).collect();
+    format!("https://www.youtube.com/results?search_query={encoded}")
 }
 
 impl App {
@@ -115,12 +145,23 @@ impl App {
 
         let mut submit = false;
         ui.label(RichText::new("place").color(TEXT_DIM).small());
+        // A full-width field, never inside a `horizontal`: an infinite-width
+        // widget in a horizontal layout makes the panel demand the whole
+        // screen, pushing the player off and re-laying out every frame.
         let place = ui.add(
             egui::TextEdit::singleline(&mut self.media_place)
                 .hint_text("Colombia, Port-au-Prince, …")
                 .desired_width(f32::INFINITY),
         );
         submit |= place.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // A typed place sticks until replaced — one explicit clear undoes it
+        // and its results, instead of only the trending chips being able to
+        // change it.
+        if !self.media_place.is_empty() && ui.small_button("✕ clear").clicked() {
+            self.media_place.clear();
+            self.media.clear();
+            self.media_player.hide();
+        }
 
         ui.label(RichText::new("topic (optional)").color(TEXT_DIM).small());
         let topic = ui.add(
@@ -129,6 +170,30 @@ impl App {
                 .desired_width(f32::INFINITY),
         );
         submit |= topic.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+        // One-click topic chips for the categories people most often want
+        // footage for. Single-select: clicking the active chip clears it, so
+        // a search can return to "everything about this place".
+        ui.horizontal_wrapped(|ui| {
+            for preset in TOPIC_PRESETS {
+                let active = self.media_topic == preset;
+                if ui
+                    .selectable_label(active, preset)
+                    .on_hover_text(if active {
+                        "click to clear the topic"
+                    } else {
+                        "narrow the search to this topic"
+                    })
+                    .clicked()
+                {
+                    if active {
+                        self.media_topic.clear();
+                    } else {
+                        self.media_topic = preset.to_string();
+                    }
+                }
+            }
+        });
 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -149,6 +214,17 @@ impl App {
         });
         if submit && self.media_handle.available() && !self.media.searching {
             self.start_media_search();
+        }
+
+        // The bounded on-demand legs can come back thin for a region; this is
+        // the labelled browser path to the widest footage corpus, always one
+        // click away once a place is set.
+        if !self.media_place.trim().is_empty() {
+            ui.add_space(4.0);
+            ui.hyperlink_to(
+                "search YouTube for this place ↗",
+                youtube_search_url(&self.media_place, &self.media_topic),
+            );
         }
 
         ui.add_space(6.0);
@@ -362,5 +438,36 @@ impl App {
             self.media_place.trim(),
             window_label(self.media_window_hours)
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn youtube_search_url_encodes_place_and_topic() {
+        let url = youtube_search_url("Port-au-Prince", "earthquake");
+        assert!(
+            url.starts_with("https://www.youtube.com/results?search_query="),
+            "{url}"
+        );
+        let query = url::Url::parse(&url)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect::<Vec<_>>();
+        assert_eq!(query[0].0, "search_query");
+        assert_eq!(query[0].1, "Port-au-Prince earthquake");
+    }
+
+    #[test]
+    fn youtube_search_url_omits_an_empty_topic() {
+        let query = url::Url::parse(&youtube_search_url("Colombia", "   "))
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect::<Vec<_>>();
+        assert_eq!(query[0].1, "Colombia");
     }
 }

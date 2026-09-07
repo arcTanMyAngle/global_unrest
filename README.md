@@ -158,7 +158,10 @@ GDELT, public Bluesky posts, and the configured Telegram allowlist for video.
 Nothing is fetched on a timer or written to the database. The providers are
 searched in parallel and results appear as each one answers, with a notice for
 any that is slow and a per-provider timeout rather than one long wait. News
-videos and unverified public posts are labelled separately. On Windows, supported
+videos and unverified public posts are labelled separately. One-click topic
+chips (war, crime, protest, flood, earthquake, wildfire, and storm) narrow the
+search, and a labelled link opens a YouTube search for the same place and topic
+in the browser. On Windows, supported
 provider embeds can play inside the app; every result retains a browser
 fallback.
 

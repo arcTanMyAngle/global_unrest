@@ -98,6 +98,10 @@ The exception is constrained as follows:
   public posts and configured Telegram public-channel posts must carry video.
   Social results are visually marked as unverified public posts, not event
   evidence.
+- **External fallback, not a provider.** The page may also show a labelled
+  "search YouTube for this place" link that opens the OS browser. It performs
+  no in-app retrieval, carries no result back into the app, and is not a
+  widening of provider access.
 - **Minimal display fields.** A temporary hit may include its public URL, a
   bounded one-line title/caption, timestamp, and public outlet, Bluesky
   handle, or Telegram channel attribution. The Telegram lookup never reads or

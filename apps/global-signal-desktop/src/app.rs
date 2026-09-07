@@ -110,6 +110,12 @@ pub struct Filters {
     pub show_graticule: bool,
     #[serde(default = "default_true")]
     pub show_labels: bool,
+    /// EPSG:4326 imagery layer (docs/BASEMAP.md). Off by default — it starts
+    /// recurring third-party traffic as a side effect of panning once the
+    /// tile worker lands, so it is opt-in. Phase 1 wires the compositing and
+    /// scrim; Phase 2 loads textures.
+    #[serde(default)]
+    pub show_tiles: bool,
     /// Dim the map outside the selected cell. Off by default: dimming hides
     /// real data, so it stays something the user turns on.
     #[serde(default)]
@@ -144,6 +150,7 @@ impl Default for Filters {
             show_alerts: true,
             show_graticule: true,
             show_labels: true,
+            show_tiles: false,
             focus_selection: false,
             heat_metric: HeatMetric::Attention,
             themes: Vec::new(),
@@ -227,9 +234,42 @@ impl WindowLen {
     }
 }
 
+/// How far back the timeline may reach. The raw storage extent can stretch
+/// months back (ACLED in particular carries a long historical record), which
+/// is exactly what a live dashboard must not do by default: an anchored
+/// "today" strip would still let a scrub or playback run all the way back to
+/// the oldest stored row. `Recent` clamps the reach to the last 7 days;
+/// `Full` opens the whole stored extent for an explicit review of the older
+/// record (ACLED included).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineRange {
+    /// Last 7 days (28 six-hour buckets), anchored at wall-clock now.
+    Recent,
+    /// The whole stored extent, ACLED history included.
+    Full,
+}
+
+impl TimelineRange {
+    pub const CHOICES: [TimelineRange; 2] = [TimelineRange::Recent, TimelineRange::Full];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimelineRange::Recent => "last 7 days",
+            TimelineRange::Full => "full history",
+        }
+    }
+}
+
+/// Buckets of reach `TimelineRange::Recent` keeps: 7 days of 6h buckets.
+const RECENT_REACH_BUCKETS: i64 = 7 * 4;
+
 pub struct Timeline {
     pub len: WindowLen,
     pub start_bucket: i64,
+    /// How far back the strip, playback, and scrub may reach
+    /// ([`TimelineRange`]). Independent of `len`, which is the width of the
+    /// selected window *within* that reach.
+    pub range: TimelineRange,
     pub playing: bool,
     pub accum: f32,
     /// While `true`, every extent refresh and window-length change
@@ -530,6 +570,7 @@ impl App {
             timeline: Timeline {
                 len: WindowLen::D1,
                 start_bucket: 0,
+                range: TimelineRange::Recent,
                 playing: false,
                 accum: 0.0,
                 auto_follow: true,
@@ -595,10 +636,55 @@ impl App {
         Ok(app)
     }
 
+    /// Raw storage-extent bucket count. Timeline UI must use
+    /// [`Self::timeline_total_buckets`] instead, so an ACLED-long history
+    /// cannot drag the strip back years when the reach is `Recent`.
     pub fn total_buckets(&self) -> i64 {
         self.extent
             .map(|(s, e)| ((e - s) / BUCKET_SECS).max(1))
             .unwrap_or(0)
+    }
+
+    /// The extent the timeline is allowed to span. With
+    /// [`TimelineRange::Recent`] this is the raw extent clamped to the last
+    /// 7 days relative to wall-clock now, so the strip, scrub, playback, and
+    /// the map window all stop 7 days back by default. `Full` returns the raw
+    /// extent unchanged (ACLED's older record included).
+    pub fn timeline_extent(&self) -> Option<EpochWindow> {
+        let (start, end) = self.extent?;
+        match self.timeline.range {
+            TimelineRange::Recent => Some(clamp_recent_extent(
+                (start, end),
+                chrono::Utc::now().timestamp(),
+            )),
+            TimelineRange::Full => Some((start, end)),
+        }
+    }
+
+    /// Bucket count of the timeline's reachable extent.
+    pub fn timeline_total_buckets(&self) -> i64 {
+        self.timeline_extent()
+            .map(|(s, e)| ((e - s) / BUCKET_SECS).max(1))
+            .unwrap_or(0)
+    }
+
+    /// Switch the timeline reach (`TimelineRange`). Re-anchors the window at
+    /// now while still auto-following, otherwise re-clamps it into the new
+    /// reach, then rebuilds the strip and re-fires the window queries.
+    pub fn set_timeline_range(&mut self, range: TimelineRange) {
+        if self.timeline.range == range {
+            return;
+        }
+        self.timeline.range = range;
+        if self.timeline.auto_follow {
+            self.sync_window_to_now();
+        } else {
+            let total = self.timeline_total_buckets();
+            let len = self.timeline.len.buckets(total);
+            self.timeline.start_bucket = self.timeline.start_bucket.clamp(0, (total - len).max(0));
+        }
+        self.rebuild_histogram();
+        self.mark_dirty();
     }
 
     /// Reposition the window to track wall-clock "now" and mark auto-follow
@@ -606,17 +692,19 @@ impl App {
     /// auto-following, on a window-length change while still auto-following,
     /// and by the explicit "now" control. No-op with no extent yet.
     pub fn sync_window_to_now(&mut self) {
-        let Some(extent) = self.extent else { return };
-        let len = self.timeline.len.buckets(self.total_buckets());
+        let Some(extent) = self.timeline_extent() else {
+            return;
+        };
+        let len = self.timeline.len.buckets(self.timeline_total_buckets());
         self.timeline.start_bucket =
             now_anchored_start_bucket(extent, len, chrono::Utc::now().timestamp());
     }
 
     /// Apply the timeline panel's typed start/end inputs as the window.
-    /// On success this takes the window off auto-follow (a typed range is
-    /// an explicit "look here", not "keep me at now") and clears any prior
-    /// error; on failure it leaves the window untouched and records the
-    /// error for display next to the inputs.
+    /// A typed range is an explicit "look anywhere", so it opens the reach to
+    /// [`TimelineRange::Full`] (a date in 2025 must actually be reachable),
+    /// takes the window off auto-follow, and clears any prior error. On
+    /// failure it leaves the window untouched and records the error.
     pub fn apply_custom_range(&mut self) {
         let Some(extent) = self.extent else { return };
         match parse_custom_range(
@@ -625,10 +713,12 @@ impl App {
             extent,
         ) {
             Ok((start_bucket, len_buckets)) => {
+                self.timeline.range = TimelineRange::Full;
                 self.timeline.start_bucket = start_bucket;
                 self.timeline.len = WindowLen::Custom(len_buckets);
                 self.timeline.auto_follow = false;
                 self.timeline.custom_range_error = None;
+                self.rebuild_histogram();
                 self.mark_dirty();
             }
             Err(msg) => self.timeline.custom_range_error = Some(msg.to_string()),
@@ -636,8 +726,8 @@ impl App {
     }
 
     pub fn current_window(&self) -> Option<EpochWindow> {
-        let (start, _) = self.extent?;
-        let len = self.timeline.len.buckets(self.total_buckets());
+        let (start, _) = self.timeline_extent()?;
+        let len = self.timeline.len.buckets(self.timeline_total_buckets());
         let ws = start + self.timeline.start_bucket * BUCKET_SECS;
         Some((ws, ws + len * BUCKET_SECS))
     }
@@ -716,10 +806,17 @@ impl App {
                     Ok(IngestMsg::Loaded {
                         events,
                         failures,
+                        coverage,
                         origin,
                     }) => {
                         tracing::debug!(origin, events = events.len(), "batch queued for ingest");
                         self.ingest_queue.push_back((events, failures));
+                        // Coverage is recorded independently of ingest: the
+                        // ledger says "this window was fetched", whether or not
+                        // its rows survived dedup (docs/ROADMAP.md § M9.1 A4).
+                        for window in coverage {
+                            self.store.record_coverage(window);
+                        }
                     }
                     Ok(IngestMsg::Status(status)) => {
                         // Upsert this source's line; the app-level online flag
@@ -1339,7 +1436,7 @@ impl App {
         }
         const SECS_PER_STEP: f32 = 0.4;
         self.timeline.accum += ctx.input(|i| i.stable_dt).min(0.25);
-        let total = self.total_buckets();
+        let total = self.timeline_total_buckets();
         let len = self.timeline.len.buckets(total);
         let max_start = (total - len).max(0);
         while self.timeline.accum >= SECS_PER_STEP {
@@ -1370,14 +1467,17 @@ impl App {
     }
 
     /// Re-project `histogram_raw` into the dense, bucket-index-aligned
-    /// `timeline_histogram` array. Full-extent, not window-scoped — refreshed
-    /// only on ingest (`refresh_metadata`), never on scrub/window changes.
+    /// `timeline_histogram` array. Spans the *timeline reach* (7 days by
+    /// default), not the raw storage extent — refreshed on ingest and on a
+    /// reach change, never on scrub/window changes. Rows older than the
+    /// reachable floor are simply skipped, so ACLED history does not inflate
+    /// the strip.
     fn rebuild_histogram(&mut self) {
-        let Some((extent_start, _)) = self.extent else {
+        let Some((extent_start, _)) = self.timeline_extent() else {
             self.timeline_histogram.clear();
             return;
         };
-        let total = self.total_buckets().max(0) as usize;
+        let total = self.timeline_total_buckets().max(0) as usize;
         let mut dense = vec![HistogramBucket::default(); total];
         for p in &self.histogram_raw {
             let idx = (p.bucket_start - extent_start) / BUCKET_SECS;
@@ -1453,7 +1553,7 @@ impl eframe::App for App {
             // over whatever replaces it.
             Page::Map => {
                 self.media_player.hide();
-                self.map_filter_bar(ui);
+                self.map_filters_panel(ui);
                 self.timeline_panel(ui);
                 self.inspector_panel(ui);
                 self.central_map(ui);
@@ -1536,6 +1636,16 @@ fn fade_alpha(age_secs: i64, window_span_secs: i64, floor: f32) -> f32 {
     }
     let t = (age_secs as f32 / window_span_secs as f32).clamp(0.0, 1.0);
     1.0 - t * (1.0 - floor)
+}
+
+/// Clamp `extent`'s start to `now − 7 days`, bucket-aligned. This is the
+/// whole of [`TimelineRange::Recent`]: the tail stays the raw extent's tail,
+/// only the reachable past is bounded so an ACLED-long history cannot drag
+/// the timeline back years.
+fn clamp_recent_extent(extent: EpochWindow, now_epoch_s: i64) -> EpochWindow {
+    let (start, end) = extent;
+    let floor = bucket_start_epoch(now_epoch_s) - RECENT_REACH_BUCKETS * BUCKET_SECS;
+    (start.max(floor), end)
 }
 
 /// Position `start_bucket` so the window's right edge sits at wall-clock
@@ -1646,6 +1756,46 @@ mod tests {
         let extent = (10 * BUCKET_SECS, 20 * BUCKET_SECS);
         let now = 0;
         assert_eq!(now_anchored_start_bucket(extent, 4, now), 0);
+    }
+
+    #[test]
+    fn clamp_recent_extent_bounds_the_past_to_seven_days() {
+        // Extent starts 100 days back; the recent clamp must lift its start
+        // to exactly `now - 7 days` (bucket-aligned) and keep the tail.
+        let now = 1_000 * 86_400; // arbitrary epoch
+        let start = now - 100 * 86_400;
+        let end = now + 2 * 86_400;
+        let (clamped_start, clamped_end) = clamp_recent_extent((start, end), now);
+        assert_eq!(clamped_end, end);
+        assert_eq!(
+            clamped_start,
+            bucket_start_epoch(now) - RECENT_REACH_BUCKETS * BUCKET_SECS
+        );
+    }
+
+    #[test]
+    fn clamp_recent_extent_leaves_a_short_extent_alone() {
+        // A fresh install whose whole extent is already inside 7 days must
+        // not be stretched — the clamp only raises the floor, never lowers it.
+        let now = 2_000 * 86_400;
+        let start = now - 2 * 86_400;
+        let end = now;
+        assert_eq!(clamp_recent_extent((start, end), now), (start, end));
+    }
+
+    #[test]
+    fn recent_reach_keeps_the_window_within_seven_days() {
+        // Mirror of the default experience: a months-long extent, reach
+        // `Recent`, window `D1`. `now_anchored_start_bucket` over the clamped
+        // extent must place the 1-day window at the very end of the last 7
+        // days — never back at the raw extent's 2025-era start.
+        let now = 500 * 86_400;
+        let raw = (now - 200 * 86_400, now);
+        let (cs, ce) = clamp_recent_extent(raw, now);
+        let total = (ce - cs) / BUCKET_SECS;
+        assert_eq!(total, RECENT_REACH_BUCKETS);
+        let start = now_anchored_start_bucket((cs, ce), 4, now);
+        assert_eq!(start, total - 4); // last four buckets = last day
     }
 
     #[test]

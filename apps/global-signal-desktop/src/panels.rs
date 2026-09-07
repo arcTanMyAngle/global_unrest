@@ -6,9 +6,31 @@ use core_types::{AttributionSubject, attribution_for};
 use core_types::{EventKind, SignalFamily};
 use egui::{Align2, Color32, FontId, Pos2, Rect, RichText, Vec2};
 
-use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Page, Phase, WindowLen};
+use crate::app::{App, HeatMetric, LEDGER_PAGE_SIZE, Page, Phase, TimelineRange, WindowLen};
 
 const TEXT_DIM: Color32 = Color32::from_rgb(148, 155, 168);
+
+/// Rail background — a touch bluer and darker than the default panel fill so
+/// navigation and the map's filter rail read as chrome, not as content.
+const RAIL_BG: Color32 = Color32::from_rgb(21, 23, 31);
+
+/// Soft blue accent used for the selected nav tick and the wordmark.
+const ACCENT: Color32 = Color32::from_rgb(104, 148, 250);
+
+/// Fill behind the selected nav row.
+const NAV_SELECTED_BG: Color32 = Color32::from_rgb(44, 50, 68);
+
+/// A small-caps section heading inside the rails.
+fn section_header(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(10.0)
+            .strong()
+            .color(Color32::from_rgb(118, 126, 142)),
+    );
+    ui.add_space(2.0);
+}
 
 /// Above this share of coarse-precision (country/admin1) records, a cell's
 /// detail gets a low-confidence badge.
@@ -91,18 +113,37 @@ fn score_bar(ui: &mut egui::Ui, label: &str, value: f32, text: String) {
 impl App {
     /// Left navigation rail. Every top-level page is one click away, and the
     /// application-wide live controls sit below the nav. Map-specific filters
-    /// stay in `map_filter_bar` on the Map page, so this rail only ever
+    /// live in `map_filters_panel` on the Map page, so this rail only ever
     /// carries navigation and the controls that apply to the whole app
     /// (ingest runs regardless of what is on screen).
     pub fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("sidebar")
             .resizable(false)
-            .default_size(180.0)
+            .default_size(176.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::default()
+                    .fill(RAIL_BG)
+                    .inner_margin(egui::Margin::symmetric(10, 12)),
+            )
             .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new("Live Earth Signals").strong());
-                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("LIVE EARTH")
+                        .size(15.0)
+                        .strong()
+                        .color(ACCENT),
+                );
+                ui.label(
+                    RichText::new("SIGNALS")
+                        .size(10.0)
+                        .strong()
+                        .color(Color32::from_rgb(118, 126, 142)),
+                );
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
 
+                section_header(ui, "Pages");
                 self.nav_item(
                     ui,
                     Page::Map,
@@ -139,8 +180,9 @@ impl App {
 
                 ui.add_space(10.0);
                 ui.separator();
-                ui.add_space(10.0);
+                ui.add_space(4.0);
 
+                section_header(ui, "Live");
                 // Pause/resume network polling. Cached rows are always real;
                 // the desktop runtime never loads synthetic fixtures.
                 let mut online = self.online;
@@ -168,58 +210,88 @@ impl App {
     }
 
     /// One full-width nav row: a frameless button that fills the rail when it
-    /// is the selected page, so the whole row is clickable and visibly active.
+    /// is the selected page, with a left accent tick so the active page is
+    /// legible at a glance rather than by colour alone.
     fn nav_item(&mut self, ui: &mut egui::Ui, page: Page, label: &str, hover: &str) {
         let selected = self.page == page;
-        let (bg, fg) = if selected {
-            let v = ui.visuals().selection;
-            (v.bg_fill, v.stroke.color)
+        let fg = if selected {
+            Color32::from_rgb(232, 236, 246)
         } else {
-            (Color32::TRANSPARENT, ui.visuals().text_color())
+            ui.visuals().text_color()
+        };
+        let bg = if selected {
+            NAV_SELECTED_BG
+        } else {
+            Color32::TRANSPARENT
         };
         let response = ui
             .add_sized(
-                [ui.available_width(), 24.0],
+                [ui.available_width(), 26.0],
                 egui::Button::new(RichText::new(label).color(fg))
                     .fill(bg)
                     .stroke(egui::Stroke::NONE)
-                    .corner_radius(4.0),
+                    .corner_radius(6.0),
             )
             .on_hover_text(hover);
+        if selected {
+            let tick = Rect::from_min_max(
+                response.rect.left_center() - egui::vec2(0.0, 8.0),
+                response.rect.left_center() + egui::vec2(3.0, 8.0),
+            );
+            ui.painter().rect_filled(tick, 2.0, ACCENT);
+        }
         if response.clicked() {
             self.set_page(page);
         }
     }
 
-    /// Map-only filters and data actions, shown as a top bar over the map.
-    /// Navigation and the application-wide live controls live in the sidebar.
-    pub fn map_filter_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("map_filters").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let mut changed = false;
-                changed |= ui
-                    .checkbox(&mut self.filters.show_heatmap, "heatmap")
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.show_markers, "markers")
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.show_spike_halos, "spike halos")
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.show_alerts, "NOAA alerts")
-                    .on_hover_text(
-                        "Active NOAA/NWS weather alerts as severity-tinted cells with a \
-                         dashed outline. Weather, not unrest — a separate layer so the \
-                         two never blend together. US coverage only.",
-                    )
-                    .changed();
-                ui.menu_button("orientation", |ui| {
-                    ui.label(
-                        RichText::new("Offline basemap aids — no online tiles.")
-                            .color(TEXT_DIM)
-                            .small(),
-                    );
+    /// Map-only filters and data actions, as a left rail beside the map.
+    /// Navigation and the application-wide live controls live in the sidebar;
+    /// these are the per-layer, per-marker, and data controls that only make
+    /// sense while a map is on screen.
+    pub fn map_filters_panel(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("map_filters")
+            .resizable(true)
+            .default_size(250.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::default()
+                    .fill(RAIL_BG)
+                    .inner_margin(egui::Margin::symmetric(10, 12)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let mut changed = false;
+
+                    section_header(ui, "Layers");
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_heatmap, "heatmap")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_markers, "markers")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_spike_halos, "spike halos")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_alerts, "NOAA alerts")
+                        .on_hover_text(
+                            "Active NOAA/NWS weather alerts as severity-tinted cells with a \
+                             dashed outline. Weather, not unrest — a separate layer so the \
+                             two never blend together. US coverage only.",
+                        )
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.show_tiles, "terrain imagery")
+                        .on_hover_text(
+                            "NASA GIBS shaded-relief imagery under the data layers \
+                             (docs/BASEMAP.md). Imagery is orientation only — it is not \
+                             evidence about any record's location. Tile loading lands with \
+                             the tile worker; until then the vector basemap stays visible.",
+                        )
+                        .changed();
+
+                    section_header(ui, "Orientation");
                     changed |= ui
                         .checkbox(&mut self.filters.show_graticule, "graticule")
                         .on_hover_text("Meridians and parallels; spacing adapts to zoom.")
@@ -240,161 +312,170 @@ impl App {
                              — dimming hides real data.",
                         )
                         .changed();
-                });
-                ui.separator();
 
-                ui.label(RichText::new("heat:").color(TEXT_DIM));
-                changed |= ui
-                    .selectable_value(
-                        &mut self.filters.heat_metric,
-                        HeatMetric::Attention,
-                        "media attention",
-                    )
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut self.filters.heat_metric, HeatMetric::Events, "events")
-                    .changed();
-                changed |= ui
-                    .selectable_value(
-                        &mut self.filters.heat_metric,
-                        HeatMetric::Diversity,
-                        "source diversity",
-                    )
-                    .changed();
-                changed |= ui
-                    .selectable_value(
-                        &mut self.filters.heat_metric,
-                        HeatMetric::Divergence,
-                        "attention ↔ unrest",
-                    )
-                    .on_hover_text(
-                        "Where media attention outruns event data, and where events \
-                         outrun attention. Ranks within this window, not raw scores. \
-                         See the legend for how to read it.",
-                    )
-                    .changed();
-                ui.separator();
+                    section_header(ui, "Heat");
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.filters.heat_metric,
+                            HeatMetric::Attention,
+                            "media attention",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.filters.heat_metric,
+                            HeatMetric::Events,
+                            "events",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.filters.heat_metric,
+                            HeatMetric::Diversity,
+                            "source diversity",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.filters.heat_metric,
+                            HeatMetric::Divergence,
+                            "attention ↔ unrest",
+                        )
+                        .on_hover_text(
+                            "Where media attention outruns event data, and where events \
+                             outrun attention. Ranks within this window, not raw scores. \
+                             See the legend for how to read it.",
+                        )
+                        .changed();
 
-                ui.label(RichText::new("markers:").color(TEXT_DIM));
-                changed |= ui.checkbox(&mut self.filters.protest, "protest").changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.conflict, "conflict")
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.disruption, "disruption")
-                    .changed();
-                changed |= ui.checkbox(&mut self.filters.other, "other").changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.attention_markers, "attention")
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.chatter_markers, "chatter")
-                    .on_hover_text(
-                        "Aggregate social rollups: how many posts mentioned a place,                          with no author, text, or post behind them. Volume only -                          never coverage, never a report that something happened.",
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.filters.video_only, "🎥 has video")
-                    .on_hover_text("Only show markers whose record carries a classified video URL.")
-                    .changed();
-                ui.separator();
+                    section_header(ui, "Markers");
+                    changed |= ui.checkbox(&mut self.filters.protest, "protest").changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.conflict, "conflict")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.disruption, "disruption")
+                        .changed();
+                    changed |= ui.checkbox(&mut self.filters.other, "other").changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.attention_markers, "attention")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.chatter_markers, "chatter")
+                        .on_hover_text(
+                            "Aggregate social rollups: how many posts mentioned a place, \
+                             with no author, text, or post behind them. Volume only - \
+                             never coverage, never a report that something happened.",
+                        )
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.filters.video_only, "🎥 has video")
+                        .on_hover_text(
+                            "Only show markers whose record carries a classified video URL.",
+                        )
+                        .changed();
 
-                let theme_label = if self.filters.themes.is_empty() {
-                    "themes: all".to_string()
-                } else {
-                    format!("themes: {}", self.filters.themes.len())
-                };
-                ui.menu_button(theme_label, |ui| {
-                    let Some(vocab) = &self.theme_vocab else {
-                        ui.label(RichText::new("loading themes…").color(TEXT_DIM));
-                        return;
+                    section_header(ui, "Themes");
+                    let theme_label = if self.filters.themes.is_empty() {
+                        "all themes".to_string()
+                    } else {
+                        format!("{} themes selected", self.filters.themes.len())
                     };
-                    if !self.filters.themes.is_empty() && ui.button("clear theme filter").clicked()
-                    {
-                        self.filters.themes.clear();
-                        changed = true;
-                    }
-                    egui::ScrollArea::vertical()
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            for (theme, count) in vocab {
-                                let mut on = self.filters.themes.contains(theme);
-                                if ui.checkbox(&mut on, format!("{theme} ({count})")).changed() {
-                                    if on {
-                                        self.filters.themes.push(theme.clone());
-                                    } else {
-                                        self.filters.themes.retain(|t| t != theme);
+                    ui.menu_button(theme_label, |ui| {
+                        let Some(vocab) = &self.theme_vocab else {
+                            ui.label(RichText::new("loading themes…").color(TEXT_DIM));
+                            return;
+                        };
+                        if !self.filters.themes.is_empty()
+                            && ui.button("clear theme filter").clicked()
+                        {
+                            self.filters.themes.clear();
+                            changed = true;
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for (theme, count) in vocab {
+                                    let mut on = self.filters.themes.contains(theme);
+                                    if ui.checkbox(&mut on, format!("{theme} ({count})")).changed()
+                                    {
+                                        if on {
+                                            self.filters.themes.push(theme.clone());
+                                        } else {
+                                            self.filters.themes.retain(|t| t != theme);
+                                        }
+                                        changed = true;
                                     }
-                                    changed = true;
                                 }
-                            }
-                        });
-                });
-                ui.separator();
+                            });
+                    });
 
-                ui.label(RichText::new("min confidence").color(TEXT_DIM));
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.filters.min_confidence, 0.0..=1.0)
-                            .fixed_decimals(2),
-                    )
-                    .changed();
+                    section_header(ui, "Data");
+                    ui.label(RichText::new("min confidence").color(TEXT_DIM).small());
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.filters.min_confidence, 0.0..=1.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed();
 
-                let retention_label = match self.retention_days {
-                    Some(d) => format!("retention: {d}d"),
-                    None => "retention: keep all".to_string(),
-                };
-                ui.menu_button(retention_label, |ui| {
-                    ui.label(
-                        RichText::new("Cap the events table (online volumes ~100k/day).")
-                            .color(TEXT_DIM)
-                            .small(),
-                    );
-                    let mut choice = self.retention_days;
-                    let changed = ui
-                        .selectable_value(&mut choice, None, "keep everything")
+                    let retention_label = match self.retention_days {
+                        Some(d) => format!("retention: {d}d"),
+                        None => "retention: keep all".to_string(),
+                    };
+                    ui.menu_button(retention_label, |ui| {
+                        ui.label(
+                            RichText::new("Cap the events table (online volumes ~100k/day).")
+                                .color(TEXT_DIM)
+                                .small(),
+                        );
+                        let mut choice = self.retention_days;
+                        let changed = ui
+                            .selectable_value(&mut choice, None, "keep everything")
+                            .clicked()
+                            | ui.selectable_value(&mut choice, Some(30), "30 days")
+                                .clicked()
+                            | ui.selectable_value(&mut choice, Some(60), "60 days")
+                                .clicked()
+                            | ui.selectable_value(&mut choice, Some(90), "90 days")
+                                .clicked();
+                        ui.label(
+                            RichText::new("≥ 30 days keeps the 28-day baselines fully warm.")
+                                .color(TEXT_DIM)
+                                .small(),
+                        );
+                        if changed {
+                            self.set_retention(choice);
+                            ui.close();
+                        }
+                    });
+
+                    section_header(ui, "View");
+                    if ui.button("reset view").clicked() {
+                        self.map.viewport = None;
+                    }
+                    // The `?` shortcut alone is not discoverable, and this
+                    // window is where the map's caveats live.
+                    if ui
+                        .button("how to read this")
+                        .on_hover_text("What the map shows, what it cannot show, and why (?)")
                         .clicked()
-                        | ui.selectable_value(&mut choice, Some(30), "30 days")
-                            .clicked()
-                        | ui.selectable_value(&mut choice, Some(60), "60 days")
-                            .clicked()
-                        | ui.selectable_value(&mut choice, Some(90), "90 days")
-                            .clicked();
-                    ui.label(
-                        RichText::new("≥ 30 days keeps the 28-day baselines fully warm.")
-                            .color(TEXT_DIM)
-                            .small(),
-                    );
+                    {
+                        self.show_how_to_read = true;
+                    }
+                    if ui
+                        .button("export parquet")
+                        .on_hover_text("write this session as date-partitioned Parquet")
+                        .clicked()
+                    {
+                        self.start_export();
+                    }
+
                     if changed {
-                        self.set_retention(choice);
-                        ui.close();
+                        self.mark_dirty();
                     }
                 });
-
-                if ui.button("reset view").clicked() {
-                    self.map.viewport = None;
-                }
-                // The `?` shortcut alone is not discoverable, and this window
-                // is where the map's caveats live.
-                if ui
-                    .button("how to read this")
-                    .on_hover_text("What the map shows, what it cannot show, and why (?)")
-                    .clicked()
-                {
-                    self.show_how_to_read = true;
-                }
-                if ui
-                    .button("export parquet")
-                    .on_hover_text("write this session as date-partitioned Parquet")
-                    .clicked()
-                {
-                    self.start_export();
-                }
-                if changed {
-                    self.mark_dirty();
-                }
             });
-        });
     }
 
     /// Compact live-source status shown next to the online toggle: one dot
@@ -451,18 +532,18 @@ impl App {
     }
 
     fn timeline_content(&mut self, ui: &mut egui::Ui, strip_height: f32) {
-        let Some((extent_start, extent_end)) = self.extent else {
+        let Some((extent_start, extent_end)) = self.timeline_extent() else {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("timeline — waiting for data").color(TEXT_DIM));
             });
             return;
         };
-        let total = self.total_buckets();
+        let total = self.timeline_total_buckets();
         let len = self.timeline.len.buckets(total);
         let max_start = (total - len).max(0);
         self.timeline.start_bucket = self.timeline.start_bucket.clamp(0, max_start);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let icon = if self.timeline.playing { "⏸" } else { "▶" };
             if ui.button(icon).clicked() {
                 self.timeline.playing = !self.timeline.playing;
@@ -474,6 +555,25 @@ impl App {
                     self.timeline.auto_follow = false;
                 }
             }
+
+            // How far back the strip may reach. Kept separate from the
+            // window-length combo above: this bounds the whole reach (7 days
+            // by default so ACLED's long record can't drag the strip to
+            // 2025), while the window is the width selected within it.
+            ui.label(RichText::new("history:").color(TEXT_DIM).small());
+            let mut range_choice = self.timeline.range;
+            egui::ComboBox::from_id_salt("timeline-range")
+                .selected_text(range_choice.label())
+                .show_ui(ui, |ui| {
+                    for choice in TimelineRange::CHOICES {
+                        ui.selectable_value(&mut range_choice, choice, choice.label());
+                    }
+                });
+            if range_choice != self.timeline.range {
+                self.set_timeline_range(range_choice);
+            }
+
+            ui.separator();
 
             let mut len_choice = self.timeline.len;
             egui::ComboBox::from_id_salt("window-len")
@@ -1606,6 +1706,7 @@ impl App {
             show_alerts: filters.show_alerts,
             show_graticule: filters.show_graticule,
             show_labels: filters.show_labels,
+            show_tiles: filters.show_tiles,
             focus_selection: filters.focus_selection,
             countries,
             pinned,

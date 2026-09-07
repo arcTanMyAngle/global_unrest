@@ -33,6 +33,47 @@ pub const DOC_ENDPOINT: &str = "https://api.gdeltproject.org/api/v2/doc/doc";
 /// Pointer to the current 15-minute Events dump (`<size> <md5> <url>` lines).
 pub const EVENTS_LASTUPDATE_URL: &str = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt";
 
+/// Seconds in one GDELT 15-minute dump window.
+pub const DUMP_WINDOW_SECS: i64 = 15 * 60;
+
+/// Adapter version recorded in the coverage ledger (docs/ROADMAP.md § M9.1
+/// A4). Bump when a leg's output shape changes in a way that would make
+/// previously recorded coverage misleading (new columns, changed semantics),
+/// not on every release.
+pub const COVERAGE_ADAPTER_VERSION: &str = "1";
+
+/// The coverage-ledger `provider` strings for the three GDELT legs. One
+/// [`SourceId`] (`gdelt`) is three adapters, so the ledger keys by leg.
+pub const COVERAGE_PROVIDER_DOC: &str = "doc";
+pub const COVERAGE_PROVIDER_EVENTS: &str = "events";
+pub const COVERAGE_PROVIDER_GKG: &str = "gkg";
+
+/// Deterministic config identity for a leg, so the coverage ledger can tell
+/// "this window was fetched with that query/config" from a changed one. FNV-1a
+/// over the NUL-joined parts (the same stable hash as `core_types::event_id`).
+pub fn config_hash(parts: &[&str]) -> String {
+    let mut buf = Vec::new();
+    for part in parts {
+        buf.extend_from_slice(part.as_bytes());
+        buf.push(0);
+    }
+    format!("{:016x}", core_types::fnv1a64(&buf))
+}
+
+/// One fetched 15-minute dump: the normalized rows plus the coverage window
+/// they came from and the transport's ETag (the object MD5 for GDELT dumps).
+/// The ETag lets the ledger verify a window's identity without re-parsing it
+/// (docs/GDELT_GEO_GKG.md).
+pub struct DumpFetch {
+    pub rows: Vec<RawRecord>,
+    /// Epoch seconds of the 15-minute window start (inclusive).
+    pub window_start: i64,
+    /// Epoch seconds of the window end (exclusive); `start + 900`.
+    pub window_end: i64,
+    /// The object ETag when the transport provided one.
+    pub etag: Option<String>,
+}
+
 /// A broad civic-attention default query. Callers can override it; theme
 /// filters passed to [`SignalSource::fetch`] refine it further. Includes
 /// drug-policy trafficking/overdose coverage alongside the general civic
@@ -119,10 +160,11 @@ impl GdeltSource {
 
     /// Fetch the current 15-minute Events dump: read `lastupdate.txt`, pull the
     /// `export.CSV.zip`, unzip it, and hand back one [`RawRecord::GdeltEventCsv`]
-    /// per row. This is the discrete-event path, independent of DOC. Backfill of
-    /// older dumps (by timestamped URL) is a scheduler concern; this always
-    /// fetches the latest published file.
-    pub async fn fetch_events(&self) -> Result<Vec<RawRecord>, SourceError> {
+    /// per row, with the dump's 15-minute coverage window and ETag. This is the
+    /// discrete-event path, independent of DOC. Backfill of older dumps (by
+    /// timestamped URL) is a scheduler concern; this always fetches the latest
+    /// published file.
+    pub async fn fetch_events(&self) -> Result<DumpFetch, SourceError> {
         let lastupdate = self.get(&self.events_lastupdate_url).await?;
         let txt = lastupdate
             .text()
@@ -131,28 +173,35 @@ impl GdeltSource {
         let refs = events::parse_lastupdate(&txt)?;
         let url = events::export_url(&refs)
             .ok_or_else(|| SourceError::Other("lastupdate.txt has no export dump".into()))?;
+        let window_start = events::window_start(url)?;
 
-        let bytes = self
-            .get(url)
-            .await?
+        let resp = self.get(url).await?;
+        let etag = header_etag(&resp);
+        let bytes = resp
             .bytes()
             .await
             .map_err(|e| SourceError::Http(http_detail(&e)))?;
         let csv = events::unzip_csv(&bytes)?;
 
-        let out: Vec<RawRecord> = events::rows(&csv)
+        let rows: Vec<RawRecord> = events::rows(&csv)
             .map(|r| RawRecord::GdeltEventCsv(r.to_owned()))
             .collect();
-        tracing::info!(records = out.len(), "gdelt events fetched");
-        Ok(out)
+        tracing::info!(records = rows.len(), "gdelt events fetched");
+        Ok(DumpFetch {
+            rows,
+            window_start,
+            window_end: window_start + DUMP_WINDOW_SECS,
+            etag,
+        })
     }
 
     /// Fetch the current 15-minute GKG 2.1 dump: read `lastupdate.txt`, pull
     /// the `gkg.csv.zip`, unzip it, and hand back one
-    /// [`RawRecord::GdeltGkgCsv`] per row. This is the story-location
-    /// attention path (M9.1), independent of DOC and Events. Like
-    /// [`fetch_events`](Self::fetch_events), always fetches the latest file.
-    pub async fn fetch_gkg(&self) -> Result<Vec<RawRecord>, SourceError> {
+    /// [`RawRecord::GdeltGkgCsv`] per row, with the dump's 15-minute coverage
+    /// window and ETag. This is the story-location attention path (M9.1),
+    /// independent of DOC and Events. Like [`fetch_events`](Self::fetch_events),
+    /// always fetches the latest file.
+    pub async fn fetch_gkg(&self) -> Result<DumpFetch, SourceError> {
         let lastupdate = self.get(&self.events_lastupdate_url).await?;
         let txt = lastupdate
             .text()
@@ -161,20 +210,51 @@ impl GdeltSource {
         let refs = events::parse_lastupdate(&txt)?;
         let url = gkg::gkg_url(&refs)
             .ok_or_else(|| SourceError::Other("lastupdate.txt has no gkg dump".into()))?;
+        let window_start = events::window_start(url)?;
 
-        let bytes = self
-            .get(url)
-            .await?
+        let resp = self.get(url).await?;
+        let etag = header_etag(&resp);
+        let bytes = resp
             .bytes()
             .await
             .map_err(|e| SourceError::Http(http_detail(&e)))?;
         let csv = events::unzip_csv(&bytes)?;
 
-        let out: Vec<RawRecord> = events::rows(&csv)
+        let rows: Vec<RawRecord> = events::rows(&csv)
             .map(|r| RawRecord::GdeltGkgCsv(r.to_owned()))
             .collect();
-        tracing::info!(records = out.len(), "gdelt gkg fetched");
-        Ok(out)
+        tracing::info!(records = rows.len(), "gdelt gkg fetched");
+        Ok(DumpFetch {
+            rows,
+            window_start,
+            window_end: window_start + DUMP_WINDOW_SECS,
+            etag,
+        })
+    }
+
+    /// Fetch one historical GKG 2.1 15-minute window (English stream) by its
+    /// window-start timestamp. GKG is static-file addressed
+    /// (docs/GDELT_GEO_GKG.md "Historical addressability"), so backfill is a
+    /// direct file fetch with no query API in the path. Returns the rows plus
+    /// the window and its ETag.
+    pub async fn fetch_gkg_window(&self, window_start: i64) -> Result<DumpFetch, SourceError> {
+        let url = gkg::window_url(window_start);
+        let resp = self.get(&url).await?;
+        let etag = header_etag(&resp);
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| SourceError::Http(http_detail(&e)))?;
+        let csv = events::unzip_csv(&bytes)?;
+        let rows: Vec<RawRecord> = events::rows(&csv)
+            .map(|r| RawRecord::GdeltGkgCsv(r.to_owned()))
+            .collect();
+        Ok(DumpFetch {
+            rows,
+            window_start,
+            window_end: window_start + DUMP_WINDOW_SECS,
+            etag,
+        })
     }
 
     /// GET a URL, mapping a 429 to [`SourceError::RateLimited`] (with any
@@ -235,6 +315,16 @@ fn http_detail(e: &reqwest::Error) -> String {
         cause = c.source();
     }
     s
+}
+
+/// The `ETag` header off a dump response, if present and valid UTF-8. GDELT
+/// dumps are immutable and their ETag is the object MD5, so this is what the
+/// coverage ledger stores to verify a window without re-parsing it.
+fn header_etag(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// GDELT theme-filter query: `(theme:PROTEST OR theme:FLOOD)`, upper-cased as

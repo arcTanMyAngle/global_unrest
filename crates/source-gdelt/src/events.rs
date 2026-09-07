@@ -84,6 +84,24 @@ pub fn export_url(refs: &[DumpRef]) -> Option<&str> {
         .find(|u| u.ends_with(".export.CSV.zip"))
 }
 
+/// The 15-minute window start (epoch seconds) named by a GDELT dump URL — the
+/// `YYYYMMDDHHMMSS` filename stem. Errors when the URL carries no such stem,
+/// which is how the coverage ledger refuses to record a window it cannot
+/// identify (docs/ROADMAP.md § M9.1 A4).
+pub fn window_start(url: &str) -> Result<i64, SourceError> {
+    let file = url.rsplit('/').next().unwrap_or(url);
+    let stem = file.split('.').next().unwrap_or("");
+    if stem.len() == 14 && stem.chars().all(|c| c.is_ascii_digit()) {
+        let naive = NaiveDateTime::parse_from_str(stem, "%Y%m%d%H%M%S")
+            .map_err(|e| SourceError::Other(format!("bad dump timestamp `{stem}`: {e}")))?;
+        Ok(naive.and_utc().timestamp())
+    } else {
+        Err(SourceError::Other(format!(
+            "dump URL has no 15-minute timestamp: {url}"
+        )))
+    }
+}
+
 /// Decompress a single-entry GDELT `.CSV.zip` to its CSV text. GDELT rows are
 /// mostly ASCII but can carry stray bytes in place names, so decode lossily
 /// rather than failing the whole dump on one bad byte.
@@ -442,6 +460,17 @@ mod tests {
             export_url(&refs),
             Some("http://data.gdeltproject.org/gdeltv2/20260620081500.export.CSV.zip")
         );
+    }
+
+    #[test]
+    fn window_start_parses_the_fifteen_minute_stem_and_rejects_the_rest() {
+        let url = "http://data.gdeltproject.org/gdeltv2/20260620081500.export.CSV.zip";
+        let ts = window_start(url).unwrap();
+        let dt = DateTime::<Utc>::from_timestamp(ts, 0).unwrap();
+        assert_eq!(dt.format("%Y%m%d%H%M%S").to_string(), "20260620081500");
+
+        // No timestamp stem → the ledger refuses to key a window it cannot name.
+        assert!(window_start("http://data.gdeltproject.org/gdeltv2/latest.zip").is_err());
     }
 
     #[test]

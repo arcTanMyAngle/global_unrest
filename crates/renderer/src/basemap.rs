@@ -68,17 +68,11 @@ impl BasemapLayer {
         })
     }
 
-    /// Paint fills and borders. `emphasis` is an ISO-A3 code whose rings are
-    /// drawn brighter and heavier, and **after** every other ring so they are
-    /// never overdrawn by a neighbour sharing the boundary.
-    pub fn paint(
-        &mut self,
-        painter: &Painter,
-        aff: &Affine,
-        screen_w: f32,
-        style: &MapStyle,
-        emphasis: Option<&str>,
-    ) {
+    /// Paint fills only. Split from [`Self::paint_borders`] so the tile
+    /// imagery layer can sit *between* the land fill and the border hierarchy:
+    /// imagery would otherwise bury the borders, and the border hierarchy is a
+    /// V3 encoding, not decoration (docs/BASEMAP.md §3).
+    pub fn paint_fills(&mut self, painter: &Painter, aff: &Affine, screen_w: f32) {
         let offsets = visible_world_offsets(aff, screen_w);
         let mut key = affine_key(aff);
         key ^= offsets.len() as u64;
@@ -90,6 +84,19 @@ impl BasemapLayer {
         for mesh in meshes {
             painter.add(Shape::mesh(mesh.clone()));
         }
+    }
+
+    /// Paint the border polylines (and the emphasized country, heavier and
+    /// last so it is never overdrawn by a neighbour sharing the boundary).
+    pub fn paint_borders(
+        &self,
+        painter: &Painter,
+        aff: &Affine,
+        screen_w: f32,
+        style: &MapStyle,
+        emphasis: Option<&str>,
+    ) {
+        let offsets = visible_world_offsets(aff, screen_w);
 
         let project = |ring: &BorderRing, offset: f64| -> Vec<Pos2> {
             ring.points
@@ -123,6 +130,21 @@ impl BasemapLayer {
                 painter.add(Shape::line(project(ring, offset), strong));
             }
         }
+    }
+
+    /// Paint fills and borders. `emphasis` is an ISO-A3 code whose rings are
+    /// drawn brighter and heavier, and **after** every other ring so they are
+    /// never overdrawn by a neighbour sharing the boundary.
+    pub fn paint(
+        &mut self,
+        painter: &Painter,
+        aff: &Affine,
+        screen_w: f32,
+        style: &MapStyle,
+        emphasis: Option<&str>,
+    ) {
+        self.paint_fills(painter, aff, screen_w);
+        self.paint_borders(painter, aff, screen_w, style, emphasis);
     }
 }
 

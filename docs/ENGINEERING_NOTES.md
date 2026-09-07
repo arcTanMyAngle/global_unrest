@@ -127,6 +127,15 @@ read [ROADMAP.md](ROADMAP.md); for what changed read
 - **Aggregate-before-storage sources must publish a window once, complete.**
   Bluesky and Telegram derive `source_event_id` from the window, so a partial
   publish claims that id and dedup-by-id silently discards the remainder.
+- **Natural Earth's `LABEL_X`/`LABEL_Y` are the country label anchors.** The
+  geometric centroid (`geo::Centroid` over the `MultiPolygon`) is area-weighted
+  across *every* polygon, so a country with overseas territories or an island
+  chain — USA (Alaska/Hawaii), Norway (Svalbard), Indonesia, New Zealand,
+  Philippines, Fiji — gets a centroid in the ocean. `LABEL_X`/`LABEL_Y` are
+  hand-placed on the main landmass and present for all 177 admin-0 features.
+  Use them for labels; keep the centroid for precision placement (the
+  country-precision record contract), which must not borrow a hand-placed
+  label point.
 - **rustls 0.23 needs an explicit crypto provider.** Cross-crate feature
   unification hides this: the desktop binary links `reqwest` (which enables
   `ring`), so the bug is invisible there and appears only in a standalone

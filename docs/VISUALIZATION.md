@@ -234,9 +234,12 @@ The highest-leverage batch: makes *time* and *anomaly* readable at a glance.
   Mismatched codes would make emphasis match nothing and fail *silently*.
 - **Country labels are laid out once and blitted.** Nothing about a galley
   depends on the viewport, so per-frame layout would be the text equivalent of
-  re-tessellating a mesh every frame. Colliding labels are dropped
-  largest-country-first (bounding-box extent as a rough size proxy — explicitly
-  not an area, and never surfaced as one).
+  re-tessellating a mesh every frame. Labels sit at Natural Earth's
+  hand-placed `LABEL_X`/`LABEL_Y` anchors rather than the geometric centroid
+  (which lands in the ocean for multi-part countries); Colliding labels are
+  dropped largest-country-first (bounding-box extent as a rough size proxy —
+  explicitly not an area, and never surfaced as one), and each label is drawn
+  at most once per frame even when the world is wrapped into multiple copies.
 - **Focus dimming uses the selected cell's bounding box, not its hexagon.**
   Four rectangles a frame versus building a "world minus hexagon" polygon on
   every viewport change. The cell outline is drawn on top, so the exact

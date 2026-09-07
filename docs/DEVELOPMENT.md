@@ -208,6 +208,8 @@ and each source's endpoint/credential variables) plus these of its own.
 | LES_PUBLISH_DIR | Snapshot publish root. Workers and api must agree on it; api mounts it read-only. |
 | LES_PUBLISH_KEEP_LAST | Versioned snapshots retained under the publish root; default 3. 0 keeps every version. |
 | LES_SEED_FIXTURES | Seed the offline fixture base at startup. Default on; 0, false, or no starts a live-only worker whose store and snapshots hold nothing but what it ingested. |
+| LES_GKG_BACKFILL_START | RFC3339 timestamp: run one bounded GKG backfill pass from here to now at startup. Off by default. Requires `gkg-live`. |
+| LES_GKG_BACKFILL_MAX | Windows fetched per backfill pass; default 96 (one day of 15-minute files). The pass is restartable — coverage is recorded per window as it lands. |
 
 With LES_SEED_FIXTURES off, the startup fixture ingest and the first snapshot
 publish are skipped together — publishing there would pin LATEST to an empty

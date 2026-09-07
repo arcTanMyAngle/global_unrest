@@ -439,6 +439,12 @@ async fn run(
     };
 
     let limiter = sched::request_limiter();
+    // Explicit, restartable GKG backfill (env-gated, off by default). Runs
+    // before the live loop so a backfill run is not delayed by the cadence.
+    #[cfg(feature = "gkg-live")]
+    if let Err(e) = backfill_gkg(&gdelt, &limiter, &store, &publish_root, keep_last).await {
+        tracing::warn!(error = %e, "gkg backfill failed");
+    }
     let mut backoff = sched::Backoff::default();
     let mut next_at = Instant::now();
     let acled_limiter = sched::request_limiter();
@@ -620,22 +626,54 @@ async fn fetch_cycle(
 
     let mut events = Vec::new();
     let mut failures = Vec::new();
+    let mut coverage: Vec<storage::CoverageWindow> = Vec::new();
     let mut doc_err = None;
     let mut events_err = None;
 
+    let doc_config = source_gdelt::config_hash(&[
+        source_gdelt::COVERAGE_PROVIDER_DOC,
+        &gdelt.doc_query(window, &filters).query,
+    ]);
     match gdelt.fetch(window, &filters).await {
         Ok(raws) => {
             let (e, f) = storage::partition_normalized(gdelt, &raws);
             events.extend(e);
             failures.extend(f);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_DOC,
+                &doc_config,
+                window.start.timestamp(),
+                window.end.timestamp(),
+                storage::CoverageStatus::Ok,
+                None,
+            ));
         }
-        Err(e) => doc_err = Some(e),
+        Err(e) => {
+            let detail = e.to_string();
+            doc_err = Some(e);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_DOC,
+                &doc_config,
+                window.start.timestamp(),
+                window.end.timestamp(),
+                storage::CoverageStatus::Failed,
+                Some(detail),
+            ));
+        }
     }
     match gdelt.fetch_events().await {
-        Ok(raws) => {
-            let (e, f) = storage::partition_normalized(gdelt, &raws);
+        Ok(fetched) => {
+            let (e, f) = storage::partition_normalized(gdelt, &fetched.rows);
             events.extend(e);
             failures.extend(f);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_EVENTS,
+                &source_gdelt::config_hash(&[source_gdelt::COVERAGE_PROVIDER_EVENTS]),
+                fetched.window_start,
+                fetched.window_end,
+                storage::CoverageStatus::Ok,
+                fetched.etag,
+            ));
         }
         Err(e) => events_err = Some(e),
     }
@@ -643,12 +681,29 @@ async fn fetch_cycle(
     // not count toward degraded — DOC attention and Events stand on their own.
     #[cfg(feature = "gkg-live")]
     match gdelt.fetch_gkg().await {
-        Ok(raws) => {
-            let (e, f) = storage::partition_normalized(gdelt, &raws);
+        Ok(fetched) => {
+            let (e, f) = storage::partition_normalized(gdelt, &fetched.rows);
             events.extend(e);
             failures.extend(f);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_GKG,
+                &source_gdelt::config_hash(&[source_gdelt::COVERAGE_PROVIDER_GKG]),
+                fetched.window_start,
+                fetched.window_end,
+                storage::CoverageStatus::Ok,
+                fetched.etag,
+            ));
         }
         Err(e) => tracing::warn!(error = %e, "gkg fetch failed"),
+    }
+
+    // Record coverage even when a cycle produced no rows (a 15-minute window
+    // can legitimately be empty): the ledger tracks what was *fetched*, not
+    // what was normalized (docs/ROADMAP.md § M9.1 A4).
+    for window in coverage {
+        if let Err(e) = store.record_coverage(window).wait() {
+            tracing::warn!(error = %e, "coverage record failed");
+        }
     }
 
     let both_failed = doc_err.is_some() && events_err.is_some();
@@ -686,6 +741,112 @@ async fn fetch_cycle(
         }
     }
     delay
+}
+
+/// Build one coverage-ledger row (docs/ROADMAP.md § M9.1 A4). The worker owns
+/// storage, so it records these directly after a cycle.
+fn cover(
+    provider: &str,
+    config_hash: &str,
+    start: i64,
+    end: i64,
+    status: storage::CoverageStatus,
+    detail: Option<String>,
+) -> storage::CoverageWindow {
+    storage::CoverageWindow {
+        provider: provider.into(),
+        config_hash: config_hash.into(),
+        adapter_version: source_gdelt::COVERAGE_ADAPTER_VERSION.into(),
+        window_start: start,
+        window_end: end,
+        status,
+        detail,
+    }
+}
+
+/// One bounded GKG backfill pass: fetch up to `LES_GKG_BACKFILL_MAX` 15-minute
+/// windows not already recorded as covered, oldest first, from
+/// `LES_GKG_BACKFILL_START` (RFC3339) to now. Off by default — GKG is ~470
+/// MB/day English and backfill is an explicit, restartable operator action
+/// (docs/GDELT_GEO_GKG.md). The coverage ledger makes it restartable: each
+/// window is recorded as it lands, so a killed run resumes at the first gap.
+#[cfg(feature = "gkg-live")]
+async fn backfill_gkg(
+    gdelt: &GdeltSource,
+    limiter: &sched::Limiter,
+    store: &StorageHandle,
+    publish_root: &std::path::Path,
+    keep_last: usize,
+) -> anyhow::Result<()> {
+    let Some(start_s) = std::env::var("LES_GKG_BACKFILL_START").ok() else {
+        return Ok(());
+    };
+    let start = chrono::DateTime::parse_from_rfc3339(start_s.trim())
+        .map_err(|e| anyhow::anyhow!("LES_GKG_BACKFILL_START is not RFC3339: `{start_s}`: {e}"))?
+        .with_timezone(&Utc);
+    let max = std::env::var("LES_GKG_BACKFILL_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(96); // one day of 15-minute windows
+
+    let now = Utc::now();
+    if start >= now {
+        return Ok(());
+    }
+    let step = std::time::Duration::from_secs(source_gdelt::DUMP_WINDOW_SECS as u64);
+    let all = sched::backfill_windows(start, now, step);
+    let config = source_gdelt::config_hash(&[source_gdelt::COVERAGE_PROVIDER_GKG]);
+    let covered = store
+        .coverage_covered(
+            source_gdelt::COVERAGE_PROVIDER_GKG.into(),
+            config.clone(),
+            source_gdelt::COVERAGE_ADAPTER_VERSION.into(),
+        )
+        .wait()?;
+    let missing = sched::missing_windows(&all, &covered);
+
+    let mut done = 0usize;
+    for window in missing.into_iter().take(max) {
+        limiter.until_ready().await;
+        let window_start = window.start.timestamp();
+        match gdelt.fetch_gkg_window(window_start).await {
+            Ok(fetched) => {
+                let (events, failures) = storage::partition_normalized(gdelt, &fetched.rows);
+                if !events.is_empty() || !failures.is_empty() {
+                    store.ingest(events, failures).wait()?;
+                }
+                store
+                    .record_coverage(cover(
+                        source_gdelt::COVERAGE_PROVIDER_GKG,
+                        &config,
+                        fetched.window_start,
+                        fetched.window_end,
+                        storage::CoverageStatus::Ok,
+                        fetched.etag,
+                    ))
+                    .wait()?;
+                done += 1;
+            }
+            Err(e) => {
+                store
+                    .record_coverage(cover(
+                        source_gdelt::COVERAGE_PROVIDER_GKG,
+                        &config,
+                        window_start,
+                        window_start + source_gdelt::DUMP_WINDOW_SECS,
+                        storage::CoverageStatus::Failed,
+                        Some(e.to_string()),
+                    ))
+                    .wait()?;
+                tracing::warn!(window = window_start, error = %e, "gkg backfill window failed");
+            }
+        }
+    }
+    if done > 0 {
+        tracing::info!(done, "gkg backfill windows ingested");
+        publish(store, publish_root, keep_last)?;
+    }
+    Ok(())
 }
 
 fn publish(store: &StorageHandle, root: &std::path::Path, keep_last: usize) -> anyhow::Result<()> {

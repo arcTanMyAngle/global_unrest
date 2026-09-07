@@ -15,6 +15,7 @@ pub mod graticule;
 pub mod halo;
 pub mod heatmap;
 pub mod markers;
+pub mod tiles;
 
 pub use alerts::{ALERT_MAX_CELLS, AlertLayer};
 pub use basemap::BasemapLayer;
@@ -23,6 +24,10 @@ pub use graticule::GraticuleLayer;
 pub use halo::HaloLayer;
 pub use heatmap::HeatmapLayer;
 pub use markers::{MarkerInput, MarkerLayer, marker_half_px};
+pub use tiles::{
+    TileId, TileLayer, TileMatrixSet, VISIBLE_TILE_CAP, VisibleTile, select_level_for_viewport,
+    visible_tiles,
+};
 
 use egui::epaint::{Mesh, Vertex, WHITE_UV};
 use egui::{Color32, Pos2};
@@ -81,6 +86,11 @@ pub struct MapStyle {
     /// Dashed outline of an alert cell. Pale ice-blue — the light end of the
     /// alert ramp, so the outline and its fill obviously belong together.
     pub alert_outline: Color32,
+    /// Translucent dark wash painted over the tile imagery layer, *under*
+    /// every data layer, so photographic terrain stays context and never
+    /// competes with the heat ramp or markers for the same attention
+    /// (docs/BASEMAP.md §7). Only applied when tiles actually draw.
+    pub tile_scrim: Color32,
 }
 
 impl Default for MapStyle {
@@ -106,6 +116,7 @@ impl Default for MapStyle {
             halo_color: Color32::from_rgb(240, 240, 250),
             alert_alpha: 80,
             alert_outline: Color32::from_rgb(176, 232, 255),
+            tile_scrim: Color32::from_rgba_premultiplied(11, 14, 20, 115),
         }
     }
 }

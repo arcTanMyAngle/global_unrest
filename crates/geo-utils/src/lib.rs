@@ -214,6 +214,12 @@ struct CountryShape {
     /// Geometric centroid (lon, lat) of the country's polygon(s), precomputed
     /// once at load via `geo::Centroid` (area-weighted, not a vertex mean).
     centroid: Option<(f64, f64)>,
+    /// Natural Earth's hand-placed label anchor (`LABEL_X`/`LABEL_Y`), for the
+    /// map's country-label pass. It sits on the main landmass, where the area
+    /// centroid of a multi-part country (overseas territories, island chains)
+    /// lands in the ocean. Falls back to `centroid` when the source omits a
+    /// usable anchor.
+    label_point: Option<(f64, f64)>,
 }
 
 /// Point-in-polygon country index over Natural Earth countries.
@@ -262,6 +268,20 @@ impl CountryIndex {
                 .or_else(|| prop("ADMIN"))
                 .unwrap_or_else(|| iso_a3.clone());
             let centroid = multi.centroid().map(|p| (p.x(), p.y()));
+            let label_point = prop("LABEL_X")
+                .zip(prop("LABEL_Y"))
+                .and_then(|(x, y)| match (x.parse::<f64>(), y.parse::<f64>()) {
+                    (Ok(x), Ok(y))
+                        if x.is_finite()
+                            && y.is_finite()
+                            && (-180.0..=180.0).contains(&x)
+                            && (-90.0..=90.0).contains(&y) =>
+                    {
+                        Some((x, y))
+                    }
+                    _ => None,
+                })
+                .or(centroid);
             shapes.push(CountryShape {
                 info: CountryInfo {
                     iso_a3,
@@ -271,6 +291,7 @@ impl CountryIndex {
                 bbox,
                 geom: multi,
                 centroid,
+                label_point,
             });
         }
         Ok(Self { shapes })
@@ -317,17 +338,19 @@ impl CountryIndex {
             .filter_map(|s| s.centroid.map(|c| (&s.info, c)))
     }
 
-    /// Same as [`Self::iter_with_centroid`], plus the country's bounding-box
-    /// extent in square degrees.
+    /// Label anchor points for the map's country-label pass: Natural Earth's
+    /// hand-placed `LABEL_X`/`LABEL_Y` where present, else the geometric
+    /// centroid. Yields (info, (lon, lat), extent) with the bounding-box
+    /// extent in square degrees as the collision ranking key.
     ///
     /// That extent is **not an area** — a degree of longitude shrinks toward
     /// the poles and a bounding box overstates any non-rectangular country.
     /// It exists solely to rank countries by rough size when map labels
     /// collide and one has to be dropped, and must never be surfaced as a
     /// measurement.
-    pub fn iter_with_extent(&self) -> impl Iterator<Item = (&CountryInfo, (f64, f64), f64)> {
+    pub fn iter_label_points(&self) -> impl Iterator<Item = (&CountryInfo, (f64, f64), f64)> {
         self.shapes.iter().filter_map(|s| {
-            s.centroid.map(|c| {
+            s.label_point.map(|c| {
                 let extent = s.bbox.width() * s.bbox.height();
                 (&s.info, c, extent)
             })
@@ -595,6 +618,40 @@ mod tests {
         // has geometry, so it is present here — the filter is on centroid,
         // not on ISO codes.
         assert_eq!(index.iter_with_centroid().count(), 2);
+    }
+
+    #[test]
+    fn label_points_prefer_natural_earth_anchors_and_fall_back_to_centroid() {
+        let sample = r#"{
+          "type": "FeatureCollection",
+          "features": [
+            {"type":"Feature","properties":{"ISO_A3":"FRA","ISO_A2":"FR","NAME":"France",
+              "LABEL_X":"3.0","LABEL_Y":"47.0"},
+             "geometry":{"type":"Polygon","coordinates":[[[-5,42],[9,42],[9,51],[-5,51],[-5,42]]]}},
+            {"type":"Feature","properties":{"ISO_A3":"KEN","ISO_A2":"KE","NAME":"Kenya"},
+             "geometry":{"type":"Polygon","coordinates":[[[33,-5],[42,-5],[42,5],[33,5],[33,-5]]]}}
+          ]
+        }"#;
+        let index = CountryIndex::from_geojson_str(sample).unwrap();
+        let mut labels: Vec<_> = index.iter_label_points().collect();
+        labels.sort_by(|a, b| a.0.iso_a3.cmp(&b.0.iso_a3));
+
+        // France: the hand-placed anchor wins over the box centroid (2, 46.5).
+        let (fr, fr_pt, _) = labels[0];
+        assert_eq!(fr.iso_a3, "FRA");
+        assert!((fr_pt.0 - 3.0).abs() < 1e-9, "lon {}", fr_pt.0);
+        assert!((fr_pt.1 - 47.0).abs() < 1e-9, "lat {}", fr_pt.1);
+
+        // Kenya: no label anchor → falls back to the geometric centroid.
+        let (ke, ke_pt, _) = labels[1];
+        assert_eq!(ke.iso_a3, "KEN");
+        assert!((ke_pt.0 - 37.5).abs() < 1e-9, "lon {}", ke_pt.0);
+        assert!((ke_pt.1 - 0.0).abs() < 1e-9, "lat {}", ke_pt.1);
+
+        // The geometric-centroid API for precision placement is unchanged —
+        // France still resolves to its polygon centroid, not its label anchor.
+        let (_, (clon, clat)) = index.centroid_by_iso_a2("fr").unwrap();
+        assert!((clon - 2.0).abs() < 1e-9 && (clat - 46.5).abs() < 1e-9);
     }
 
     #[test]

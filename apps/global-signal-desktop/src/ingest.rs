@@ -363,10 +363,12 @@ impl Enabled {
 }
 
 pub enum IngestMsg {
-    /// One normalized batch to ingest (`origin` names the source for the UI).
+    /// One normalized batch to ingest (`origin` names the source for the UI),
+    /// plus the coverage windows to record in the ledger.
     Loaded {
         events: Vec<GeoTemporalEvent>,
         failures: Vec<IngestFailure>,
+        coverage: Vec<storage::CoverageWindow>,
         origin: &'static str,
     },
     /// Updated live-source status.
@@ -878,6 +880,7 @@ async fn live_cycle<S: SignalSource>(
                 let _ = tx.send(IngestMsg::Loaded {
                     events,
                     failures,
+                    coverage: Vec::new(),
                     origin,
                 });
             }
@@ -928,14 +931,27 @@ async fn fetch_cycle(
 
     let mut events = Vec::new();
     let mut failures = Vec::new();
+    let mut coverage: Vec<storage::CoverageWindow> = Vec::new();
     let mut doc_err = None;
     let mut events_err = None;
 
+    let doc_config = source_gdelt::config_hash(&[
+        source_gdelt::COVERAGE_PROVIDER_DOC,
+        &gdelt.doc_query(window, &filters).query,
+    ]);
     match gdelt.fetch(window, &filters).await {
         Ok(raws) => {
             let (e, f) = storage::partition_normalized(gdelt, &raws);
             events.extend(e);
             failures.extend(f);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_DOC,
+                &doc_config,
+                window.start.timestamp(),
+                window.end.timestamp(),
+                storage::CoverageStatus::Ok,
+                None,
+            ));
         }
         Err(e) => {
             failures.push(fetch_failure(
@@ -943,14 +959,31 @@ async fn fetch_cycle(
                 &e,
                 gdelt.doc_query(window, &filters).query,
             ));
+            let detail = e.to_string();
             doc_err = Some(e);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_DOC,
+                &doc_config,
+                window.start.timestamp(),
+                window.end.timestamp(),
+                storage::CoverageStatus::Failed,
+                Some(detail),
+            ));
         }
     }
     match gdelt.fetch_events().await {
-        Ok(raws) => {
-            let (e, f) = storage::partition_normalized(gdelt, &raws);
+        Ok(fetched) => {
+            let (e, f) = storage::partition_normalized(gdelt, &fetched.rows);
             events.extend(e);
             failures.extend(f);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_EVENTS,
+                &source_gdelt::config_hash(&[source_gdelt::COVERAGE_PROVIDER_EVENTS]),
+                fetched.window_start,
+                fetched.window_end,
+                storage::CoverageStatus::Ok,
+                fetched.etag,
+            ));
         }
         Err(e) => {
             failures.push(fetch_failure(
@@ -966,10 +999,18 @@ async fn fetch_cycle(
     // still stand on their own.
     #[cfg(feature = "gkg-live")]
     match gdelt.fetch_gkg().await {
-        Ok(raws) => {
-            let (e, f) = storage::partition_normalized(gdelt, &raws);
+        Ok(fetched) => {
+            let (e, f) = storage::partition_normalized(gdelt, &fetched.rows);
             events.extend(e);
             failures.extend(f);
+            coverage.push(cover(
+                source_gdelt::COVERAGE_PROVIDER_GKG,
+                &source_gdelt::config_hash(&[source_gdelt::COVERAGE_PROVIDER_GKG]),
+                fetched.window_start,
+                fetched.window_end,
+                storage::CoverageStatus::Ok,
+                fetched.etag,
+            ));
         }
         Err(e) => {
             failures.push(fetch_failure(
@@ -1018,10 +1059,11 @@ async fn fetch_cycle(
         std::time::Duration::from_secs(secs.max(1) as u64)
     };
 
-    if !events.is_empty() || !failures.is_empty() {
+    if !events.is_empty() || !failures.is_empty() || !coverage.is_empty() {
         let _ = tx.send(IngestMsg::Loaded {
             events,
             failures,
+            coverage,
             origin: "gdelt",
         });
     }
@@ -1049,6 +1091,28 @@ fn fetch_failure(half: &str, err: &SourceError, request: String) -> IngestFailur
         reason: format!("{half} fetch failed: {err}"),
         raw_excerpt: request,
         occurred_at: Utc::now(),
+    }
+}
+
+/// Build one coverage-ledger row (docs/ROADMAP.md § M9.1 A4). The desktop's
+/// ingest worker does not own storage, so these ride `IngestMsg::Loaded` to
+/// the UI thread, which records them.
+fn cover(
+    provider: &str,
+    config_hash: &str,
+    start: i64,
+    end: i64,
+    status: storage::CoverageStatus,
+    detail: Option<String>,
+) -> storage::CoverageWindow {
+    storage::CoverageWindow {
+        provider: provider.into(),
+        config_hash: config_hash.into(),
+        adapter_version: source_gdelt::COVERAGE_ADAPTER_VERSION.into(),
+        window_start: start,
+        window_end: end,
+        status,
+        detail,
     }
 }
 

@@ -136,6 +136,20 @@ pub fn backfill_windows(from: DateTime<Utc>, to: DateTime<Utc>, step: Duration) 
     windows
 }
 
+/// Of a [`backfill_windows`] tiling, the windows not fully covered by any
+/// `covered` interval. `covered` is `[start, end)` epoch seconds, as returned
+/// by the coverage ledger's ok-status query. A window counts as covered when
+/// some recorded interval spans it entirely.
+pub fn missing_windows(all: &[TimeWindow], covered: &[(i64, i64)]) -> Vec<TimeWindow> {
+    all.iter()
+        .filter(|w| {
+            let (s, e) = (w.start.timestamp(), w.end.timestamp());
+            !covered.iter().any(|&(cs, ce)| cs <= s && e <= ce)
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +239,23 @@ mod tests {
         // Degenerate inputs yield nothing.
         assert!(backfill_windows(to, from, Duration::from_secs(60)).is_empty());
         assert!(backfill_windows(from, to, Duration::ZERO).is_empty());
+    }
+
+    #[test]
+    fn missing_windows_subtracts_covered_intervals() {
+        let from = Utc.with_ymd_and_hms(2026, 8, 19, 0, 0, 0).unwrap();
+        let to = from + chrono::Duration::minutes(60); // four 15-minute windows
+        let all = backfill_windows(from, to, Duration::from_secs(15 * 60));
+        assert_eq!(all.len(), 4);
+
+        let s = |mins: i64| (from + chrono::Duration::minutes(mins)).timestamp();
+        // Cover the middle two windows; the first and last stay missing.
+        let missing = missing_windows(&all, &[(s(15), s(45))]);
+        assert_eq!(missing.len(), 2);
+        assert_eq!(missing[0].start.timestamp(), s(0));
+        assert_eq!(missing[1].start.timestamp(), s(45));
+
+        // Everything covered → nothing missing.
+        assert!(missing_windows(&all, &[(s(0), s(60))]).is_empty());
     }
 }

@@ -8,6 +8,7 @@ use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Shape, Stroke, Ui
 use geo_utils::{CountryIndex, MapViewport};
 use renderer::{
     AlertLayer, BasemapLayer, GraticuleLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerLayer,
+    TileId, TileLayer, TileMatrixSet,
 };
 use storage::EventPoint;
 
@@ -52,7 +53,7 @@ struct MapLabel {
     lat: f64,
     /// Bounding-box extent in square degrees — the collision ranking key, so
     /// a large country keeps its label and a small neighbour loses it. Not an
-    /// area; see `CountryIndex::iter_with_extent`.
+    /// area; see `CountryIndex::iter_label_points`.
     extent: f64,
     galley: Arc<Galley>,
 }
@@ -68,6 +69,9 @@ pub struct MapInputs<'a> {
     pub show_alerts: bool,
     pub show_graticule: bool,
     pub show_labels: bool,
+    /// Imagery layer toggle (docs/BASEMAP.md). Off by default; the scrim is
+    /// only painted when tiles actually draw.
+    pub show_tiles: bool,
     /// Dim everything outside the selected cell.
     pub focus_selection: bool,
     /// Resolves the hovered point to a country, for border emphasis and the
@@ -98,6 +102,16 @@ pub struct MapView {
     /// Rows behind the marker layer, indexed by `MarkerInput::source_index`.
     pub marker_rows: Vec<EventPoint>,
     pub style: MapStyle,
+    /// Optional EPSG:4326 imagery layer (docs/BASEMAP.md). Phase 1 wires the
+    /// compositing, scrim, and layer order with an empty texture set; Phase 2
+    /// fills `tile_textures` from the tile worker.
+    pub tiles: TileLayer,
+    /// Texture id per loaded tile, keyed by [`TileId`]. Empty until Phase 2;
+    /// a missing entry draws nothing, so the vector basemap shows through.
+    pub tile_textures: std::collections::HashMap<TileId, egui::TextureId>,
+    /// Bumped whenever `tile_textures` changes, so the tile mesh cache
+    /// rebuilds exactly once per arrival rather than never or every frame.
+    pub tile_generation: u64,
     flight: Option<Flight>,
     /// Country labels, laid out **once** and blitted thereafter. Text layout
     /// is the expensive part and none of it depends on the viewport, so doing
@@ -155,6 +169,9 @@ impl MapView {
             spike_halos: HaloLayer::new(Vec::new()),
             marker_rows: Vec::new(),
             style,
+            tiles: TileLayer::new(TileMatrixSet::new(512, 2, 1, 8)),
+            tile_textures: std::collections::HashMap::new(),
+            tile_generation: 0,
             flight: None,
             labels: Vec::new(),
         }
@@ -282,13 +299,34 @@ impl MapView {
             .and_then(|(lon, lat)| inputs.countries.country_at(lon, lat))
             .map(|c| c.iso_a3.clone());
 
-        // --- layers (background → grid → land → heat → alerts → markers) ---
+        // --- layers (background → grid → land → tiles → borders → heat →
+        // alerts → markers → halos → dim → labels → outline) ---
         painter.rect_filled(rect, 0.0, self.style.background);
         // Under the land fill: the graticule is a backdrop, not an overlay.
         if inputs.show_graticule {
             GraticuleLayer::paint(&painter, &aff, rect, &self.style);
         }
-        self.basemap.paint(
+        self.basemap.paint_fills(&painter, &aff, rect.width());
+        // Imagery composites over the land fill; a missing tile simply leaves
+        // the vector land visible (docs/BASEMAP.md §3). The scrim is painted
+        // only when at least one tile drew, so an empty tile set never dims
+        // the vector map for nothing.
+        if inputs.show_tiles {
+            let drawn = self.tiles.paint(
+                &painter,
+                &aff,
+                rect.width(),
+                rect.height(),
+                &self.tile_textures,
+                self.tile_generation,
+            );
+            if drawn > 0 {
+                painter.rect_filled(rect, 0.0, self.style.tile_scrim);
+            }
+        }
+        // Country borders sit *above* the imagery so the border hierarchy is
+        // never buried by it (docs/BASEMAP.md §3).
+        self.basemap.paint_borders(
             &painter,
             &aff,
             rect.width(),
@@ -382,7 +420,7 @@ impl MapView {
         }
         let font = FontId::proportional(LABEL_FONT_PX);
         self.labels = countries
-            .iter_with_extent()
+            .iter_label_points()
             .map(|(info, (lon, lat), extent)| MapLabel {
                 lon,
                 lat,
@@ -418,6 +456,10 @@ impl MapView {
                 }
                 painter.galley(at.min, label.galley.clone(), self.style.label_color);
                 placed.push(at);
+                // One placement per label: with the world wrapped into
+                // multiple on-screen copies, trying the next offset would
+                // draw the same label again and burn the MAX_LABELS budget.
+                break;
             }
         }
     }

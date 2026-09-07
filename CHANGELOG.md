@@ -21,6 +21,20 @@ project with no published crate API to stabilize against.
   document-level. `RawRecord::GdeltGkgCsv` and `GdeltSource::fetch_gkg` carry
   the new path, discovered through the existing `lastupdate.txt` pointer. DOC's
   `PublisherOrigin` quarantine stays in force (docs/SIGNAL_MODEL.md).
+- A **coverage ledger** (M9.1 A4, migration `0005_coverage_ledger`): each
+  GDELT leg (`doc`, `events`, `gkg`) records the windows it actually fetched,
+  keyed by `(provider, config hash, adapter version, start, end, status)` with
+  an ETag/filename `detail` — a scalar backfill marker cannot express gaps,
+  failed windows, truncation, or a query change. Both fetch cycles record
+  every window, and the worker gains a bounded, restartable GKG backfill pass
+  (`LES_GKG_BACKFILL_START`/`LES_GKG_BACKFILL_MAX`, off by default) driven by
+  `sched::backfill_windows` subtracting the ledger's `ok` windows.
+- The Media page gains one-click **topic chips** (war, crime, protest, flood,
+  earthquake, wildfire, storm) and a labelled **"search YouTube
+  for this place"** link. Both feed the existing place-scoped, on-demand
+  lookup — no new providers, no retention change — the chips narrow the topic
+  field and the link is a browser escape hatch for when the bounded legs come
+  back thin.
 
 ### Changed
 
@@ -33,6 +47,21 @@ project with no published crate API to stabilize against.
   that record's source and outlet domains (the marker query now carries
   `outlet_domains`), instead of routing through the side inspector. Clicking
   empty map still selects the cell.
+
+### Fixed
+
+- Country labels are now placed at Natural Earth's hand-placed `LABEL_X`/
+  `LABEL_Y` anchors instead of the raw geometric centroid, which lands in the
+  ocean for multi-part countries (USA + Alaska/Hawaii, Norway + Svalbard,
+  Indonesia, New Zealand, …). Labels also no longer get drawn once per
+  wrapped world copy when the view is panned across the antimeridian.
+- The Media page no longer reports "no video found" when the search actually
+  failed: an all-provider failure reads "no results for X — all N sources
+  failed", and a single failure is named in the status line.
+- The embedded player's swallowed webview errors (`set_bounds`, `set_visible`,
+  `load_url`, `load_html`) are now logged instead of dropped, and an HLS
+  (`.m3u8`) result renders a visible "open in browser" note instead of a dead
+  `<video>` that WebView2 cannot decode.
 
 ## [0.9.0] — 2026-09-02 — M9: Truth — the signal contract
 

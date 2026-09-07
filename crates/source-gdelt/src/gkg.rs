@@ -50,6 +50,18 @@ pub fn gkg_url(refs: &[events::DumpRef]) -> Option<&str> {
         .find(|u| u.ends_with(".gkg.csv.zip"))
 }
 
+/// The URL of one historical GKG 2.1 15-minute file (English stream),
+/// addressed directly by its window-start timestamp. GKG is static-file
+/// addressed (docs/GDELT_GEO_GKG.md "Historical addressability") — backfill
+/// is a file fetch, not a search.
+pub fn window_url(window_start: i64) -> String {
+    let dt = DateTime::from_timestamp(window_start, 0).unwrap_or_default();
+    format!(
+        "http://data.gdeltproject.org/gdeltv2/{}.gkg.csv.zip",
+        dt.format("%Y%m%d%H%M%S")
+    )
+}
+
 /// Normalize one GKG row into zero or more attention records.
 ///
 /// Returns one record per distinct (article, place) mention, `Ok(vec![])` for
@@ -387,6 +399,17 @@ mod tests {
         assert_eq!(
             gkg_url(&refs),
             Some("http://data.gdeltproject.org/gdeltv2/20260819041500.gkg.csv.zip")
+        );
+    }
+
+    #[test]
+    fn window_url_addresses_a_window_by_timestamp() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-08-19T04:15:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            window_url(ts),
+            "http://data.gdeltproject.org/gdeltv2/20260819041500.gkg.csv.zip"
         );
     }
 

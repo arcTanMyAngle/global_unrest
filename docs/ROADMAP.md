@@ -325,6 +325,13 @@ than leaving it ungeocoded (9.6% of records in a real sample).
 
 **No window-level pseudo-join ships** — there is no shared record key.
 
+A4 (the coverage ledger) is **done** (2026-09-02): migration
+`0005_coverage_ledger`, storage plumbing (`record_coverage`/
+`coverage_covered`), both fetch cycles record each DOC/Events/GKG window, and
+`backfill_windows` now drives a bounded, restartable GKG backfill pass in the
+worker (`LES_GKG_BACKFILL_START`/`LES_GKG_BACKFILL_MAX`, off by default).
+A3 remains open.
+
 ## M10: Reach
 
 - **Scheduler**: `SignalSource` is deliberately not dyn-safe, so a
@@ -362,6 +369,36 @@ than leaving it ungeocoded (9.6% of records in a real sample).
   instance-dependent. A relay/instance list is sampled coverage, not a
   firehose, and must be labelled as such wherever counts appear. Nostr is
   sybil- and spam-sensitive: verify signatures and reflect that in confidence.
+
+### M10 source expansion — implementation tasks
+
+Scoped in [adr/0001-ondemand-media-sources.md](adr/0001-ondemand-media-sources.md)
+(proposed). Ordered by value-to-risk; nothing here may widen the Media
+exception until the per-source terms review in that note is done.
+
+- [ ] **Telegram classified packs** (Media + ingest — no new network surface):
+  - [ ] TOML catalog schema (`id`, `handle`, `class`, `region`, `cadence`);
+        load-time rejection of entries missing `class` or `region`.
+  - [ ] `chatter` accumulator key gains a class lane so `Partisan`/
+        `Combatant`/`State` volume exits the neutral aggregate.
+  - [ ] Media leg reads the same catalog (read-only session); a non-neutral
+        channel's class is shown in the results list, not only on hover.
+  - [ ] Per-channel terms verified before each handle lands.
+- [ ] **`crates/source-feeds`** (ingest only — article links, not video):
+  - [ ] Generic RSS/Atom/JSON adapter with feed rows
+        (`url`, `shape`, `region`, `topic`, `class`, `cadence`), reusing
+        `chatter::PlaceMatcher` and `TOPICS`.
+  - [ ] Liveuamap regional feeds and Deep South Watch as the first config rows,
+        after machine-readable + terms verification; otherwise the `liveuamap`
+        Telegram channel (already allowlisted), not scraping.
+- [ ] **Nostr + fediverse** (experimental flag):
+  - [ ] Ingest: bounded id/URI dedup *before* counting; relay/instance list
+        labelled as sampled coverage; Nostr signatures verified.
+  - [ ] Media leg (later): same place-scoped, time-bounded, capped, transient
+        shape as the Bluesky leg — only after ingest-side confidence holds.
+
+No task above adds persistence, background collection, sender exposure, or
+watch-page stream extraction to the Media page.
 
 ### DrugsData: blocked, not dropped
 
@@ -427,24 +464,23 @@ tactical targeting are not.
 Captured from a live run; unassigned to a milestone, each independently
 scoped and pickable in any order.
 
-- **Country labels are missing or wrong in some areas.** The renderer's
-  country-label pass (`crates/renderer`) does not label every region
-  correctly. Investigate label coverage, collision, and placement for the
-  affected areas, and fix the label pass or the underlying shape/centroid
-  data rather than papering over it.
+- **Country labels are missing or wrong in some areas.** ✅ Done (2026-09-02):
+  the label pass now uses Natural Earth's hand-placed `LABEL_X`/`LABEL_Y`
+  anchors (falling back to the geometric centroid), which fixes labels that
+  sat in the ocean for multi-part countries, and each label is drawn at most
+  once per frame. (`crates/geo-utils` `iter_label_points`, `map_view.rs`.)
 - **Dashboard should be a side bar.** ✅ Done (2026-09-02): navigation is now
   a left sidebar with Map, Timeline, Daily Events, Media, Settings, and About
   each one click away. Settings and About are pages rather than modal
   windows, and Timeline is a full-page copy of the map's time-window strip
   (`apps/global-signal-desktop/src` `app.rs`, `panels.rs`,
   `timeline_strip.rs`).
-- **Media page reliability.** Media search has trouble fetching sources and
-  playing results in-app (fetch/load/playback failures). Harden the provider
-  legs and error handling (`crates/media-search`,
-  `apps/global-signal-desktop/src/media_page.rs`, `media.rs`) and the in-app
-  player (`video.rs`, the `video-embed` feature), and make failures visible
-  rather than silent. See the wry/WebView2 notes in
-  [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md).
+- **Media page reliability.** ✅ Done (2026-09-02): the provider legs already
+  ran concurrently under per-leg deadlines (M9 E); this pass made the
+  remaining failures visible rather than silent — an all-failed search no
+  longer reads "no video found", swallowed webview errors are logged, and
+  HLS (`.m3u8`) results render a visible "open in browser" note instead of a
+  dead `<video>`. (`media.rs`, `video.rs`.)
 - **On-map source popup.** ✅ Done (2026-09-02): clicking a point opens a small
   popup over the point listing that record's source and outlet domains,
   instead of the indirect side inspector; clicking empty map still selects

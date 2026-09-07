@@ -390,7 +390,8 @@ parents via `geo_utils::cell_parent` at display time). Carries:
 
 - `schema_version(version, applied_at)` — migration ledger. Migrations are
   applied by version from `crates/storage/migrations/`: `0001_init`,
-  `0002_scores`, `0003_daily_digest`, `0004_signal_families`.
+  `0002_scores`, `0003_daily_digest`, `0004_signal_families`,
+  `0005_coverage_ledger`.
 - `storage_meta(key, value)` — small durable flags owned by the store itself,
   currently `derived_rebuild_required`. A migration that invalidates derived
   rows sets it rather than rebuilding inline; `StorageHandle::open` performs
@@ -442,6 +443,13 @@ parents via `geo_utils::cell_parent` at display time). Carries:
   rather than one combined number that cannot say which signal went quiet).
 - `ingest_log` — one row per failed/refused record: source, reason, raw
   excerpt, timestamp. Normalization failures are never silently dropped.
+- `coverage_ledger` — one row per GDELT fetch *attempt* (`doc`, `events`,
+  `gkg`), keyed by `(provider, config_hash, adapter_version, window_start,
+  window_end, status)` with an ETag/filename/error `detail`. The `ok` rows are
+  what the GKG backfill driver subtracts from its full tiling to learn what
+  still needs fetching; `failed`/`truncated` rows are gaps, and a config or
+  adapter-version change starts a fresh ledger line (docs/GDELT_GEO_GKG.md).
+  Insertion is idempotent per key.
 
 ### Migration 0004 — signal families
 
@@ -473,6 +481,18 @@ because prose written from the old counts describes numbers that were never
 true. Four tests in `crates/storage/src/lib.rs` migrate a genuinely
 v3-shaped database and assert the classification, the rebuilt counts, the
 digest invalidation, and idempotence.
+
+### Migration 0005 — coverage ledger
+
+A plain `CREATE TABLE` (the `ingest_log` style of 0001, not the shadow-table
+style of 0004 — there is no table to migrate). It records which GDELT windows
+actually landed, because a scalar "backfilled" marker cannot express gaps,
+failed windows, truncation, or a query change. The key is
+`(provider, config_hash, adapter_version, window_start, window_end, status)`;
+GKG/Events windows are the immutable 15-minute files (filename = window, ETag
+= content hash), and DOC rows exist because of the measured 429/truncation
+behaviour (docs/GDELT_GEO_GKG.md). The GKG backfill driver reads the `ok`
+windows to decide what still needs fetching.
 
 ## Daily Events cache
 
