@@ -12,7 +12,7 @@ use core_types::{
 };
 use daily_digest::{DayDigest, DayKey, DigestFacts};
 use geo_utils::CountryIndex;
-use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer};
+use renderer::{BasemapLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerInput, MarkerLayer, TileId};
 use serde::{Deserialize, Serialize};
 use storage::{
     DigestDay, EpochWindow, EventPoint, ExportReport, IngestLogRow, IngestReport, RegionDetail,
@@ -23,6 +23,7 @@ use crate::digest::{DigestHandle, DigestMsg};
 use crate::ingest::{self, IngestHandle, IngestMsg, SourceStatus};
 use crate::map_view::{MapView, PinnedMarker};
 use crate::media::{MediaHandle, MediaMsg, MediaSession};
+use crate::tiles::TileMsg;
 use crate::video::VideoPlayer;
 
 /// Natural Earth 1:110m countries (public domain; attribution in README).
@@ -460,6 +461,15 @@ pub struct App {
     /// Owns the child webview for the whole session — built lazily on first
     /// play, then reused.
     pub media_player: VideoPlayer,
+
+    // --- Basemap imagery (crate::tiles) ---
+    // Session-only resident textures: the worker fetches and decodes, the UI
+    // thread only uploads (docs/BASEMAP.md §6). No disk, no storage.
+    tiles_rx: Option<mpsc::Receiver<TileMsg>>,
+    pub tiles_handle: crate::tiles::TilesHandle,
+    /// The wanted-tile set last sent to the worker, so a stable view sends
+    /// nothing and a pan sends a replacement exactly when the set changes.
+    tiles_last_requested: Vec<TileId>,
 }
 
 impl App {
@@ -535,6 +545,8 @@ impl App {
         let (digest_rx, digest_handle) = crate::digest::spawn(move || ctx.request_repaint());
         let ctx = cc.egui_ctx.clone();
         let (media_rx, media_handle) = crate::media::spawn(move || ctx.request_repaint());
+        let ctx = cc.egui_ctx.clone();
+        let (tiles_rx, tiles_handle) = crate::tiles::spawn(move || ctx.request_repaint());
         let phase = Phase::Loading("loading live data…".into());
 
         let mut app = Self {
@@ -619,6 +631,9 @@ impl App {
             media_window_hours: crate::media_page::WINDOWS[0].1,
             media: MediaSession::default(),
             media_player: VideoPlayer::new(),
+            tiles_rx: Some(tiles_rx),
+            tiles_handle,
+            tiles_last_requested: Vec::new(),
         };
 
         // Replay the saved off-switches before going online, so a disabled
@@ -1023,6 +1038,67 @@ impl App {
         // 4. Daily Events: worker results, then the page's storage replies.
         self.poll_digest();
         self.poll_media();
+    }
+
+    /// Drain the tile worker and upload any decoded tiles. The only texture
+    /// work on the UI thread; bounded to [`crate::tiles::UPLOADS_PER_FRAME`]
+    /// uploads so a burst of arrivals cannot spike a frame.
+    fn poll_tiles(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.tiles_rx else { return };
+        let mut uploaded = 0;
+        loop {
+            if uploaded >= crate::tiles::UPLOADS_PER_FRAME {
+                break;
+            }
+            match rx.try_recv() {
+                Ok(TileMsg { tile, image }) => match image {
+                    Ok(img) => {
+                        let handle = ctx.load_texture(
+                            format!("gibs-{}-{}-{}", tile.level, tile.col, tile.row),
+                            img,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.map.tile_cache.insert(tile, handle);
+                        uploaded += 1;
+                    }
+                    Err(problem) => {
+                        tracing::debug!(tile = ?tile, "tile fetch failed: {problem}");
+                    }
+                },
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.tiles_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Send the worker the tiles this frame's map still lacks. Runs *after*
+    /// the map has painted (so `TileLayer.visible` is fresh) and is a
+    /// replacement, not a queue: the worker drops anything not in it.
+    fn request_tiles(&mut self, ctx: &egui::Context) {
+        let active = self.filters.show_tiles
+            && self.online
+            && self.tiles_handle.available()
+            && self.page == Page::Map
+            && ctx.input(|i| i.focused);
+        let missing: Vec<TileId> = if active {
+            self.map
+                .tiles
+                .visible
+                .iter()
+                .map(|v| v.id)
+                .filter(|id| !self.map.tile_cache.contains(id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if missing == self.tiles_last_requested {
+            return;
+        }
+        self.tiles_last_requested = missing.clone();
+        self.tiles_handle.set_visible(missing);
     }
 
     /// Drain the media worker. Nothing here touches storage - a search's
@@ -1536,6 +1612,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_async();
+        self.poll_tiles(&ctx);
         self.advance_playback(&ctx);
 
         // `?` reopens the reading guide. Ignored while a text field has focus
@@ -1595,6 +1672,7 @@ impl eframe::App for App {
             self.dirty = false;
             self.fire_queries();
         }
+        self.request_tiles(&ctx);
         self.persist_settings();
     }
 }

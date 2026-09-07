@@ -281,15 +281,25 @@ impl App {
                              two never blend together. US coverage only.",
                         )
                         .changed();
-                    changed |= ui
-                        .checkbox(&mut self.filters.show_tiles, "terrain imagery")
-                        .on_hover_text(
-                            "NASA GIBS shaded-relief imagery under the data layers \
-                             (docs/BASEMAP.md). Imagery is orientation only — it is not \
-                             evidence about any record's location. Tile loading lands with \
-                             the tile worker; until then the vector basemap stays visible.",
+                    if self.tiles_handle.available() {
+                        changed |= ui
+                            .checkbox(&mut self.filters.show_tiles, "terrain imagery")
+                            .on_hover_text(
+                                "NASA GIBS shaded-relief imagery under the data layers \
+                                 (docs/BASEMAP.md). Turning this on downloads map imagery \
+                                 from NASA as you pan and zoom — the app sends the map \
+                                 area you are looking at and nothing else, and keeps it \
+                                 only in memory for the session. Imagery is orientation \
+                                 only — it is not evidence about any record's location.",
+                            )
+                            .changed();
+                    } else {
+                        ui.add_enabled(
+                            false,
+                            egui::Checkbox::new(&mut self.filters.show_tiles, "terrain imagery"),
                         )
-                        .changed();
+                        .on_hover_text(crate::tiles::unavailable_reason());
+                    }
 
                     section_header(ui, "Orientation");
                     changed |= ui

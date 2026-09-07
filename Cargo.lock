@@ -2600,6 +2600,7 @@ dependencies = [
  "geo-utils",
  "media-search",
  "renderer",
+ "reqwest",
  "serde",
  "serde_json",
  "source-acled",
@@ -2616,6 +2617,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wry",
+ "zune-jpeg",
 ]
 
 [[package]]

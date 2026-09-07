@@ -131,7 +131,7 @@ playback mechanism requires a new privacy and terms review.
 | Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Ingest aggregates before storage, keyed by channel class so classes are never summed together; a class describes a *channel's* provenance and never a person, and defaults to `unspecified` rather than claiming one. The explicit Media lookup uses the same allowlist and a read-only session, returning only temporary public video links, bounded labels, and channel attribution. |
 | Published video embeds | Use provider-published embeds or direct public media files only. Do not resolve a watch page into an underlying stream. |
 | Natural Earth | Public-domain basemap and gazetteer data, attributed in the application and README. |
-| OSM tiles | Not implemented. Any M8 tile layer needs a provider-policy, attribution, offline behavior, and user-control review before it lands. |
+| NASA GIBS tiles | Keyless static shaded-relief basemap imagery, used only behind the off-by-default terrain-imagery toggle. The app sends the tile coordinates for the map area in view and nothing else; Phase 2 keeps tiles in process memory only (no disk cache). Attribution is rendered per NASA's terms. Silenced by `LES_ONLINE=0` and by an unfocused window. |
 | Fixtures | Fully synthetic test/service-smoke data using reserved example domains. Never loaded by the desktop. |
 
 ## Known limits and biases
@@ -173,6 +173,9 @@ playback mechanism requires a new privacy and terms review.
   explicit regeneration.
 - Media lookup hits are session-memory data, replaced by the next search and
   discarded when the application exits.
+- Basemap tiles are fetched only while the terrain-imagery toggle is on and
+  the window is focused; Phase 2 keeps them in process memory only (no disk
+  cache), so quitting discards them.
 - Fixture data is a permanent deterministic regression harness, not runtime
   desktop data.
 

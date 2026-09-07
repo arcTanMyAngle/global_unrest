@@ -59,7 +59,7 @@ Other documents link here rather than restating the list.
 Feature-wiring changes also need no-default-features coverage:
 
 ~~~sh
-cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed,global-signal-desktop/tiles-live"
 ~~~
 
 `cargo check` and `cargo clippy` do not link. After a dependency or linking
@@ -231,11 +231,12 @@ authorized deployment only, LES_API_ALLOW_ACLED=1. Read
 ## Feature coverage
 
 CI tests each source feature by itself, the complete source union, and the
-desktop-only gemini-live, media-live, and video-embed features. When changing
-feature wiring, mirror the workflow's no-default-features posture:
+desktop-only gemini-live, media-live, video-embed, and tiles-live features.
+When changing feature wiring, mirror the workflow's no-default-features
+posture:
 
 ~~~sh
-cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed"
+cargo test -p global-signal-desktop -p workers --no-default-features --features "acled-live,noaa-live,ioda-live,bluesky-live,telegram-live,gkg-live,global-signal-desktop/gemini-live,global-signal-desktop/media-live,global-signal-desktop/video-embed,global-signal-desktop/tiles-live"
 ~~~
 
 The exact per-feature matrix and mock suites live in .github/workflows/ci.yml.

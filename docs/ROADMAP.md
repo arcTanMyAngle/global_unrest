@@ -21,7 +21,7 @@ README and [DEVELOPMENT.md](DEVELOPMENT.md) for current behavior and commands,
 | IODA, Bluesky, Telegram | Complete: country-precision outages and two aggregate-only chatter sources, pulled forward from M8. |
 | Daily Events | Complete: opt-in, locally cached, Google Gemini-written day digests with the safety boundary reviewed and enforced. |
 | Media research and playback | Complete: user-directed, transient public-video lookup with an honest browser fallback and a Windows published-embed player. |
-| M8 | Complete: source-attribution table, Settings and About UI, criterion benches in CI, an ingest-tick profiling pass, and chatter segmentation for unsegmented scripts. Partial: the slippy-tile basemap design pass is done and phased ([BASEMAP.md](BASEMAP.md)); implementation has not started. |
+| M8 | Complete: source-attribution table, Settings and About UI, criterion benches in CI, an ingest-tick profiling pass, and chatter segmentation for unsegmented scripts. The slippy-tile basemap has shipped Phase 1 (compositing, scrim, layer order) and Phase 2 (live GIBS fetch, session-only); Phase 3 (disk cache + Settings) and Phase 4 (Web-Mercator warp, on demand) remain — see [BASEMAP.md](BASEMAP.md). |
 
 The original approved M0–M5 plan and its acceptance criteria are preserved in
 version control; their substance is the table above plus the implementation
@@ -89,12 +89,15 @@ script-run substring matching rather than the keyword-list approach that
 cannot work in those scripts (see the correction in
 [ENGINEERING_NOTES.md](ENGINEERING_NOTES.md#correction-to-the-chatter-backlog-burmese-topic-tokens-will-not-work)).
 
-The fifth item, the slippy-tile basemap, is **design only**: the deferred
-policy questions are settled in [BASEMAP.md](BASEMAP.md) (equirectangular
-projection kept, NASA GIBS EPSG:4326 tiles composited over the existing vector
-basemap so a missing tile degrades to today's map, a bounded cache outside the
-DuckDB store, and a toggle off by default), and it ends with a phased,
-independently-shippable implementation plan. None of those phases has started.
+The fifth item, the slippy-tile basemap, has **shipped its first two phases**:
+the deferred policy questions are settled in [BASEMAP.md](BASEMAP.md)
+(equirectangular projection kept, NASA GIBS EPSG:4326 tiles composited over
+the existing vector basemap so a missing tile degrades to today's map, a
+bounded cache outside the DuckDB store, and a toggle off by default). Phase 1
+(compositing, scrim, layer order) and Phase 2 (live GIBS fetch, session-only,
+behind `tiles-live`) are done. Phase 3 (the disk cache and Settings surface)
+and Phase 4 (the Web-Mercator warp, only on demand) are the remaining,
+independently-shippable steps.
 
 Deliberately never scoped into M8, and still gated rather than started:
 optional moving-layer design work such as CelesTrak satellites, pending a

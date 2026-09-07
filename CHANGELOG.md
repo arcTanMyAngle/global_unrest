@@ -35,6 +35,15 @@ project with no published crate API to stabilize against.
   lookup — no new providers, no retention change — the chips narrow the topic
   field and the link is a browser escape hatch for when the bounded legs come
   back thin.
+- The optional **terrain imagery** basemap layer now actually fetches tiles
+  (M8 basemap Phase 2, behind `tiles-live`): a new `tiles` worker downloads
+  static NASA GIBS `BlueMarble_ShadedRelief_Bathymetry` EPSG:4326 tiles (the
+  `500m` matrix set) as the user pans, decodes the JPEG on the worker thread,
+  and hands `egui::ColorImage`s back for upload — bounded to 2 concurrent
+  fetches, 4 texture uploads per frame, and 96 resident textures. The toggle
+  stays off by default and is silenced by `LES_ONLINE=0` and by an unfocused
+  window; imagery adds no records and is orientation only. Phase 1
+  (compositing, scrim, layer order) shipped in the same cycle.
 
 ### Changed
 

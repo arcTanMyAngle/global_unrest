@@ -28,6 +28,7 @@ flowchart LR
         QUERY["place + topic + time window"]
         MEDIA["media-search worker"]
         PLAYER["media page + player"]
+        TILE["tile worker: GIBS imagery"]
     end
 
     Sources --> INGEST --> STORAGE
@@ -41,6 +42,10 @@ flowchart LR
     GDELT -. "on-demand video lookup" .-> MEDIA
     BSKY -. "on-demand public-post lookup" .-> MEDIA
     TG -. "configured allowlist only" .-> MEDIA
+    GIBS["NASA GIBS (keyless, off by default)"]
+    UI -. "visible tile list (replacement)" .-> TILE
+    TILE -. "decoded tiles" .-> UI
+    GIBS -.-> TILE
 ~~~
 
 The desktop enables all live-source feature paths by default. Keyless sources
@@ -75,6 +80,12 @@ switches to fixtures when a source is unavailable.
   cadence. It handles one explicit, place-scoped query at a time and returns
   transient hits to the UI. It never opens storage. Results remain in process
   memory until the next search replaces them or the app exits.
+- **Tile worker:** a separate current-thread Tokio task with no cadence. It
+  receives the wanted-tile list as a replacement (never a queue), fetches the
+  corresponding NASA GIBS EPSG:4326 tiles, and decodes the JPEG. It never
+  opens storage and never writes the disk — Phase 2 is session-only. The UI
+  thread's only work is uploading the returned images as textures, bounded per
+  frame, so no fetch, decode, or filesystem read happens on the UI thread.
 
 The ingest worker keeps cached data visible if a request fails. GDELT runs on
 its feed cadence; NOAA every 10 minutes; IODA and Telegram every 15 minutes;

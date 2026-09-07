@@ -340,6 +340,29 @@ worth knowing: `Drop for StorageHandle` sends `Cmd::Shutdown` and joins the
 actor thread, so after the handle is dropped the file can be reopened as a
 raw `Connection` to inspect what the migration actually left on disk.
 
+## GIBS slippy-tile basemap facts
+
+The tile worker (docs/BASEMAP.md Phase 2) was wired against the live NASA
+GIBS endpoint, and several things that looked right in prose were wrong in
+practice — each cost a 400 and a re-probe:
+
+- **The static layer is `BlueMarble_ShadedRelief_Bathymetry`, and it serves
+  only the `500m` matrix set.** `250m` returns `400` with
+  `TILEMATRIXSET is invalid for LAYER` (read the XML body of a GIBS 400 —
+  it names the offending parameter). The dated true-colour layers are the
+  ones on `250m`, which is exactly what the static-layer honesty rule rules
+  out, so the coarser `500m` tier is the price of an undated basemap.
+- **The matrix-set name in the URL is `500m`, not `EPSG4326_500m`.** The REST
+  form is `…/wmts/epsg4326/best/{Layer}/default/default/500m/{z}/{row}/{col}.jpg`
+  — note **row before column**, the one ordering mistake that draws the world
+  mirrored. A unit test pins the URL string.
+- **The EPSG:4326 matrix geometry is 512 px tiles, level 0 = 2×1 (180°
+  tiles), halving per level.** Level 0 is 0.3515625°/px — not the 0.5625°/px
+  that a draft of BASEMAP.md recorded — and the `500m` set tops out at level
+  7 (0.0027466°/px), verified by probing tile rows/cols until GIBS returned
+  400 for the level past the end. The renderer's `TileMatrixSet` is
+  parameterized by these three numbers and unit-tested against them.
+
 ## Profiling the store, and what the retention ceiling actually was
 
 The M8 profiling pass measured four candidate ceilings at 10x the current

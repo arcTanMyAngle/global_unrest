@@ -1,10 +1,12 @@
 # Slippy-tile basemap — design record
 
-**Status: design only. Nothing here is implemented.** This document settles the
-policy questions that have kept the tile basemap deferred since M3
-([ROADMAP.md](ROADMAP.md) M8, [VISUALIZATION.md](VISUALIZATION.md) V3 item 9).
-Implementation is phased at the end and is not authorized by this document
-existing.
+**Status: Phase 1 (compositing, no network) and Phase 2 (live fetch,
+session-only) are implemented; Phase 3 (disk cache + Settings) and Phase 4
+(Web-Mercator warp, on demand only) are not.** This document settles the
+policy questions that kept the tile basemap deferred since M3
+([ROADMAP.md](ROADMAP.md) M8, [VISUALIZATION.md](VISUALIZATION.md) V3 item 9),
+and phases the implementation at the end. The Phase 2 network leg was verified
+against the real GIBS endpoint before any code landed (see §2).
 
 Provider terms below were read on **2026-08-17** and are cited by URL. Terms
 change; re-read every cited policy before the first line of network code, and
@@ -134,16 +136,22 @@ Requirements this project imposes, in order:
   question. RESTful WMTS:
   `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/{Layer}/default/{Time}/{TileMatrixSet}/{z}/{y}/{x}.{ext}`.
 - **No key.** Nothing to ship, nothing to leak.
-- **Resolution ladder fits our zoom range.** The published EPSG:4326 tile
-  matrix sets top out at 0.5625°/px at level 0 and halve per level; the `250m`
-  set's finest level is 0.002197°/px, within ~10% of the app's
-  `MIN_DEG_PER_PX = 0.002`. The app therefore never zooms meaningfully past the
-  imagery, and never needs a level the provider does not publish.
+- **Resolution ladder fits our zoom range, at the `500m` tier.** The
+  EPSG:4326 matrix sets all share one geometry: 512 px tiles, level 0 = 2
+  columns × 1 row (180° tiles), halving per level — level 0 is 0.3515625°/px
+  and each level halves it. What differs per tier is the finest published
+  level. The static layer publishes only the `500m` set, whose finest level
+  (7) is 0.0027466°/px — coarser than `MIN_DEG_PER_PX = 0.002`, so at the
+  very deepest zoom the imagery goes soft rather than out-resolving the data;
+  the scrim and the vector borders keep the map honest there. These values
+  were read from live probes against the real endpoint, not assumed: `250m`
+  is **not** served for this layer (it returns 400).
   **Do not assume the tile pixel size or the level-0 matrix dimensions** — the
-  prose docs do not state them and the resolution table alone does not close
-  the arithmetic. Read `TileWidth`, `MatrixWidth`, `MatrixHeight`, and
-  `TopLeftCorner` out of GetCapabilities and write the tile-index math against
-  those values, with a test that a known lon/lat lands in the expected tile.
+  prose docs do not state them. Read `TileWidth`, `MatrixWidth`,
+  `MatrixHeight`, and `TopLeftCorner` out of GetCapabilities and write the
+  tile-index math against those values; the renderer's tile math is
+  parameterized and unit-tested so the fetch URL and the drawn layer cannot
+  drift apart.
 - **Attribution.** NASA requests, verbatim: *"We acknowledge the use of imagery
   provided by services from NASA's Global Imagery Browse Services (GIBS), part
   of NASA's Earth Science Data and Information System (ESDIS)."* That string
@@ -155,7 +163,9 @@ Requirements this project imposes, in order:
   events, invites the reading that the imagery *shows* the event. It does not.
   If a dated layer is ever offered, the imagery date must be rendered in the
   legend next to the toggle. Confirm the exact layer identifier and its
-  available tile matrix set in GetCapabilities before wiring it.
+  available tile matrix set in GetCapabilities before wiring it. Wired:
+  `BlueMarble_ShadedRelief_Bathymetry` in the `500m` matrix set (`250m` is not
+  served for this layer).
 
 ### Why OSM standard tiles are disqualified
 
@@ -330,8 +340,11 @@ same rule the storage `Reply<T>` pattern enforces for queries.
 `jpeg` enabled, or `zune-jpeg` directly. Both are pure Rust, which keeps the
 deliberate rustls/pure-Rust posture intact; `cargo deny check` and a licence
 read are part of phase 2, and the choice belongs in
-[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md) if it costs anything. `reqwest` is
-already a workspace dependency with `rustls-tls`; nothing new there.
+[ENGINEERING_NOTES.md](ENGINEERING_NOTES.md) if it costs anything. Chosen:
+`zune-jpeg` 0.5 (MIT OR Apache-2.0 OR Zlib), decoding straight to RGB for
+`egui::ColorImage::from_rgb`; it passed `cargo deny check` with no new
+advisories or bans. `reqwest` is already a workspace dependency with
+`rustls-tls`; nothing new there.
 
 **Feature gating:** `tiles-live` on the desktop, joining the existing
 desktop-only features in the CI feature matrix and the no-default-features
@@ -395,12 +408,13 @@ toggle wired to a small set of tiles loaded from a local directory. Proves the
 visual hierarchy, the vector-under-tiles degradation, and the frame budget with
 zero network code and zero new terms to honour. Tests: tile-index math against
 GetCapabilities values, visible-tile cap, cache non-rebuild on idle.
+✅ Shipped 2026-09-07.
 
 **Phase 2 — live fetch, session-only.** The `tiles` worker behind `tiles-live`,
 HTTP with the app `User-Agent`, JPEG decode, the resident-texture LRU and the
 per-frame upload cap. No disk cache yet: quitting forgets everything. Ships a
 working online basemap, and every failure path already degrades correctly
-because of phase 1.
+because of phase 1. ✅ Shipped 2026-09-07.
 
 **Phase 3 — disk cache and Settings.** The cache directory, the byte bound,
 LRU eviction with the low-water mark and visible-set exclusion, stale-while-

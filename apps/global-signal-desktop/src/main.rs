@@ -19,6 +19,7 @@ mod panels;
 mod settings_screen;
 mod sparkline;
 mod style;
+mod tiles;
 mod timeline_strip;
 mod video;
 

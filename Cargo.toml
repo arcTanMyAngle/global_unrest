@@ -115,6 +115,11 @@ url = "2"
 # GDELT Events dumps are single-entry DEFLATE zips; pure-Rust miniz_oxide
 # backend keeps CI OpenSSL/zlib-free. No aes/bzip2/lzma/zstd.
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# JPEG decode for the slippy-tile basemap (desktop, feature `tiles-live`).
+# Pure-Rust decoder (MIT OR Apache-2.0 OR Zlib) — keeps the deliberate
+# rustls/pure-Rust posture (docs/BASEMAP.md §6). Default RGB output feeds
+# egui's `ColorImage::from_rgb` directly.
+zune-jpeg = "0.5"
 # "net" gives the current-thread runtime its IO driver (reqwest needs it for
 # the live GDELT ingest loop); "rt" only, no multi-thread.
 tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net"] }

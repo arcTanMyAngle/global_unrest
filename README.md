@@ -14,8 +14,9 @@ separate; preserves provenance; and avoids person-level tracking.
 The current build includes the completed M1-M8 work and visualization batches
 V1-V3. The desktop ingests live GDELT, NOAA/NWS, IODA, Bluesky aggregate
 chatter, optional ACLED, and optional Telegram aggregate chatter, with a
-Settings screen for per-source state and an About screen for attribution. Only
-the slippy-tile basemap named in M8 is design-only so far; see
+Settings screen for per-source state and an About screen for attribution. The
+optional slippy-tile basemap (M8) has shipped its compositing and live
+session-only fetch phases and is off by default; see
 [docs/ROADMAP.md](docs/ROADMAP.md). Synthetic fixtures are never loaded by the
 desktop; they remain regression data and the fixtures-only service
 smoke-test path.
@@ -70,6 +71,7 @@ synthetic data.
 | Map and analysis | Available | Heat modes for attention, events, source diversity, and attention-vs-unrest divergence; a six-hour timeline with replay, now-follow, and typed UTC ranges. |
 | Evidence inspection | Available | Per-region score components, source links and video candidates, source-shaped markers, legend, top movers, sparklines, and a paged event ledger. |
 | NOAA alert layer | Available | A US NWS weather-alert overlay separated visually from unrest signals, with graticule, country labels, and an in-app reading guide. |
+| Terrain imagery | Optional, off by default | Static NASA GIBS shaded-relief tiles composited under the data layers. Orientation only — never a record layer. Downloads the map area you look at, session-only (no disk). |
 | GDELT | Live | Global news metadata and CAMEO event records, plus opt-in GKG story-location attention (`gkg-live`). Coverage is not confirmation. |
 | ACLED | Live with authorized credentials | Curated conflict and civic-event records. Account access and available dates vary by tier. |
 | NOAA/NWS | Live | Active US and territory alerts with usable polygon geometry. |
@@ -246,9 +248,10 @@ no-default-features coverage — is in
 
 CI runs the workspace gates on Windows and Linux; source-feature checks for
 ACLED, NOAA, IODA, Bluesky, Telegram, and the desktop-only gemini-live,
-media-live, and video-embed features; the full feature union; Daily Events and
-media-search mock suites; Docker Compose smoke coverage; and cargo-deny.
-Tag-driven releases build desktop binaries and publish worker/API images.
+media-live, video-embed, and tiles-live features; the full feature union;
+Daily Events and media-search mock suites; Docker Compose smoke coverage; and
+cargo-deny. Tag-driven releases build desktop binaries and publish worker/API
+images.
 
 ## Documentation
 
@@ -272,12 +275,13 @@ Tag-driven releases build desktop binaries and publish worker/API images.
 Completed: M1-M8, visualization V1-V3, and the IODA, Bluesky, Telegram,
 Daily Events, and on-demand media-research layers. M8 added source
 attribution, the Settings and About screens, CI benches, an ingest-tick
-profiling pass, and chatter segmentation for unsegmented scripts.
+profiling pass, and chatter segmentation for unsegmented scripts, and shipped
+the first two slippy-tile basemap phases (compositing, and live session-only
+GIBS fetch).
 
-Next: implementing the slippy-tile basemap from its M8 design pass
-([docs/BASEMAP.md](docs/BASEMAP.md)), and safety-gated M9 voluntary
-on-scene publishing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the current
-plan.
+Next: the basemap's disk-cache and Settings phase (Phase 3 in
+[docs/BASEMAP.md](docs/BASEMAP.md)) and safety-gated M9 voluntary on-scene
+publishing. See [docs/ROADMAP.md](docs/ROADMAP.md) for the current plan.
 
 ## Safety, data, and attribution
 

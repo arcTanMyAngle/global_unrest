@@ -8,9 +8,11 @@ use egui::{Align2, Color32, FontId, Galley, Pos2, Rect, Sense, Shape, Stroke, Ui
 use geo_utils::{CountryIndex, MapViewport};
 use renderer::{
     AlertLayer, BasemapLayer, GraticuleLayer, HaloLayer, HeatmapLayer, MapStyle, MarkerLayer,
-    TileId, TileLayer, TileMatrixSet,
+    TileLayer,
 };
 use storage::EventPoint;
+
+use crate::tiles::{TILESET, TileCache};
 
 /// Point size of a country label. Small and low-contrast on purpose: labels
 /// are orientation, never a data layer.
@@ -102,16 +104,15 @@ pub struct MapView {
     /// Rows behind the marker layer, indexed by `MarkerInput::source_index`.
     pub marker_rows: Vec<EventPoint>,
     pub style: MapStyle,
-    /// Optional EPSG:4326 imagery layer (docs/BASEMAP.md). Phase 1 wires the
+    /// Optional EPSG:4326 imagery layer (docs/BASEMAP.md). Phase 1 wired the
     /// compositing, scrim, and layer order with an empty texture set; Phase 2
-    /// fills `tile_textures` from the tile worker.
+    /// fills the resident cache from the tile worker. A tile with no texture
+    /// simply is not drawn, so the vector basemap shows through.
     pub tiles: TileLayer,
-    /// Texture id per loaded tile, keyed by [`TileId`]. Empty until Phase 2;
-    /// a missing entry draws nothing, so the vector basemap shows through.
-    pub tile_textures: std::collections::HashMap<TileId, egui::TextureId>,
-    /// Bumped whenever `tile_textures` changes, so the tile mesh cache
-    /// rebuilds exactly once per arrival rather than never or every frame.
-    pub tile_generation: u64,
+    /// Resident decoded tile textures, LRU-bounded by the app (docs/BASEMAP.md
+    /// §4). `TileLayer::paint` reads the ids and generation each frame; the
+    /// app inserts arrivals and clears it when the layer is switched off.
+    pub tile_cache: TileCache,
     flight: Option<Flight>,
     /// Country labels, laid out **once** and blitted thereafter. Text layout
     /// is the expensive part and none of it depends on the viewport, so doing
@@ -169,9 +170,8 @@ impl MapView {
             spike_halos: HaloLayer::new(Vec::new()),
             marker_rows: Vec::new(),
             style,
-            tiles: TileLayer::new(TileMatrixSet::new(512, 2, 1, 8)),
-            tile_textures: std::collections::HashMap::new(),
-            tile_generation: 0,
+            tiles: TileLayer::new(TILESET),
+            tile_cache: TileCache::new(),
             flight: None,
             labels: Vec::new(),
         }
@@ -317,8 +317,8 @@ impl MapView {
                 &aff,
                 rect.width(),
                 rect.height(),
-                &self.tile_textures,
-                self.tile_generation,
+                self.tile_cache.ids(),
+                self.tile_cache.generation,
             );
             if drawn > 0 {
                 painter.rect_filled(rect, 0.0, self.style.tile_scrim);
