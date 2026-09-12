@@ -350,14 +350,20 @@ A3 remains open.
   WebSocket/TLS handshake. Telegram is proxyable only with the grammers
   `proxy` feature enabled. An unreachable proxy errors the source and says so —
   never a silent direct fallback. Redact proxy credentials from status and logs.
-- **Telegram classified packs**: a structured TOML catalog, not a handle list,
-  because a handle list cannot carry mandatory class and region. Entries
-  without explicit provenance are rejected, not defaulted. Resistance/militia,
-  junta/pro-military, Thai deep south, and narco/crime packs are in scope —
-  their `Partisan`/`Combatant`/`State` volume goes to its own claims lane via
-  the accumulator key, out of the neutral aggregate. Configured `region` is
-  channel provenance, never the geolocation of a post. The same runtime catalog
-  feeds both ingest and Telegram media search.
+- **Telegram classified packs** ✅ (2026-09-09, runtime + schema): a
+  structured TOML catalog (`crates/source-telegram/src/catalog.rs`), not a
+  handle list, because a handle list cannot carry mandatory class and region.
+  Entries without explicit provenance are rejected at load, not defaulted —
+  including `class = "unspecified"`, which asserts nothing. The same catalog
+  feeds both ingest and Telegram media search
+  (`LES_TELEGRAM_CHANNEL_CATALOG` replaces the compiled-in neutral allowlist
+  for both legs); a non-neutral channel's volume rolls up in its own claims
+  lane via the accumulator key, and its Media hits carry the class in the
+  visible attribution. Configured `region` is channel provenance, never the
+  geolocation of a post (pinned by test). Resistance/militia,
+  junta/pro-military, Thai deep south, and narco/crime pack *contents* are
+  the remaining sub-item — each handle's terms and live status are verified
+  before it lands, the same bar the neutral allowlist was built to.
 - **`crates/source-feeds`**: one generic RSS/Atom/JSON adapter with the feed
   list as configuration (url, shape, region, topic, class, cadence), reusing
   `chatter::PlaceMatcher` and `TOPICS`. Liveuamap regional feeds and Deep South
@@ -379,14 +385,16 @@ Scoped in [adr/0001-ondemand-media-sources.md](adr/0001-ondemand-media-sources.m
 (proposed). Ordered by value-to-risk; nothing here may widen the Media
 exception until the per-source terms review in that note is done.
 
-- [ ] **Telegram classified packs** (Media + ingest — no new network surface):
-  - [ ] TOML catalog schema (`id`, `handle`, `class`, `region`, `cadence`);
+- [x] **Telegram classified packs** (Media + ingest — no new network surface):
+  - [x] TOML catalog schema (`id`, `handle`, `class`, `region`, `cadence`);
         load-time rejection of entries missing `class` or `region`.
-  - [ ] `chatter` accumulator key gains a class lane so `Partisan`/
-        `Combatant`/`State` volume exits the neutral aggregate.
-  - [ ] Media leg reads the same catalog (read-only session); a non-neutral
+  - [x] `chatter` accumulator key gains a class lane so `Partisan`/
+        `Combatant`/`State` volume exits the neutral aggregate. *(Already
+        landed in M9 A1; the catalog now drives it.)*
+  - [x] Media leg reads the same catalog (read-only session); a non-neutral
         channel's class is shown in the results list, not only on hover.
-  - [ ] Per-channel terms verified before each handle lands.
+  - [ ] Per-channel terms verified before each handle lands. *(Pack contents
+        still open — no non-neutral handles are configured yet.)*
 - [ ] **`crates/source-feeds`** (ingest only — article links, not video):
   - [ ] Generic RSS/Atom/JSON adapter with feed rows
         (`url`, `shape`, `region`, `topic`, `class`, `cadence`), reusing

@@ -155,6 +155,15 @@ read [ROADMAP.md](ROADMAP.md); for what changed read
   than guessing SPDX ids — `BSL-1.0`, `OFL-1.1`, `Ubuntu-font-1.0` and
   `CDLA-Permissive-2.0` have all been missed by guessing. `[graph] targets`
   must list all three shipped OSes or Linux-only advisories stay hidden.
+- **Bluesky's keyless `searchPosts` is closed (2026-09-07).** Both public
+  hosts (`api.bsky.app` and `public.api.bsky.app`) answer
+  `app.bsky.feed.searchPosts` with an HTML `403 — Request forbidden by
+  administrative rules` from `openresty`, while `getProfile` on the same
+  hosts still returns `200` — a method-level policy rule, not an IP ban and
+  not a User-Agent issue (a browser UA is also `403`). The media-search
+  Bluesky leg is therefore unavailable keylessly until Bluesky reopens it or
+  the app grows a login; `crate::live` names the closure instead of printing
+  the gateway HTML.
 
 ### GDELT: what the A2 spike cost, so it is not re-paid
 
@@ -346,22 +355,29 @@ The tile worker (docs/BASEMAP.md Phase 2) was wired against the live NASA
 GIBS endpoint, and several things that looked right in prose were wrong in
 practice — each cost a 400 and a re-probe:
 
-- **The static layer is `BlueMarble_ShadedRelief_Bathymetry`, and it serves
-  only the `500m` matrix set.** `250m` returns `400` with
-  `TILEMATRIXSET is invalid for LAYER` (read the XML body of a GIBS 400 —
-  it names the offending parameter). The dated true-colour layers are the
-  ones on `250m`, which is exactly what the static-layer honesty rule rules
-  out, so the coarser `500m` tier is the price of an undated basemap.
-- **The matrix-set name in the URL is `500m`, not `EPSG4326_500m`.** The REST
-  form is `…/wmts/epsg4326/best/{Layer}/default/default/500m/{z}/{row}/{col}.jpg`
+- **Layer/matrix-set support is per-layer and surprising.** The BlueMarble
+  basemaps serve only `500m`; `250m` returns `400` with `TILEMATRIXSET is
+  invalid for LAYER` (read the XML body of a GIBS 400 — it names the
+  offending parameter). The finest **static, undated** shaded relief is
+  `ASTER_GDEM_Color_Shaded_Relief` at `31.25m` (max level 11, `image/jpeg`
+  only) — the GDEM layers reject every other matrix set and reject `png`.
+  `250m` is reserved for dated true-colour layers, which the honesty rule
+  rules out, so `31.25m` is the best detail an undated basemap can have.
+- **The matrix-set name in the URL is `31.25m`, not `EPSG4326_31_25m` or any
+  other spelling.** The REST form is
+  `…/wmts/epsg4326/best/{Layer}/default/default/31.25m/{z}/{row}/{col}.jpg`
   — note **row before column**, the one ordering mistake that draws the world
   mirrored. A unit test pins the URL string.
 - **The EPSG:4326 matrix geometry is 512 px tiles, level 0 = 2×1 (180°
   tiles), halving per level.** Level 0 is 0.3515625°/px — not the 0.5625°/px
-  that a draft of BASEMAP.md recorded — and the `500m` set tops out at level
-  7 (0.0027466°/px), verified by probing tile rows/cols until GIBS returned
-  400 for the level past the end. The renderer's `TileMatrixSet` is
-  parameterized by these three numbers and unit-tested against them.
+  that a draft of BASEMAP.md recorded — and `31.25m` tops out at level 11,
+  verified by probing tile rows/cols until GIBS returned 400 for the level
+  past the end. The renderer's `TileMatrixSet` is parameterized by these
+  numbers and unit-tested against them. Getting the answer straight means
+  fetching the GetCapabilities XML (it is gzip; decompress it) and reading
+  each layer's `<TileMatrixSet>` and `<Format>` — guessing layer identifiers
+  from memory is how the earlier `BlueMarble_ShadedRelief_Bathymetry` on
+  `500m` was reached, and that guess was half-wrong.
 
 ## Profiling the store, and what the retention ceiling actually was
 

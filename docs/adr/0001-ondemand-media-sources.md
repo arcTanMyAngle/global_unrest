@@ -1,6 +1,9 @@
 # ADR-0001: On-demand media source expansion
 
-**Status:** Proposed — needs a privacy/terms review before any code.
+**Status:** Accepted. Item 1 (Telegram classified packs) is implemented as of
+2026-09-09 — runtime and schema only; pack *contents* (non-neutral handles)
+still require the per-channel terms verification below before landing. Items
+2–4 remain scoped, not built.
 **Scope:** the Media page's on-demand lookup (CLAUDE.md product rule 7,
 docs/SAFETY_AND_PRIVACY.md "On-demand media lookup").
 
@@ -61,10 +64,19 @@ page are the ones whose items are posts or video links directly.
 
 ## Candidate sources and disposition
 
-### 1. Telegram classified packs — ACCEPT (both ingest and Media)
+### 1. Telegram classified packs — ACCEPT (both ingest and Media) — IMPLEMENTED 2026-09-09
 
 The strongest on-the-ground video source already in the exception. Expanding
 it is the highest-value, lowest-risk change.
+
+Implemented shape: `crates/source-telegram/src/catalog.rs` parses and
+validates the TOML catalog (`id`, `handle`, `class`, `region`,
+`cadence_secs`), rejecting a missing/blank class or region, an
+`unspecified` class, a malformed handle, a zero cadence, or a duplicated
+id/handle — the whole file fails, never a partial load.
+`LES_TELEGRAM_CHANNEL_CATALOG` replaces the compiled-in neutral allowlist
+for both legs; the media leg carries the class into the visible `MediaHit`
+attribution when it differs from neutral.
 
 - A structured TOML catalog, not a handle list: each entry carries mandatory
   `class` (`resistance/militia`, `junta/pro-military`, `thai-deep-south`,

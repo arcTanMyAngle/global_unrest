@@ -65,6 +65,15 @@ impl TelegramSource {
     /// login in `examples/login_setup.rs`, never for polling an
     /// already-authorized session.
     ///
+    /// `LES_TELEGRAM_CHANNEL_CATALOG`, when set, points at the M10 classified
+    /// channel catalog (see [`crate::catalog`]) and **replaces** the
+    /// compiled-in neutral allowlist for both legs of this source: ingest
+    /// sweeps exactly the file's channels under their asserted classes, and
+    /// the media leg searches the same list with class-labelled attribution.
+    /// A catalog that fails validation is a hard error here — starting on the
+    /// built-in list instead would silently sweep a different set than the
+    /// operator configured.
+    ///
     /// This does not touch the network or open the session file yet — that
     /// happens lazily on the first [`SignalSource::fetch`], inside an async
     /// context (opening a grammers session is itself async). If the session
@@ -84,11 +93,24 @@ impl TelegramSource {
             .trim()
             .parse::<i32>()
             .map_err(|e| SourceError::Other(format!("TELEGRAM_API_ID must be an integer: {e}")))?;
+        let ingest = match std::env::var("LES_TELEGRAM_CHANNEL_CATALOG") {
+            Ok(path) if !path.trim().is_empty() => {
+                let entries = crate::catalog::load(std::path::Path::new(path.trim()))
+                    .map_err(SourceError::Other)?;
+                tracing::info!(
+                    channels = entries.len(),
+                    path = path.trim(),
+                    "telegram channel catalog loaded; replacing the built-in allowlist"
+                );
+                ChannelOrchestrator::from_catalog(chatter::DEFAULT_WINDOW_SECS, &entries)?
+            }
+            _ => ChannelOrchestrator::from_bundled(chatter::DEFAULT_WINDOW_SECS)?,
+        };
         Ok(Some(Self {
             api_id,
             session_path,
             conn: OnceCell::new(),
-            ingest: ChannelOrchestrator::from_bundled(chatter::DEFAULT_WINDOW_SECS)?,
+            ingest,
             read_only: false,
         }))
     }

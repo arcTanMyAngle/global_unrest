@@ -136,18 +136,18 @@ Requirements this project imposes, in order:
   question. RESTful WMTS:
   `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/{Layer}/default/{Time}/{TileMatrixSet}/{z}/{y}/{x}.{ext}`.
 - **No key.** Nothing to ship, nothing to leak.
-- **Resolution ladder fits our zoom range, at the `500m` tier.** The
+- **Resolution ladder fits our zoom range, at the `31.25m` tier.** The
   EPSG:4326 matrix sets all share one geometry: 512 px tiles, level 0 = 2
   columns × 1 row (180° tiles), halving per level — level 0 is 0.3515625°/px
   and each level halves it. What differs per tier is the finest published
-  level. The static layer publishes only the `500m` set, whose finest level
-  (7) is 0.0027466°/px — coarser than `MIN_DEG_PER_PX = 0.002`, so at the
-  very deepest zoom the imagery goes soft rather than out-resolving the data;
-  the scrim and the vector borders keep the map honest there. These values
-  were read from live probes against the real endpoint, not assumed: `250m`
-  is **not** served for this layer (it returns 400).
-  **Do not assume the tile pixel size or the level-0 matrix dimensions** — the
-  prose docs do not state them. Read `TileWidth`, `MatrixWidth`,
+  level. The chosen static layer publishes the `31.25m` set (max level 11),
+  whose level 8 (0.00137°/px) sits *under* the app's `MIN_DEG_PER_PX = 0.002`
+  zoom floor — so the imagery always out-resolves the screen, and a 2×
+  oversampling level choice (§6) keeps it crisp at the deepest zoom. These
+  values were read from live probes against the real endpoint, not assumed:
+  the layer's supported matrix sets and formats come from GetCapabilities
+  (`31.25m` + `image/jpeg` here). **Do not assume the tile pixel size or the
+  level-0 matrix dimensions** — read `TileWidth`, `MatrixWidth`,
   `MatrixHeight`, and `TopLeftCorner` out of GetCapabilities and write the
   tile-index math against those values; the renderer's tile math is
   parameterized and unit-tested so the fetch URL and the drawn layer cannot
@@ -158,14 +158,16 @@ Requirements this project imposes, in order:
   goes in the About screen; the map surface carries the short form
   ("Imagery: NASA GIBS").
 - **Layer choice is an honesty decision, not an aesthetic one.** Use a
-  **static** layer — shaded relief with bathymetry — not a dated true-colour
-  layer. A true-colour mosaic stamped with today's date, sitting under today's
-  events, invites the reading that the imagery *shows* the event. It does not.
-  If a dated layer is ever offered, the imagery date must be rendered in the
-  legend next to the toggle. Confirm the exact layer identifier and its
-  available tile matrix set in GetCapabilities before wiring it. Wired:
-  `BlueMarble_ShadedRelief_Bathymetry` in the `500m` matrix set (`250m` is not
-  served for this layer).
+  **static** layer — shaded relief, not a dated true-colour layer. A
+  true-colour mosaic stamped with today's date, sitting under today's events,
+  invites the reading that the imagery *shows* the event. It does not. If a
+  dated layer is ever offered, the imagery date must be rendered in the legend
+  next to the toggle. Confirm the exact layer identifier and its available
+  tile matrix set in GetCapabilities before wiring it. Wired:
+  `ASTER_GDEM_Color_Shaded_Relief` in the `31.25m` matrix set — the finest
+  static, undated shaded relief GIBS serves (the BlueMarble basemaps cap at
+  `500m`). It renders land as colorized shaded relief and the ocean as a flat
+  muted blue, so bathymetry is traded for detail.
 
 ### Why OSM standard tiles are disqualified
 
@@ -313,9 +315,11 @@ opposed to a network one). The whole set is cached in a `MeshCache` keyed by
 identical to `HeatmapLayer` and `BasemapLayer`.
 
 **Level selection:** from `aff`, take the viewport's `deg_per_px` and choose
-the finest published level whose resolution is no finer than the viewport's,
-so we never upload more pixels than the screen can show. Zoom is clamped by
-`MIN_DEG_PER_PX`, so the level is always inside the provider's ladder.
+the finest published level whose resolution is no finer than **twice** the
+viewport's — up to 2× oversampling. That one extra level is what keeps the
+imagery crisp at the fixed zoom cap (which does not move), while still
+bounding uploads to a constant multiple of the screen's pixel count; the
+visible-tile cap below is the other bound.
 
 **World copies:** reuse `visible_world_offsets` exactly as the other layers
 do. A tile column index wraps modulo the level's matrix width, so the wrapped

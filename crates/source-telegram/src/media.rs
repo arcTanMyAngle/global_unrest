@@ -30,6 +30,7 @@
 //! MTProto sweep is in `live.rs`.
 
 use chrono::{DateTime, Utc};
+use core_types::ChannelClass;
 use media_search::{MediaHit, Provider, search_terms, short_title};
 
 /// One message Telegram's server-side video search returned, reduced to the
@@ -98,7 +99,7 @@ pub fn query_text(place: &str, topic: &str) -> Option<String> {
 ///
 /// Both guards matter: a non-positive id and a channel name carrying `/`,
 /// `@`, or whitespace would each produce a URL that points somewhere other
-/// than the intended post. [`crate::ALLOWED_CHANNELS`] already holds to the
+/// than the intended post. [`crate::allowed_channels`] already holds to the
 /// name rule (a test pins it), so this is the belt to that braces.
 pub fn post_url(channel: &str, message_id: i32) -> Option<String> {
     if message_id <= 0 {
@@ -136,19 +137,37 @@ pub fn is_video_attachment(mime_type: Option<&str>, file_name: Option<&str>) -> 
 /// `caption` is the message's own text, trimmed to a single display line by
 /// [`media_search::short_title`] — a label for the link, never a reproduction
 /// of the post. A caption-less clip still gets a readable row.
-pub fn hit(channel: &str, message_id: i32, caption: &str, date: DateTime<Utc>) -> Option<MediaHit> {
+///
+/// `class` is the *channel's* provenance from the catalog. When it differs
+/// from the neutral floor it is part of the visible attribution — a
+/// partisan, combatant, or state channel's footage must never read as a
+/// neutral source in the results list (ADR-0001). Neutral-lane classes add
+/// nothing, because `Monitor`/`Outlet` is what the attribution already
+/// implies.
+pub fn hit(
+    channel: &str,
+    class: ChannelClass,
+    message_id: i32,
+    caption: &str,
+    date: DateTime<Utc>,
+) -> Option<MediaHit> {
     let url = post_url(channel, message_id)?;
     let title = if caption.trim().is_empty() {
         format!("video posted by @{channel}")
     } else {
         short_title(caption)
     };
+    let origin = if class.is_neutral_lane() {
+        format!("@{channel}")
+    } else {
+        format!("@{channel} · {}", class.label())
+    };
     Some(MediaHit {
         url,
         title,
         provider: Provider::Telegram,
         ts_utc: date,
-        origin: format!("@{channel}"),
+        origin,
     })
 }
 
@@ -159,14 +178,14 @@ pub fn hit(channel: &str, message_id: i32, caption: &str, date: DateTime<Utc>) -
 /// the answer: it counts some non-playable documents as video, and a result
 /// with no document at all is not something a reader can watch. Both are
 /// dropped here rather than promised in a row.
-pub fn playable_hits(channel: &str, videos: &[ChannelVideo]) -> Vec<MediaHit> {
+pub fn playable_hits(channel: &str, class: ChannelClass, videos: &[ChannelVideo]) -> Vec<MediaHit> {
     videos
         .iter()
         .filter(|video| {
             video.has_document
                 && is_video_attachment(video.mime_type.as_deref(), video.file_name.as_deref())
         })
-        .filter_map(|video| hit(channel, video.id, &video.caption, video.date))
+        .filter_map(|video| hit(channel, class, video.id, &video.caption, video.date))
         .collect()
 }
 
@@ -175,7 +194,6 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::ALLOWED_CHANNELS;
 
     const MESSAGE_ID: i32 = 12345;
 
@@ -200,7 +218,14 @@ mod tests {
     /// plays it, so nothing has to resolve the underlying file.
     #[test]
     fn the_hit_url_is_the_post_page_that_embed_for_can_play() {
-        let hit = hit("liveuamap", MESSAGE_ID, "flooding in Bogota", ts()).unwrap();
+        let hit = hit(
+            "liveuamap",
+            ChannelClass::Monitor,
+            MESSAGE_ID,
+            "flooding in Bogota",
+            ts(),
+        )
+        .unwrap();
         assert_eq!(hit.url, "https://t.me/liveuamap/12345");
         assert!(core_types::embed_for(&hit.url).is_some());
         assert_eq!(hit.origin, "@liveuamap");
@@ -211,8 +236,41 @@ mod tests {
 
     #[test]
     fn a_caption_less_clip_still_gets_a_readable_label() {
-        let hit = hit("DVBTV", MESSAGE_ID, " \n\t ", ts()).unwrap();
+        let hit = hit("DVBTV", ChannelClass::Outlet, MESSAGE_ID, " \n\t ", ts()).unwrap();
         assert_eq!(hit.title, "video posted by @DVBTV");
+    }
+
+    /// A non-neutral channel's provenance is part of the visible attribution,
+    /// not buried in a tooltip (ADR-0001); a neutral channel's adds nothing.
+    #[test]
+    fn a_non_neutral_class_is_shown_in_the_attribution() {
+        let partisan = hit(
+            "somechannel",
+            ChannelClass::Partisan,
+            MESSAGE_ID,
+            "clip",
+            ts(),
+        )
+        .unwrap();
+        assert_eq!(partisan.origin, "@somechannel · Partisan");
+        let combatant = hit(
+            "somechannel",
+            ChannelClass::Combatant,
+            MESSAGE_ID,
+            "clip",
+            ts(),
+        )
+        .unwrap();
+        assert_eq!(combatant.origin, "@somechannel · Combatant");
+        let monitor = hit(
+            "somechannel",
+            ChannelClass::Monitor,
+            MESSAGE_ID,
+            "clip",
+            ts(),
+        )
+        .unwrap();
+        assert_eq!(monitor.origin, "@somechannel");
     }
 
     #[test]
@@ -230,10 +288,10 @@ mod tests {
     /// otherwise a search would silently skip it.
     #[test]
     fn every_allowlisted_channel_produces_a_playable_post_url() {
-        for channel in ALLOWED_CHANNELS {
+        for channel in crate::allowed_channels() {
             let name = channel.name;
-            let url =
-                post_url(name, MESSAGE_ID).unwrap_or_else(|| panic!("{name} produced no post URL"));
+            let url = post_url(&name, MESSAGE_ID)
+                .unwrap_or_else(|| panic!("{name} produced no post URL"));
             assert!(
                 core_types::embed_for(&url).is_some(),
                 "{name} produced an unplayable URL: {url}"
@@ -256,6 +314,7 @@ mod tests {
     fn the_server_filters_false_positives_never_become_hits() {
         let hits = playable_hits(
             "liveuamap",
+            ChannelClass::Monitor,
             &[
                 video(1, Some("video/mp4"), true),
                 video(2, Some("application/pdf"), true),

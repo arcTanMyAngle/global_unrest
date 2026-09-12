@@ -10,6 +10,18 @@ project with no published crate API to stabilize against.
 
 ### Added
 
+- **Telegram classified channel catalog** (M10, ADR-0001 item 1): setting
+  `LES_TELEGRAM_CHANNEL_CATALOG` to a TOML file replaces the compiled-in
+  neutral allowlist for both Telegram ingest and the Media page lookup.
+  Each `[[channel]]` row must declare `id`, `handle`, `class`
+  (`monitor`/`outlet`/`partisan`/`combatant`/`state`), `region` (the
+  channel's beat as provenance — never a post's geolocation), and
+  `cadence_secs`; a file with a missing or blank class/region, an
+  `unspecified` class, a malformed handle, or a duplicate id/handle fails to
+  load rather than silently defaulting provenance. Volume from partisan,
+  combatant, and state channels rolls up into its own claims lane, out of
+  the neutral chatter aggregate, and their Media results carry the class in
+  the attribution line (for example `@somechannel · Partisan`).
 - GDELT GKG 2.1 story-location attention (M9.1), behind the opt-in `gkg-live`
   feature on both `global-signal-desktop` and `workers` (off by default: ~470
   MB/day of download when on). `source-gdelt::gkg` parses
@@ -37,13 +49,18 @@ project with no published crate API to stabilize against.
   back thin.
 - The optional **terrain imagery** basemap layer now actually fetches tiles
   (M8 basemap Phase 2, behind `tiles-live`): a new `tiles` worker downloads
-  static NASA GIBS `BlueMarble_ShadedRelief_Bathymetry` EPSG:4326 tiles (the
-  `500m` matrix set) as the user pans, decodes the JPEG on the worker thread,
-  and hands `egui::ColorImage`s back for upload — bounded to 2 concurrent
-  fetches, 4 texture uploads per frame, and 96 resident textures. The toggle
-  stays off by default and is silenced by `LES_ONLINE=0` and by an unfocused
-  window; imagery adds no records and is orientation only. Phase 1
-  (compositing, scrim, layer order) shipped in the same cycle.
+  static NASA GIBS `ASTER_GDEM_Color_Shaded_Relief` EPSG:4326 tiles (the
+  `31.25m` matrix set, the finest static undated shaded relief GIBS serves)
+  as the user pans, decodes the JPEG on the worker thread, and hands
+  `egui::ColorImage`s back for upload — bounded to 2 concurrent fetches, 4
+  texture uploads per frame, and 96 resident textures. The level choice
+  allows up to 2× oversampling so the imagery stays crisp at the fixed zoom
+  cap. A 429 from GIBS backs the worker off (doubling, capped at 60 s, or the
+  provider's `Retry-After`), and a failing tile is retried on a 10 s delay
+  rather than in a tight loop. The toggle stays off by default and is
+  silenced by `LES_ONLINE=0` and by an unfocused window; imagery adds no
+  records and is orientation only. Phase 1 (compositing, scrim, layer order)
+  shipped in the same cycle.
 
 ### Changed
 
@@ -56,6 +73,15 @@ project with no published crate API to stabilize against.
   that record's source and outlet domains (the marker query now carries
   `outlet_domains`), instead of routing through the side inspector. Clicking
   empty map still selects the cell.
+- Daily Events now reads like a newspaper. The Gemini brief asks for a
+  long-form overnight-wire column (12-18 sentences per section, named
+  specifics carried through instead of a summary), with the token budget
+  raised to match (`MAX_TOKENS` 4 096 → 12 288, thinking `low` → `medium`).
+  The page itself is re-set as a print edition — nameplate, dateline, a
+  stat band, and the two sections as headed cards with drop caps — in
+  immediate-mode egui with no textures, so the per-frame cost stays at the
+  handful of painter calls the layout was already making. The two-section
+  separation, record counts, and generated-by framing are unchanged.
 
 ### Fixed
 
@@ -71,6 +97,10 @@ project with no published crate API to stabilize against.
   `load_url`, `load_html`) are now logged instead of dropped, and an HLS
   (`.m3u8`) result renders a visible "open in browser" note instead of a dead
   `<video>` that WebView2 cannot decode.
+- The Media page's Bluesky leg now names the closure of keyless post search
+  ("Bluesky now requires a login for post search…") instead of printing the
+  raw HTML `403 — Request forbidden by administrative rules` page Bluesky now
+  returns for `searchPosts` on both public hosts (live-verified 2026-09-07).
 
 ## [0.9.0] — 2026-09-02 — M9: Truth — the signal contract
 

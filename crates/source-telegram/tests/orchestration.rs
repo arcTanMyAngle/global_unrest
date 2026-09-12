@@ -18,9 +18,20 @@ use core_types::{RawRecord, SourceError};
 use media_search::{MediaQuery, Provider};
 use source_telegram::media::ChannelVideo;
 use source_telegram::{
-    ALLOWED_CHANNELS, ChannelOrchestrator, ChannelReader, FIRST_SWEEP_LIMIT, PER_CYCLE_LIMIT,
+    ChannelOrchestrator, ChannelReader, FIRST_SWEEP_LIMIT, PER_CYCLE_LIMIT, allowed_channels,
     search_all,
 };
+
+fn allowlist() -> Vec<source_telegram::Channel> {
+    allowed_channels()
+}
+
+/// The nth allowlisted channel's name, as an owned `String` for `&str`-taking
+/// helpers. Indexing inline (`allowlist()[0].name`) would drop the list while
+/// the borrow is still in use.
+fn channel_name(index: usize) -> String {
+    allowlist()[index].name.clone()
+}
 
 const WINDOW_SECS: i64 = 300;
 /// Inside a window that has closed by [`OPEN_WINDOW_NOW`].
@@ -177,7 +188,7 @@ async fn a_first_sweep_asks_for_the_recent_head_with_no_offset() {
 
     core.sweep_all(&reader).await;
 
-    assert_eq!(reader.sweeps().len(), ALLOWED_CHANNELS.len());
+    assert_eq!(reader.sweeps().len(), allowlist().len());
     for call in reader.sweeps() {
         assert_eq!(call.after, None, "{} got an offset", call.channel);
         assert_eq!(call.limit, FIRST_SWEEP_LIMIT, "{}", call.channel);
@@ -186,9 +197,9 @@ async fn a_first_sweep_asks_for_the_recent_head_with_no_offset() {
 
 #[tokio::test]
 async fn an_incremental_sweep_passes_the_stored_mark_and_the_larger_limit() {
-    let channel = ALLOWED_CHANNELS[0].name;
+    let channel = channel_name(0);
     let reader = FakeReader::default().with(
-        channel,
+        &channel,
         Channel {
             history: vec![msg(7, "", FINISHED_MESSAGE_TS)],
             ..Channel::default()
@@ -197,11 +208,11 @@ async fn an_incremental_sweep_passes_the_stored_mark_and_the_larger_limit() {
     let core = orchestrator();
 
     core.sweep_all(&reader).await;
-    assert_eq!(core.mark(channel), Some(7));
+    assert_eq!(core.mark(&channel), Some(7));
 
     core.sweep_all(&reader).await;
 
-    let second = reader.sweeps()[ALLOWED_CHANNELS.len()].clone();
+    let second = reader.sweeps()[allowlist().len()].clone();
     assert_eq!(
         second,
         SweepCall {
@@ -212,19 +223,19 @@ async fn an_incremental_sweep_passes_the_stored_mark_and_the_larger_limit() {
     );
     // A channel that produced nothing on the first pass still has no mark, so
     // it asks for the head again rather than an offset of zero.
-    assert_eq!(core.mark(ALLOWED_CHANNELS[1].name), None);
-    assert_eq!(reader.sweep_of(ALLOWED_CHANNELS[1].name).after, None);
+    assert_eq!(core.mark(&channel_name(1)), None);
+    assert_eq!(reader.sweep_of(&channel_name(1)).after, None);
 }
 
 // --- the high-water mark ------------------------------------------------
 
 #[tokio::test]
 async fn the_mark_advances_to_the_newest_id_and_never_regresses() {
-    let channel = ALLOWED_CHANNELS[0].name;
+    let channel = channel_name(0);
     let core = orchestrator();
 
     let first = FakeReader::default().with(
-        channel,
+        &channel,
         Channel {
             history: vec![
                 msg(11, "", FINISHED_MESSAGE_TS),
@@ -235,40 +246,40 @@ async fn the_mark_advances_to_the_newest_id_and_never_regresses() {
         },
     );
     core.sweep_all(&first).await;
-    assert_eq!(core.mark(channel), Some(42), "the newest id seen wins");
+    assert_eq!(core.mark(&channel), Some(42), "the newest id seen wins");
 
     // A later sweep that only turns up older messages must not walk it back.
     let older = FakeReader::default().with(
-        channel,
+        &channel,
         Channel {
             history: vec![msg(12, "", FINISHED_MESSAGE_TS)],
             ..Channel::default()
         },
     );
     core.sweep_all(&older).await;
-    assert_eq!(core.mark(channel), Some(42));
+    assert_eq!(core.mark(&channel), Some(42));
 
     // Nor must a sweep that returns nothing at all.
     core.sweep_all(&FakeReader::default()).await;
-    assert_eq!(core.mark(channel), Some(42));
+    assert_eq!(core.mark(&channel), Some(42));
 }
 
 // --- one dead channel must not degrade the rest -------------------------
 
 #[tokio::test]
 async fn a_failing_channel_is_skipped_while_the_rest_still_roll_up() {
-    let dead = ALLOWED_CHANNELS[0].name;
-    let live = ALLOWED_CHANNELS[1].name;
+    let dead = channel_name(0);
+    let live = channel_name(1);
     let reader = FakeReader::default()
         .with(
-            dead,
+            &dead,
             Channel {
                 fails: true,
                 ..Channel::default()
             },
         )
         .with(
-            live,
+            &live,
             Channel {
                 history: vec![msg(5, "protest in Kyiv", FINISHED_MESSAGE_TS)],
                 ..Channel::default()
@@ -280,11 +291,11 @@ async fn a_failing_channel_is_skipped_while_the_rest_still_roll_up() {
 
     assert_eq!(
         reader.sweeps().len(),
-        ALLOWED_CHANNELS.len(),
+        allowlist().len(),
         "the sweep continued past the failure"
     );
-    assert_eq!(core.mark(dead), None);
-    assert_eq!(core.mark(live), Some(5));
+    assert_eq!(core.mark(&dead), None);
+    assert_eq!(core.mark(&live), Some(5));
 
     let records = core.drain_completed(ts(OPEN_WINDOW_NOW));
     assert_eq!(records.len(), 1);
@@ -292,9 +303,9 @@ async fn a_failing_channel_is_skipped_while_the_rest_still_roll_up() {
 
 #[tokio::test]
 async fn messages_seen_before_a_mid_sweep_failure_stay_counted() {
-    let channel = ALLOWED_CHANNELS[0].name;
+    let channel = channel_name(0);
     let reader = FakeReader::default().with(
-        channel,
+        &channel,
         Channel {
             history: vec![msg(5, "protest in Kyiv", FINISHED_MESSAGE_TS)],
             fails: true,
@@ -307,7 +318,7 @@ async fn messages_seen_before_a_mid_sweep_failure_stay_counted() {
 
     // Re-reading the same message next cycle would double-count it, so the
     // mark advances even though the read ended badly.
-    assert_eq!(core.mark(channel), Some(5));
+    assert_eq!(core.mark(&channel), Some(5));
     assert_eq!(core.drain_completed(ts(OPEN_WINDOW_NOW)).len(), 1);
 }
 
@@ -316,7 +327,7 @@ async fn messages_seen_before_a_mid_sweep_failure_stay_counted() {
 #[tokio::test]
 async fn only_completed_windows_drain_and_an_open_one_stays_pending() {
     let reader = FakeReader::default().with(
-        ALLOWED_CHANNELS[0].name,
+        &channel_name(0),
         Channel {
             history: vec![
                 msg(1, "protest in Kyiv", FINISHED_MESSAGE_TS),
@@ -364,7 +375,7 @@ async fn only_completed_windows_drain_and_an_open_one_stays_pending() {
 async fn no_raw_message_text_reaches_a_rollup() {
     const BODY: &str = "protest in Kyiv, filmed by a named eyewitness at 12 Example Street";
     let reader = FakeReader::default().with(
-        ALLOWED_CHANNELS[0].name,
+        &channel_name(0),
         Channel {
             history: vec![msg(1, BODY, FINISHED_MESSAGE_TS)],
             ..Channel::default()
@@ -404,9 +415,9 @@ async fn no_raw_message_text_reaches_a_rollup() {
 
 #[tokio::test]
 async fn the_server_filter_is_rechecked_before_a_row_promises_a_video() {
-    let channel = ALLOWED_CHANNELS[0].name;
+    let channel = channel_name(0);
     let reader = FakeReader::default().with(
-        channel,
+        &channel,
         Channel {
             videos: vec![
                 video(1, Some("video/mp4"), FINISHED_MESSAGE_TS),
@@ -440,7 +451,7 @@ async fn media_hits_merge_across_channels_and_truncate_to_the_query_limit() {
     });
 
     let all = search_all(&reader, &query(1_000)).await.unwrap();
-    assert_eq!(all.len(), ALLOWED_CHANNELS.len() * 2);
+    assert_eq!(all.len(), allowlist().len() * 2);
     assert!(
         all.windows(2).all(|w| w[0].ts_utc >= w[1].ts_utc),
         "merged hits are newest-first"
@@ -458,7 +469,7 @@ async fn one_failing_channel_is_skipped_but_every_channel_failing_is_an_error() 
             ..Channel::default()
         })
         .with(
-            ALLOWED_CHANNELS[0].name,
+            &channel_name(0),
             Channel {
                 fails: true,
                 ..Channel::default()
@@ -467,7 +478,7 @@ async fn one_failing_channel_is_skipped_but_every_channel_failing_is_an_error() 
     let survivors = search_all(&partial, &query(1_000)).await.unwrap();
     assert_eq!(
         survivors.len(),
-        ALLOWED_CHANNELS.len() - 1,
+        allowlist().len() - 1,
         "a dead channel must not empty the panel"
     );
 
@@ -500,4 +511,99 @@ async fn an_unusable_query_never_reaches_a_channel() {
         reader.searches.borrow().is_empty(),
         "an invalid query must not be sent anywhere"
     );
+}
+
+// --- the classified catalog path (M10) -----------------------------------
+
+/// An orchestrator built from a catalog sweeps exactly the file's channels,
+/// not the built-in allowlist, and each channel's asserted class travels
+/// with its messages into the rollup.
+#[tokio::test]
+async fn a_catalog_orchestrator_sweeps_its_own_channels_under_their_classes() {
+    let channels = vec![
+        source_telegram::Channel {
+            name: "neutralmonitor".into(),
+            class: core_types::ChannelClass::Monitor,
+        },
+        source_telegram::Channel {
+            name: "staterun".into(),
+            class: core_types::ChannelClass::State,
+        },
+    ];
+    let core = ChannelOrchestrator::with_channels(
+        ChatterAccumulator::from_bundled(WINDOW_SECS).unwrap(),
+        channels,
+    );
+    let reader = FakeReader::default()
+        .with(
+            "neutralmonitor",
+            Channel {
+                history: vec![msg(1, "protest in Kyiv", FINISHED_MESSAGE_TS)],
+                ..Channel::default()
+            },
+        )
+        .with(
+            "staterun",
+            Channel {
+                history: vec![msg(2, "protest in Kyiv", FINISHED_MESSAGE_TS)],
+                ..Channel::default()
+            },
+        );
+
+    core.sweep_all(&reader).await;
+
+    assert_eq!(reader.sweeps().len(), 2, "exactly the catalog's channels");
+    assert!(
+        reader
+            .sweeps()
+            .iter()
+            .all(|call| call.channel != channel_name(0))
+    );
+
+    let records = core.drain_completed(ts(OPEN_WINDOW_NOW));
+    let mut classes: Vec<_> = records
+        .iter()
+        .map(|record| match record {
+            RawRecord::ChatterRollup(rollup) => rollup.channel_class,
+            other => panic!("expected a chatter rollup, got {other:?}"),
+        })
+        .collect();
+    classes.sort();
+    assert_eq!(
+        classes,
+        vec![
+            core_types::ChannelClass::Monitor,
+            core_types::ChannelClass::State
+        ],
+        "the same place/topic/window rolls up per class lane, never summed"
+    );
+}
+
+/// The catalog's `region` is provenance, never geolocation: a post is placed
+/// only by its own text. A channel whose region is "ukraine" posting about
+/// Nairobi lands in Nairobi.
+#[tokio::test]
+async fn a_channels_region_never_places_its_posts() {
+    let core = ChannelOrchestrator::with_channels(
+        ChatterAccumulator::from_bundled(WINDOW_SECS).unwrap(),
+        vec![source_telegram::Channel {
+            name: "regional".into(),
+            class: core_types::ChannelClass::Monitor,
+        }],
+    );
+    let reader = FakeReader::default().with(
+        "regional",
+        Channel {
+            history: vec![msg(1, "flooding in Nairobi", FINISHED_MESSAGE_TS)],
+            ..Channel::default()
+        },
+    );
+
+    core.sweep_all(&reader).await;
+    let records = core.drain_completed(ts(OPEN_WINDOW_NOW));
+    assert_eq!(records.len(), 1);
+    let RawRecord::ChatterRollup(rollup) = &records[0] else {
+        panic!("expected a chatter rollup");
+    };
+    assert_eq!(rollup.place_name, "Nairobi");
 }

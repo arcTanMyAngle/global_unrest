@@ -317,14 +317,22 @@ account — Telegram's Bot API only delivers messages from channels its own
 admin added the bot to, which rules out reading a third party's channel).
 `crates/source-telegram` uses `grammers-client` (pure Rust, no TDLib/C++
 dependency) purely to *read*: it never posts, never joins a channel, and
-never touches anything outside `ALLOWED_CHANNELS`.
+never touches anything outside its configured channel list.
 
 - **Poll-based, not streaming.** Unlike Bluesky's long-lived socket, each
   poll cycle (`TELEGRAM_POLL_SECS`, 15 minutes) sweeps
-  `source_telegram::ALLOWED_CHANNELS` — a small, live-verified, curated
+  `source_telegram::allowed_channels()` — a small, live-verified, curated
   allowlist, documented with excluded candidates and reasons right next to
   it — resolving each by username and walking new messages via MTProto's
-  `iter_messages`.
+  `iter_messages`. Setting `LES_TELEGRAM_CHANNEL_CATALOG` replaces that list
+  with a validated TOML classified channel catalog (M10, ADR-0001):
+  `[[channel]]` rows with mandatory `id`, `handle`, `class`, `region`, and
+  `cadence_secs`, where a missing or blank class/region — or
+  `class = "unspecified"` — fails the whole load rather than defaulting
+  provenance. The catalog feeds both the ingest sweep and the on-demand
+  Media lookup, and a non-neutral channel's class stays in the accumulator
+  key and in the Media hit's visible attribution. A catalog `region` is
+  channel provenance, never a post's geolocation.
 - **A per-channel high-water mark, not a cursor.** Each channel tracks the
   highest message id already processed (in memory only, not persisted); a
   poll only walks messages newer than that. A restart re-sweeps a bounded
@@ -523,7 +531,9 @@ Parquet export, worker snapshot, or API representation.
 - A `MediaHit` contains a public URL, bounded single-line display
   title/caption, provider (`Gdelt`, `Bluesky`, or `Telegram`), publication
   time, and public origin (outlet domain, Bluesky handle, or Telegram
-  channel). It is temporary display data, not source metadata for the map.
+  channel — carrying the channel's class when a classified catalog marks it
+  non-neutral, e.g. `@somechannel · Partisan`). It is temporary display
+  data, not source metadata for the map.
 - GDELT and Bluesky are queried only after the person presses Search. If a
   Telegram session is configured, `source-telegram` supplies a third,
   read-only allowlist leg. Its read-only session avoids a peer-cache writer

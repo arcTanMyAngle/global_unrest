@@ -32,9 +32,12 @@ use crate::{MediaHit, Provider, search_terms, short_title};
 /// answers most keyless XRPC methods but returns a bot-block HTML `403` for
 /// `searchPosts` in particular — live-verified 2026-08-13: `getProfile` on
 /// `public.api.bsky.app` is `200` while `searchPosts` on the same host is
-/// `403`, and `api.bsky.app` serves `searchPosts` unauthenticated. Neither
-/// host needs a session, so this is a routing quirk, not an auth requirement;
-/// `examples/media_live_probe.rs` is what re-checks it.
+/// `403`, and `api.bsky.app` served `searchPosts` unauthenticated. As of
+/// 2026-09-07 **both** hosts answer keyless `searchPosts` with an HTML
+/// `403 — Request forbidden by administrative rules` (other methods still
+/// `200`), so this keyless leg now fails with a named reason in
+/// [`crate::live`] rather than raw HTML. `examples/media_live_probe.rs` is
+/// what re-checks the routing.
 pub const SEARCH_ENDPOINT: &str = "https://api.bsky.app/xrpc/app.bsky.feed.searchPosts";
 
 /// `searchPosts` caps `limit` at 100.

@@ -82,16 +82,18 @@ impl TileMatrixSet {
         360.0 / (f64::from(cols) * f64::from(self.tile_size))
     }
 
-    /// The finest level whose tile resolution is no finer than the viewport's
-    /// (`deg_per_px >= viewport_deg_per_px`), so imagery never uploads more
-    /// pixels than the screen can show. Falls back to level 0 when the
-    /// viewport is zoomed out beyond the coarsest level, and to `max_level`
-    /// when it out-resolves the ladder (the zoom cap keeps this from
-    /// happening in practice).
+    /// The finest level whose tile resolution is no finer than **twice** the
+    /// viewport's (`deg_per_px >= viewport_deg_per_px / 2`). Allowing up to
+    /// 2× oversampling keeps the imagery crisp at the fixed zoom cap — the
+    /// cap deliberately does not move, so one level of oversampling is the
+    /// only honest way to sharpen the basemap — while still bounding uploads
+    /// to a constant multiple of the screen's pixel count. Falls back to
+    /// level 0 when zoomed far out, and to `max_level` when the viewport
+    /// out-resolves the ladder.
     pub fn select_level(self, viewport_deg_per_px: f64) -> u8 {
         let mut best = 0;
         for level in 0..=self.max_level {
-            if self.deg_per_px(level) >= viewport_deg_per_px {
+            if self.deg_per_px(level) >= viewport_deg_per_px / 2.0 {
                 best = level;
             }
         }
@@ -368,17 +370,18 @@ mod tests {
     }
 
     #[test]
-    fn select_level_never_uploads_more_than_the_screen_shows() {
-        // Viewport resolution 0.7°/px: level 0 (0.703°/px) is the finest
-        // level whose pixels are no finer than the screen's.
-        assert_eq!(test_set().select_level(0.7), 0);
-        // Viewport 0.2°/px: level 1 (0.352°/px) is still coarser than the
-        // screen, and level 2 (0.176°/px) is finer than it — so level 1.
-        assert_eq!(test_set().select_level(0.2), 1);
-        // Viewport 0.1°/px: level 2 (0.176°/px) is coarser than the screen,
-        // and level 3 (0.088°/px) is finer — so level 2.
-        assert_eq!(test_set().select_level(0.1), 2);
-        // Zoomed far out: every level is finer than 5°/px → coarsest.
+    fn select_level_allows_up_to_two_times_oversampling() {
+        // 2× oversampling keeps imagery crisp at the fixed zoom cap: pick the
+        // finest level whose pixels are no finer than *twice* the screen's.
+        // Viewport 0.7°/px → threshold 0.35°/px: level 1 (0.352°/px) is the
+        // finest level no finer than that; level 2 (0.176°/px) is finer.
+        assert_eq!(test_set().select_level(0.7), 1);
+        // Viewport 0.2°/px → threshold 0.1°/px: level 2 (0.176°/px)
+        // qualifies, level 3 (0.088°/px) does not.
+        assert_eq!(test_set().select_level(0.2), 2);
+        // Viewport 0.1°/px → threshold 0.05°/px: level 3 (0.088°/px).
+        assert_eq!(test_set().select_level(0.1), 3);
+        // Zoomed far out: nothing is coarse enough → coarsest level.
         assert_eq!(test_set().select_level(5.0), 0);
         // Zoomed past the ladder: finest available.
         assert_eq!(test_set().select_level(0.0001), 4);

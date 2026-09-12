@@ -51,16 +51,18 @@ pub const API_KEY_ENV: &str = "GEMINI_API_KEY";
 /// this id is therefore a real workaround for a 429, not a superstition —
 /// and a 429 here does not mean the key or the project is out of budget.
 pub const MODEL: &str = "gemini-3.6-flash";
-/// Caps thinking *and* response text together. A digest is two short
-/// sections; the headroom is for thinking.
-pub const MAX_TOKENS: u32 = 4_096;
-/// Writing two short paragraphs from pre-aggregated counts is not a reasoning
-/// task, and thinking tokens count against [`MAX_TOKENS`] alongside the
-/// answer. `low` holds `thoughtsTokenCount` to double digits here; it is a
-/// floor, not an off switch, so the headroom in `MAX_TOKENS` still matters.
-/// It must be sent nested under `thinkingConfig` — at the top level of
+/// Caps thinking *and* response text together. The digest is a long-form,
+/// two-section newspaper column now (12-18 sentences a section, named
+/// specifics throughout), so the old two-paragraph budget would truncate
+/// mid-sentence; 12k leaves thinking headroom on top of the prose.
+pub const MAX_TOKENS: u32 = 12_288;
+/// The prompt asks for a detailed, specific column rather than a summary, so
+/// the model earns a little more thinking room — but thinking tokens count
+/// against [`MAX_TOKENS`] alongside the answer, and `medium` on this model
+/// family still holds `thoughtsTokenCount` well under the prose budget. It
+/// must be sent nested under `thinkingConfig` — at the top level of
 /// `generationConfig` it is an unknown field and 400s.
-pub const THINKING_LEVEL: &str = "low";
+pub const THINKING_LEVEL: &str = "medium";
 
 /// Full `generateContent` URL for [`MODEL`] under `base`.
 ///
@@ -292,23 +294,28 @@ pub fn output_schema() -> Value {
         "properties": {
             "media_attention": {
                 "type": "string",
-                "description": "4-8 sentences on what the world's news coverage \
-                                concentrated on this day, in coverage terms only \
-                                (articles, outlets, where coverage clustered). \
-                                Name the countries, outlet domains, and headline \
-                                subjects you were given rather than restating \
-                                totals. Never assert that an event happened on the \
-                                strength of coverage alone."
+                "description": "12-18 sentences of newspaper-column prose on what \
+                                the world's news coverage concentrated on this \
+                                day, in coverage terms only (articles, outlets, \
+                                where coverage clustered). Name the countries, \
+                                outlet domains, and headline subjects you were \
+                                given rather than restating totals. Vary sentence \
+                                length and weave the counts in beside the \
+                                specifics. Never assert that an event happened on \
+                                the strength of coverage alone."
             },
             "event_data": {
                 "type": "string",
-                "description": "4-8 sentences on the discrete events recorded this \
-                                day by the event datasets and monitors, in event \
-                                terms only (counts by kind, where, which dataset). \
-                                Name the individual alerts, outages, and other \
-                                labelled rows you were given, with their severities, \
-                                rather than only their totals. Never use coverage \
-                                volume as evidence of an event."
+                "description": "12-18 sentences of newspaper-column prose on the \
+                                discrete events recorded this day by the event \
+                                datasets and monitors, in event terms only \
+                                (counts by kind, where, which dataset). Name the \
+                                individual alerts, outages, and other labelled \
+                                rows you were given, with their severities and \
+                                countries, rather than only their totals. Vary \
+                                sentence length and weave the counts in beside \
+                                the specifics. Never use coverage volume as \
+                                evidence of an event."
             }
         },
         "required": ["media_attention", "event_data"],
@@ -317,9 +324,14 @@ pub fn output_schema() -> Value {
 }
 
 pub const SYSTEM_PROMPT: &str = "\
-You are writing the daily digest for Live Earth Signals, a civic-data \
-research dashboard. You are given aggregate counts the dashboard computed \
-from public data sources for one UTC calendar day.
+You are the overnight wire editor at Live Earth Signals, a civic-data \
+research dashboard. Each morning you write the front-page column — the piece \
+a reader sits down with like a newspaper — from one thing only: the aggregate \
+counts the dashboard computed from public data sources for one UTC calendar \
+day. Write long-form: each of the two sections is a full 12-to-18-sentence \
+column, not a summary. Open with the day's defining observation, move \
+through the specifics one thread at a time, and close with what the record \
+of the day leaves standing.
 
 Rules, in priority order:
 
@@ -336,15 +348,19 @@ outcomes from your own knowledge, and do not speculate about what the numbers \
 imply. If the day is thin, say it is thin.
 4. Name places and datasets. Never name or describe individual people, and \
 never characterise the users, authors, or members of any platform.
-5. Prefer named specifics to bare aggregates. The facts include labelled rows \
-as well as totals: weather-alert names, internet-outage labels, headline text \
-and outlet domains, each with its country and severity. Use them. Say which \
-alerts, which outages, which outlets and which countries — a total is context \
+5. Prefer named specifics to bare aggregates, and carry the day through them. \
+The facts include labelled rows as well as totals: weather-alert names, \
+internet-outage labels, headline text and outlet domains, each with its \
+country and severity. Work them into the column one after another — which \
+alerts, which outages, which outlets, which countries, in what volume — the \
+way a reporter works a notebook, not the way a table does. A total is context \
 for a specific, not a substitute for one. Rule 4 still binds: describe what a \
-headline concerned without naming the people in it. Where a list is empty, say \
-so plainly rather than reaching for an example. Plain declarative prose, no \
-headings, no bullet lists, no markdown, and cite the counts alongside the \
-specifics you name.";
+headline concerned without naming the people in it. Where a list is empty, \
+say so plainly rather than reaching for an example.
+6. Read like print journalism, not a report. Vary sentence length, let one \
+sentence hand the next its subject, and let the counts land beside the names \
+they belong to. Plain declarative prose only — no headings, no bullet lists, \
+no markdown, no datelines, no sign-offs.";
 
 /// Render the facts the model sees. Deterministic, and the exact text the
 /// mock-server tests assert against.

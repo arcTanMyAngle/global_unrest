@@ -18,19 +18,21 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use egui::{ColorImage, TextureHandle, TextureId};
 use renderer::{TileId, TileMatrixSet};
 use tokio::sync::mpsc as tokio_mpsc;
 
-/// NASA GIBS `BlueMarble_ShadedRelief_Bathymetry` in the `500m` EPSG:4326
+/// NASA GIBS `ASTER_GDEM_Color_Shaded_Relief` in the `31.25m` EPSG:4326
 /// matrix set: 512 px tiles, level 0 = 2×1 (180° tiles), halving per level,
-/// max level 7. Static, undated shaded relief with bathymetry — deliberately
-/// not a dated true-colour layer, so the imagery cannot be read as a
-/// photograph *of* the event (docs/BASEMAP.md §2 honesty decision). The
-/// renderer's tile math is parameterized by this same value, so the fetch URL
-/// and the drawn layer cannot drift apart.
-pub const TILESET: TileMatrixSet = TileMatrixSet::new(512, 2, 1, 7);
+/// max level 11. Static, undated ASTER GDEM shaded relief — deliberately not
+/// a dated true-colour layer, so the imagery cannot be read as a photograph
+/// *of* the event (docs/BASEMAP.md §2 honesty decision). Finer than the
+/// BlueMarble basemap: level 8 (≈0.00137°/px) reaches under the app's zoom
+/// floor. The renderer's tile math is parameterized by this same value, so
+/// the fetch URL and the drawn layer cannot drift apart.
+pub const TILESET: TileMatrixSet = TileMatrixSet::new(512, 2, 1, 11);
 
 /// Cap on resident decoded textures: 96 × 1 MiB (512² RGBA) ≈ 96 MiB of VRAM
 /// (docs/BASEMAP.md §4).
@@ -43,15 +45,45 @@ pub const UPLOADS_PER_FRAME: usize = 4;
 /// How many tiles the worker fetches at once (docs/BASEMAP.md §6).
 const CONCURRENT_FETCHES: usize = 2;
 
-/// GIBS WMTS REST base for the static shaded-relief layer in the `500m`
+/// GIBS WMTS REST base for the static shaded-relief layer in the `31.25m`
 /// matrix set. Tile order is `{z}/{row}/{col}` (row before column), the
 /// documented GIBS REST pattern (docs/BASEMAP.md §2).
 const GIBS_BASE: &str = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/\
-BlueMarble_ShadedRelief_Bathymetry/default/default/500m";
+ASTER_GDEM_Color_Shaded_Relief/default/default/31.25m";
 
 /// The REST URL for one tile: `{base}/{z}/{row}/{col}.jpg`.
 fn tile_url(id: TileId) -> String {
     format!("{GIBS_BASE}/{}/{}/{}.jpg", id.level, id.row, id.col)
+}
+
+/// Why a tile fetch failed, with enough structure for the worker to back off
+/// instead of hammering the provider.
+pub enum TileError {
+    /// The provider asked us to slow down (HTTP 429). `retry_after` is the
+    /// provider's own hint, when present and parseable.
+    RateLimited { retry_after: Option<Duration> },
+    /// Anything else — network, non-2xx, decode. User-safe reason.
+    Failed(String),
+}
+
+/// How long to hold off a single tile after a non-rate-limit failure, so a
+/// persistently bad tile cannot retry in a tight loop.
+const TILE_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// Cooldown floor and ceiling after a 429: doubles per consecutive rate
+/// limit, capped, so a burst backs off without going silent forever.
+const COOLDOWN_BASE: Duration = Duration::from_secs(2);
+const COOLDOWN_MAX: Duration = Duration::from_secs(60);
+
+/// Backoff after a 429: the provider's `Retry-After` when present (capped),
+/// else exponential doubling from [`COOLDOWN_BASE`] capped at
+/// [`COOLDOWN_MAX`].
+fn cooldown_for(consecutive_429: u32, hint: Option<Duration>) -> Duration {
+    if let Some(h) = hint {
+        return h.min(COOLDOWN_MAX);
+    }
+    let factor = 1u32 << consecutive_429.saturating_sub(1).min(6);
+    COOLDOWN_BASE.saturating_mul(factor).min(COOLDOWN_MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -92,21 +124,33 @@ mod api {
     }
 
     impl TileFetcher {
-        /// Fetch and decode one tile. `Err` carries a user-safe, key-free
-        /// reason (never the URL of a failed request beyond the tile id).
-        pub async fn tile(&self, id: TileId) -> Result<ColorImage, String> {
+        /// Fetch and decode one tile. `Err` is structured so the worker can
+        /// back off on 429s instead of retrying in a tight loop.
+        pub async fn tile(&self, id: TileId) -> Result<ColorImage, TileError> {
             let url = tile_url(id);
             let resp = self
                 .http
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("HTTP {}", resp.status()));
+                .map_err(|e| TileError::Failed(e.to_string()))?;
+            if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(Duration::from_secs);
+                return Err(TileError::RateLimited { retry_after });
             }
-            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-            decode(&bytes)
+            if !resp.status().is_success() {
+                return Err(TileError::Failed(format!("HTTP {}", resp.status())));
+            }
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| TileError::Failed(e.to_string()))?;
+            decode(&bytes).map_err(TileError::Failed)
         }
     }
 
@@ -136,7 +180,7 @@ mod api {
     }
 
     impl TileFetcher {
-        pub async fn tile(&self, _: TileId) -> Result<ColorImage, String> {
+        pub async fn tile(&self, _: TileId) -> Result<ColorImage, TileError> {
             unreachable!("built without the tiles-live feature")
         }
     }
@@ -303,15 +347,21 @@ async fn worker(
     use std::collections::HashSet;
     use std::future::Future;
     use std::pin::Pin;
+    use tokio::time::Instant;
 
     // A boxed fetch. Local (`!Send`) because the worker runs on a
     // current-thread runtime and the futures borrow the shared client — the
     // same shape [`crate::media`] uses for its three provider legs.
-    type Fetch<'a> = Pin<Box<dyn Future<Output = (TileId, Result<ColorImage, String>)> + 'a>>;
+    type Fetch<'a> = Pin<Box<dyn Future<Output = (TileId, Result<ColorImage, TileError>)> + 'a>>;
 
     let mut wanted: Vec<TileId> = Vec::new();
     let mut in_flight: FuturesUnordered<Fetch<'_>> = FuturesUnordered::new();
     let mut in_flight_ids: HashSet<TileId> = HashSet::new();
+    // Tiles to leave alone until this instant (per-tile failure backoff).
+    let mut retry_after: HashMap<TileId, Instant> = HashMap::new();
+    // After a 429, pause all new fetches until this instant.
+    let mut cooldown_until: Option<Instant> = None;
+    let mut consecutive_429: u32 = 0;
 
     loop {
         // Adopt the latest wanted-set replacement (drain bursts so a run of
@@ -328,14 +378,19 @@ async fn worker(
             wanted = dedup(tiles);
         }
 
-        // Top up to the concurrency cap from the latest wanted set. A tile
-        // already in flight is never re-requested.
-        while in_flight_ids.len() < CONCURRENT_FETCHES {
-            let Some(next) = wanted.iter().copied().find(|t| !in_flight_ids.contains(t)) else {
-                break;
-            };
-            in_flight_ids.insert(next);
-            in_flight.push(Box::pin(fetch_tile(&fetcher, next)));
+        // Top up to the concurrency cap from the latest wanted set, skipping
+        // anything still cooling down and any per-tile backoff that has not
+        // elapsed. A tile already in flight is never re-requested.
+        let now = Instant::now();
+        if cooldown_until.is_none_or(|c| now >= c) {
+            while in_flight_ids.len() < CONCURRENT_FETCHES {
+                let next = wanted.iter().copied().find(|t| {
+                    !in_flight_ids.contains(t) && retry_after.get(t).is_none_or(|at| now >= *at)
+                });
+                let Some(next) = next else { break };
+                in_flight_ids.insert(next);
+                in_flight.push(Box::pin(fetch_tile(&fetcher, next)));
+            }
         }
 
         tokio::select! {
@@ -345,16 +400,30 @@ async fn worker(
                     unreachable!("guarded by !in_flight.is_empty()");
                 };
                 in_flight_ids.remove(&tile);
-                // A result for a tile that has since left the wanted set is
-                // stale — drop it rather than painting a place the user has
-                // already panned away from.
-                if wanted.contains(&tile) && tx.send(TileMsg { tile, image: result }).is_err() {
-                    return; // UI gone
-                }
-                // `wake` only on the kept path so a dropped stale tile does
-                // not force a pointless repaint.
-                if wanted.contains(&tile) {
-                    wake();
+                match result {
+                    Ok(img) => {
+                        consecutive_429 = 0;
+                        retry_after.remove(&tile);
+                        // A tile that has since left the wanted set is stale
+                        // — drop it rather than painting a place the user has
+                        // already panned away from.
+                        if wanted.contains(&tile) {
+                            if tx.send(TileMsg { tile, image: Ok(img) }).is_err() {
+                                return; // UI gone
+                            }
+                            wake();
+                        }
+                    }
+                    Err(TileError::RateLimited { retry_after: hint }) => {
+                        consecutive_429 += 1;
+                        let backoff = cooldown_for(consecutive_429, hint);
+                        cooldown_until = Some(Instant::now() + backoff);
+                        tracing::warn!(tile = ?tile, ?backoff, "GIBS rate limit; backing off");
+                    }
+                    Err(TileError::Failed(problem)) => {
+                        retry_after.insert(tile, Instant::now() + TILE_RETRY_DELAY);
+                        tracing::debug!(tile = ?tile, "tile fetch failed: {problem}");
+                    }
                 }
             }
             ctl = rx_ctl.recv() => {
@@ -368,7 +437,7 @@ async fn worker(
 async fn fetch_tile(
     fetcher: &api::TileFetcher,
     tile: TileId,
-) -> (TileId, Result<ColorImage, String>) {
+) -> (TileId, Result<ColorImage, TileError>) {
     let result = fetcher.tile(tile).await;
     (tile, result)
 }
@@ -383,24 +452,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tileset_matches_the_gibs_500m_matrix() {
+    fn tileset_matches_the_gibs_31_25m_matrix() {
         // The renderer and the fetch URL must agree on the matrix geometry.
-        // These are the published `500m` EPSG:4326 values (docs/BASEMAP.md §2).
+        // These are the published `31.25m` EPSG:4326 values (docs/BASEMAP.md §2).
         assert_eq!(TILESET.matrix_size(0), (2, 1));
-        assert_eq!(TILESET.matrix_size(7), (256, 128));
+        assert_eq!(TILESET.matrix_size(11), (4096, 2048));
         // Level 0 is 180°-wide tiles at 512 px → 0.3515625°/px.
         assert!((TILESET.deg_per_px(0) - 0.3515625).abs() < 1e-9);
-        // The finest level stays coarser than the app's zoom floor is not
-        // asserted here (that is a renderer/geo-utils constant); instead pin
-        // that max level is 7, matching the matrix set the URL names.
-        assert_eq!(TILESET.max_level, 7);
+        // Level 8 (≈0.00137°/px) is the level under the app's zoom floor.
+        assert!((TILESET.deg_per_px(8) - 0.001373291015625).abs() < 1e-12);
+        assert_eq!(TILESET.max_level, 11);
     }
 
     #[test]
-    fn tile_url_uses_row_before_column_and_500m() {
+    fn tile_url_uses_row_before_column_and_31_25m() {
         // GIBS REST tile order is {z}/{row}/{col}, and the matrix set name is
-        // `500m` — not `EPSG4326_250m` or any other spelling. A row/col swap
-        // here draws the world mirrored or shifted; this pins the order.
+        // `31.25m` — not `500m` or any other spelling. A row/col swap here
+        // draws the world mirrored or shifted; this pins the order.
         let url = tile_url(TileId {
             level: 3,
             col: 7,
@@ -409,7 +477,25 @@ mod tests {
         assert_eq!(
             url,
             "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/\
-BlueMarble_ShadedRelief_Bathymetry/default/default/500m/3/2/7.jpg"
+ASTER_GDEM_Color_Shaded_Relief/default/default/31.25m/3/2/7.jpg"
+        );
+    }
+
+    #[test]
+    fn cooldown_doubles_and_caps_and_honors_retry_after() {
+        assert_eq!(cooldown_for(1, None), Duration::from_secs(2));
+        assert_eq!(cooldown_for(2, None), Duration::from_secs(4));
+        assert_eq!(cooldown_for(3, None), Duration::from_secs(8));
+        // Exponential doubling caps out rather than going silent forever.
+        assert_eq!(cooldown_for(100, None), COOLDOWN_MAX);
+        // A provider hint is honoured, and capped too.
+        assert_eq!(
+            cooldown_for(1, Some(Duration::from_secs(9))),
+            Duration::from_secs(9)
+        );
+        assert_eq!(
+            cooldown_for(1, Some(Duration::from_secs(999))),
+            COOLDOWN_MAX
         );
     }
 

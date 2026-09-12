@@ -93,7 +93,7 @@ synthetic data.
 | IODA | 15 minutes | Country precision only; never rendered as a point. |
 | ACLED | 12 hours | Requires authorized credentials; licensing and account date restrictions apply. |
 | Bluesky | 5 minutes | A continuous stream is published only as completed aggregate windows. |
-| Telegram | 15 minutes | Requires app credentials and a pre-created local session; reads only the curated public-channel allowlist. |
+| Telegram | 15 minutes | Requires app credentials and a pre-created local session; reads only the curated public-channel allowlist (or a classified channel catalog when `LES_TELEGRAM_CHANNEL_CATALOG` is set). |
 
 The app keeps source event time, ingest time, and six-hour analysis buckets
 separate. A frequent fetch does not mean every underlying report is current or
@@ -140,6 +140,17 @@ TELEGRAM_API_HASH, then a one-time local session setup:
 cargo run -p source-telegram --features live --example login_setup
 ~~~
 
+By default the source sweeps the compiled-in, live-verified neutral channel
+allowlist. Setting LES_TELEGRAM_CHANNEL_CATALOG to a TOML file replaces that
+list for both ingest and the Media page with a **classified channel
+catalog**: each entry must declare `id`, `handle`, `class`
+(`monitor`/`outlet`/`partisan`/`combatant`/`state`), `region` (the channel's
+beat as provenance — never a post's geolocation), and `cadence_secs`. An
+entry missing its class or region fails the whole load; it is never
+defaulted. Volume from partisan, combatant, and state channels rolls up into
+its own claims lane, out of the neutral aggregate, and their Media results
+are labelled with the class in the attribution line.
+
 To create a Daily Events digest, set GEMINI_API_KEY in .env or the process
 environment, open **daily events**, choose a UTC day with stored data, and
 click **generate digest**. Nothing is generated automatically. A digest is
@@ -160,7 +171,9 @@ GDELT, public Bluesky posts, and the configured Telegram allowlist for video.
 Nothing is fetched on a timer or written to the database. The providers are
 searched in parallel and results appear as each one answers, with a notice for
 any that is slow and a per-provider timeout rather than one long wait. News
-videos and unverified public posts are labelled separately. One-click topic
+videos and unverified public posts are labelled separately. (Bluesky recently
+began requiring a login for post search, so that leg reports itself unavailable
+in builds that do not authenticate.) One-click topic
 chips (war, crime, protest, flood, earthquake, wildfire, and storm) narrow the
 search, and a labelled link opens a YouTube search for the same place and topic
 in the browser. On Windows, supported

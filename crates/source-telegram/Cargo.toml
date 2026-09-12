@@ -24,7 +24,6 @@ live = [
     "dep:grammers-client",
     "dep:grammers-session",
     "dep:grammers-mtsender",
-    "dep:serde",
     "dep:serde_json",
 ]
 
@@ -36,6 +35,10 @@ core-types.workspace = true
 # unit-tested without the `live` feature. The arrow only points this way —
 # `media-search` must never depend on this crate, or the graph cycles.
 media-search.workspace = true
+# Not optional: the M10 classified-channel catalog (`src/catalog.rs`) is pure
+# and unit-tested without `live`; serde supplies its TOML derives.
+serde.workspace = true
+toml.workspace = true
 tracing.workspace = true
 grammers-client = { workspace = true, optional = true }
 grammers-mtsender = { workspace = true, optional = true }
@@ -43,7 +46,6 @@ grammers-mtsender = { workspace = true, optional = true }
 # `sqlite-storage` (and its duplicate vendored SQLite) — `src/file_session.rs`
 # replaces it, and serde supplies that file's derives.
 grammers-session = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 

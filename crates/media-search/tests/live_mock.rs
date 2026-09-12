@@ -262,6 +262,31 @@ async fn a_bluesky_error_payload_is_named_too() {
 }
 
 #[tokio::test]
+async fn a_bluesky_admin_rule_403_is_named_not_printed_as_raw_html() {
+    // Bluesky's public AppView answers keyless `searchPosts` with an HTML
+    // "403 — Request forbidden by administrative rules" (live-verified
+    // 2026-09-07). The panel must say *that*, not echo the gateway page.
+    let search = both(
+        json_ok(GDELT_BODY),
+        http_body(
+            "403 Forbidden",
+            "text/html",
+            "",
+            "<html><body><h1>403 Forbidden</h1>Request forbidden by administrative rules.</body></html>",
+        ),
+    )
+    .await;
+    let (hits, problems) = search.search(&query()).await;
+    assert_eq!(hits.len(), 1, "the GDELT leg still returns");
+    assert_eq!(hits[0].provider, Provider::Gdelt);
+    assert!(problems[0].contains("requires a login"), "{problems:?}");
+    assert!(
+        !problems[0].contains("administrative rules"),
+        "raw gateway HTML must not reach the panel: {problems:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_query_without_a_place_never_reaches_the_network() {
     let hits_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = Arc::clone(&hits_seen);

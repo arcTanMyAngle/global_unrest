@@ -75,7 +75,17 @@ impl MediaSearch {
             query.end,
             query.limit,
         )?;
-        bluesky::hits(&self.get(url.as_str()).await?)
+        match self.get(url.as_str()).await {
+            Ok(body) => bluesky::hits(&body),
+            // Bluesky's public AppView now answers keyless `searchPosts` with
+            // an HTML "403 — Request forbidden by administrative rules" on
+            // both hosts. Name that instead of printing the gateway page.
+            Err(SourceError::Http(msg)) if is_bsky_search_closed(&msg) => Err(SourceError::Other(
+                "Bluesky now requires a login for post search, so this build cannot search Bluesky"
+                    .to_string(),
+            )),
+            Err(e) => Err(e),
+        }
     }
 
     /// Run both keyless legs and merge them.
@@ -150,6 +160,15 @@ impl MediaSearch {
 
 /// How long to wait before the single connect retry in [`MediaSearch::get`].
 const CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Recognize Bluesky's keyless-`searchPosts`-is-closed page. Both public
+/// hosts (`api.bsky.app` and `public.api.bsky.app`) now answer with an HTML
+/// `403 Forbidden — Request forbidden by administrative rules` (live-verified
+/// 2026-09-07), while other XRPC methods still answer keylessly. Match the
+/// distinctive phrase rather than a brittle whole-page comparison.
+fn is_bsky_search_closed(message: &str) -> bool {
+    message.contains("403") && message.contains("administrative rules")
+}
 
 /// A short, human sentence for a transport failure.
 ///

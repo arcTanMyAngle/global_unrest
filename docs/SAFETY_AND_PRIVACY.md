@@ -97,7 +97,9 @@ The exception is constrained as follows:
 - **Public video only.** GDELT is queried for video-hosting results; Bluesky
   public posts and configured Telegram public-channel posts must carry video.
   Social results are visually marked as unverified public posts, not event
-  evidence.
+  evidence. As of 2026-09-07 Bluesky requires a login for post search, so the
+  keyless Bluesky leg is unavailable and the page says so rather than
+  widening scope.
 - **External fallback, not a provider.** The page may also show a labelled
   "search YouTube for this place" link that opens the OS browser. It performs
   no in-app retrieval, carries no result back into the app, and is not a
@@ -127,8 +129,8 @@ playback mechanism requires a new privacy and terms review.
 | ACLED | Requires authorized access. Do not store notes or redistribute raw ACLED data. Public worker/API deployments must not ingest or serve it. |
 | NOAA/NWS active alerts | US government public-domain alerts. US and territory coverage only; alerts without usable geometry do not get guessed coordinates. |
 | IODA | Keyless outage events from Georgia Tech's Internet Intelligence Research Lab. Country precision only; use as aggregate network signal, never person-level data. |
-| Bluesky Jetstream | The ingest stream is processed only into aggregate chatter windows. The Media page may explicitly show a public video post's bounded label, URL, and visible handle transiently; it does not feed those fields back into ingest or storage. |
-| Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Ingest aggregates before storage, keyed by channel class so classes are never summed together; a class describes a *channel's* provenance and never a person, and defaults to `unspecified` rather than claiming one. The explicit Media lookup uses the same allowlist and a read-only session, returning only temporary public video links, bounded labels, and channel attribution. |
+| Bluesky Jetstream | The ingest stream is processed only into aggregate chatter windows. The Media page may explicitly show a public video post's bounded label, URL, and visible handle transiently; it does not feed those fields back into ingest or storage. Bluesky now requires login for post search, so the keyless Media leg is currently unavailable. |
+| Telegram public channels | A dedicated account reads only the curated public-channel allowlist using a local MTProto session. Ingest aggregates before storage, keyed by channel class so classes are never summed together; a class describes a *channel's* provenance and never a person, and defaults to `unspecified` rather than claiming one. The explicit Media lookup uses the same allowlist and a read-only session, returning only temporary public video links, bounded labels, and channel attribution. When `LES_TELEGRAM_CHANNEL_CATALOG` names a classified channel catalog (M10), the same rules hold entry-for-entry: class and region are mandatory provenance, a catalog without them fails to load rather than defaulting, a catalog `region` is never a post's geolocation, non-neutral classes roll up into their own claims lane, and a non-neutral channel's class is shown in the Media attribution. |
 | Published video embeds | Use provider-published embeds or direct public media files only. Do not resolve a watch page into an underlying stream. |
 | Natural Earth | Public-domain basemap and gazetteer data, attributed in the application and README. |
 | NASA GIBS tiles | Keyless static shaded-relief basemap imagery, used only behind the off-by-default terrain-imagery toggle. The app sends the tile coordinates for the map area in view and nothing else; Phase 2 keeps tiles in process memory only (no disk cache). Attribution is rendered per NASA's terms. Silenced by `LES_ONLINE=0` and by an unfocused window. |

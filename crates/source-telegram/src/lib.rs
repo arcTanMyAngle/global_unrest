@@ -41,6 +41,7 @@
 //! grammers type, the signature is wrong — the seam exists precisely so the
 //! layer above it never has to name one.
 
+pub mod catalog;
 #[cfg(feature = "live")]
 pub mod file_session;
 #[cfg(feature = "live")]
@@ -120,12 +121,22 @@ pub trait ChannelReader {
 }
 
 /// The ingest leg's state and orchestration: one accumulator, one high-water
-/// mark per channel, and the sweep loop over [`ALLOWED_CHANNELS`].
+/// mark per channel, and the sweep loop over its channel list.
+///
+/// The list is the compiled-in neutral [`allowed_channels`] by default, or a
+/// validated [`catalog`] file when `LES_TELEGRAM_CHANNEL_CATALOG` points at
+/// one (M10 classified packs). Either way every channel swept carries an
+/// explicit [`ChannelClass`] that travels with each message into the
+/// accumulator, so a non-neutral channel's volume rolls up into its own
+/// claims lane, never the neutral aggregate.
 ///
 /// Ungated on purpose. `TelegramSource` owns one of these and delegates to it;
 /// the tests own one and drive it with a fake [`ChannelReader`].
 pub struct ChannelOrchestrator {
     accumulator: Mutex<ChatterAccumulator>,
+    /// The channels this orchestrator sweeps, in order. Owned because a
+    /// catalog file is read from disk at startup.
+    channels: Vec<Channel>,
     /// Highest message id already processed per channel, so a poll only
     /// walks messages newer than what was already counted. Deliberately
     /// **not** persisted to disk: on restart each channel is swept from
@@ -140,8 +151,18 @@ pub struct ChannelOrchestrator {
 impl ChannelOrchestrator {
     #[must_use]
     pub fn new(accumulator: ChatterAccumulator) -> Self {
+        Self::with_channels(accumulator, allowed_channels())
+    }
+
+    /// Build over an explicit channel list — the classified-catalog path.
+    ///
+    /// A catalog-driven orchestrator sweeps exactly what the file asserted,
+    /// class included; an empty list sweeps nothing and drains to empty.
+    #[must_use]
+    pub fn with_channels(accumulator: ChatterAccumulator, channels: Vec<Channel>) -> Self {
         Self {
             accumulator: Mutex::new(accumulator),
+            channels,
             last_seen: Mutex::new(HashMap::new()),
         }
     }
@@ -151,6 +172,24 @@ impl ChannelOrchestrator {
         let accumulator = ChatterAccumulator::from_bundled(window_secs)
             .map_err(|e| SourceError::Other(format!("building chatter matcher: {e}")))?;
         Ok(Self::new(accumulator))
+    }
+
+    /// Build over the bundled lists and a validated catalog file's entries.
+    #[cfg(feature = "live")]
+    pub fn from_catalog(
+        window_secs: i64,
+        entries: &[catalog::CatalogEntry],
+    ) -> Result<Self, SourceError> {
+        let accumulator = ChatterAccumulator::from_bundled(window_secs)
+            .map_err(|e| SourceError::Other(format!("building chatter matcher: {e}")))?;
+        let channels = entries
+            .iter()
+            .map(|entry| Channel {
+                name: entry.handle.clone(),
+                class: entry.class,
+            })
+            .collect();
+        Ok(Self::with_channels(accumulator, channels))
     }
 
     fn lock_accumulator(&self) -> MutexGuard<'_, ChatterAccumulator> {
@@ -173,10 +212,10 @@ impl ChannelOrchestrator {
         self.lock_last_seen().get(channel).copied()
     }
 
-    /// Sweep every allowlisted channel in order.
+    /// Sweep every configured channel in order.
     pub async fn sweep_all(&self, reader: &impl ChannelReader) {
-        for channel in ALLOWED_CHANNELS {
-            self.sweep_channel(reader, *channel).await;
+        for channel in &self.channels {
+            self.sweep_channel(reader, channel).await;
         }
     }
 
@@ -185,12 +224,11 @@ impl ChannelOrchestrator {
     /// matching text into the accumulator, and advance the mark.
     ///
     /// Failures are logged and swallowed rather than propagated — one
-    /// unreachable or renamed channel must not degrade the rest of
-    /// [`ALLOWED_CHANNELS`]. Whatever arrived before a mid-sweep failure is
-    /// still counted and still advances the mark; re-reading it next cycle
-    /// would double-count it.
-    async fn sweep_channel(&self, reader: &impl ChannelReader, channel: Channel) {
-        let name = channel.name;
+    /// unreachable or renamed channel must not degrade the rest of the list.
+    /// Whatever arrived before a mid-sweep failure is still counted and still
+    /// advances the mark; re-reading it next cycle would double-count it.
+    async fn sweep_channel(&self, reader: &impl ChannelReader, channel: &Channel) {
+        let name = channel.name.as_str();
         let last_id = self.mark(name);
         let limit = if last_id.is_some() {
             PER_CYCLE_LIMIT
@@ -264,17 +302,18 @@ pub async fn search_all(
 
     let mut hits = Vec::new();
     let mut failed = 0usize;
-    for channel in ALLOWED_CHANNELS {
-        let name = channel.name;
+    let channels = allowed_channels();
+    for channel in &channels {
+        let name = channel.name.as_str();
         match reader.search_videos(name, &text, query).await {
-            Ok(found) => hits.extend(media::playable_hits(name, &found)),
+            Ok(found) => hits.extend(media::playable_hits(name, channel.class, &found)),
             Err(e) => {
                 failed += 1;
                 tracing::warn!(channel = name, error = %e, "telegram media search failed");
             }
         }
     }
-    if failed == ALLOWED_CHANNELS.len() {
+    if failed == channels.len() {
         return Err(SourceError::Other(
             "every telegram channel search failed — the session may have expired".to_string(),
         ));
@@ -414,40 +453,70 @@ impl ChannelSweep {
 ///   web preview off, so the same situation as `GeoConfirmed`: nothing here
 ///   says they're bad, only that this check couldn't see them.
 ///
-/// Coverage gaps as of 2026-08-13, in rough priority order for the next
-/// pass: the Caribbean (nothing at all), South Asia, West Africa/the Sahel
-/// (lost when `osintsahel` was dropped), and Ethiopia/the wider Horn beyond
-/// Somalia.
-pub const ALLOWED_CHANNELS: &[Channel] = &[
-    // Global/multi-region aggregators.
-    Channel::new("liveuamap", ChannelClass::Monitor),
-    Channel::new("ClashReport", ChannelClass::Monitor),
-    Channel::new("osintdefender", ChannelClass::Monitor),
-    // Global breaking news; heavy video, named outlet.
-    Channel::new("insiderpaper", ChannelClass::Outlet),
-    // Regional.
-    // Russia-Ukraine + Middle East.
-    Channel::new("AMK_Mapping", ChannelClass::Monitor),
-    // Latin America + world, Spanish-language, video-heavy.
-    Channel::new("AlertaMundoNews", ChannelClass::Outlet),
-    // Somalia and East Africa.
-    Channel::new("garoweonline", ChannelClass::Outlet),
-    // Underreported/"forgotten story" beats, deliberately included even
-    // though smaller than the aggregators above.
-    // Mexican cartel violence, citizen journalism since 2009.
-    Channel::new("borderlandbeat", ChannelClass::Outlet),
-    // The three Myanmar outlets post mostly in Burmese. `chatter::script` can
-    // now read Burmese place and topic tokens, so they register ingest signal,
-    // but only for the terms in those tables — a Burmese post about anywhere
-    // outside Myanmar is still unreachable. They also earn their place on the
-    // media side, where the search term is usually a Latin-script place name.
-    // Human-rights reporting, geolocation-led.
-    Channel::new("MyanmarWitness", ChannelClass::Monitor),
-    // Democratic Voice of Burma — exile outlet, junta-banned.
-    Channel::new("DVBTV", ChannelClass::Outlet),
-    // Khit Thit Media — high volume and very fresh.
-    Channel::new("khitthitnews", ChannelClass::Outlet),
-];
+/// 2026-09-07 pass, verified live via `t.me/s/<handle>` (public preview +
+/// real channel title): added `kyivindependent_official`, `ukrpravda_news`,
+/// `Flash_news_ua`, `nexta_tv`, `nexta_live`, `Middle_East_Spectator`
+/// (named outlets reporting on-the-ground events) and `ukraine_watch`,
+/// `osinttechnical` (OSINT monitors). Re-checked and still skipped:
+/// `WarMonitors` (the purchased-placement note above still stands — the
+/// ad-slot/gambling description is unchanged), `ukraine_monitor` (its title
+/// renders as ".", so it could not be confirmed as a channel rather than a
+/// placeholder), and `belarusian_silovik` (anonymously tied to Belarusian
+/// security forces; its provenance would need a State/Partisan class, which
+/// is M10 scope and deliberately out of this neutral allowlist).
+///
+/// Coverage gaps as of 2026-09-07, still open after the above: the Caribbean
+/// (nothing at all), South Asia, West Africa/the Sahel (lost when
+/// `osintsahel` was dropped), and Ethiopia/the wider Horn beyond Somalia.
+/// The additions above deepen Europe and the Middle East rather than closing
+/// those.
+///
+/// A function rather than a `const` because [`Channel`] owns its name — a
+/// `const` cannot allocate. Every caller gets a fresh `Vec`.
+#[must_use]
+pub fn allowed_channels() -> Vec<Channel> {
+    vec![
+        // Global/multi-region aggregators.
+        Channel::new("liveuamap", ChannelClass::Monitor),
+        Channel::new("ClashReport", ChannelClass::Monitor),
+        Channel::new("osintdefender", ChannelClass::Monitor),
+        // Global breaking news; heavy video, named outlet.
+        Channel::new("insiderpaper", ChannelClass::Outlet),
+        // Regional.
+        // Russia-Ukraine + Middle East.
+        Channel::new("AMK_Mapping", ChannelClass::Monitor),
+        // Ukraine on-the-ground reporting: named outlets and OSINT trackers.
+        Channel::new("kyivindependent_official", ChannelClass::Outlet),
+        Channel::new("ukrpravda_news", ChannelClass::Outlet),
+        Channel::new("Flash_news_ua", ChannelClass::Outlet),
+        Channel::new("ukraine_watch", ChannelClass::Monitor),
+        Channel::new("osinttechnical", ChannelClass::Monitor),
+        // Belarus/Russia — exile outlets reporting ground events.
+        Channel::new("nexta_tv", ChannelClass::Outlet),
+        Channel::new("nexta_live", ChannelClass::Outlet),
+        // Middle East on-the-ground reporting.
+        Channel::new("Middle_East_Spectator", ChannelClass::Outlet),
+        // Latin America + world, Spanish-language, video-heavy.
+        Channel::new("AlertaMundoNews", ChannelClass::Outlet),
+        // Somalia and East Africa.
+        Channel::new("garoweonline", ChannelClass::Outlet),
+        // Underreported/"forgotten story" beats, deliberately included even
+        // though smaller than the aggregators above.
+        // Mexican cartel violence, citizen journalism since 2009.
+        Channel::new("borderlandbeat", ChannelClass::Outlet),
+        // The three Myanmar outlets post mostly in Burmese. `chatter::script` can
+        // now read Burmese place and topic tokens, so they register ingest signal,
+        // but only for the terms in those tables — a Burmese post about anywhere
+        // outside Myanmar is still unreachable. They also earn their place on the
+        // media side, where the search term is usually a Latin-script place name.
+        // Human-rights reporting, geolocation-led.
+        Channel::new("MyanmarWitness", ChannelClass::Monitor),
+        // Democratic Voice of Burma — exile outlet, junta-banned.
+        Channel::new("DVBTV", ChannelClass::Outlet),
+        // Khit Thit Media — high volume and very fresh.
+        Channel::new("khitthitnews", ChannelClass::Outlet),
+    ]
+}
 
 /// One allowlisted channel and its stated provenance.
 ///
@@ -456,15 +525,21 @@ pub const ALLOWED_CHANNELS: &[Channel] = &[
 /// a combatant's tracks messaging — and summing them produces a number that
 /// means neither. It is a property of the channel, never of any person who
 /// posts there. See docs/SIGNAL_MODEL.md.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The name is owned rather than `&'static` so the same struct can carry
+/// both the compiled-in list and a [`catalog`] file read at startup (M10).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
-    pub name: &'static str,
+    pub name: String,
     pub class: ChannelClass,
 }
 
 impl Channel {
-    const fn new(name: &'static str, class: ChannelClass) -> Self {
-        Self { name, class }
+    fn new(name: &'static str, class: ChannelClass) -> Self {
+        Self {
+            name: name.to_string(),
+            class,
+        }
     }
 }
 
@@ -477,7 +552,7 @@ mod tests {
 
     use core_types::ChannelClass;
 
-    use super::{ALLOWED_CHANNELS, ChannelSweep};
+    use super::{ChannelSweep, allowed_channels};
 
     const FIRST_ID: i32 = 17;
     const HIGH_ID: i32 = 42;
@@ -648,7 +723,7 @@ mod tests {
     #[test]
     fn every_catalog_channel_declares_a_class() {
         assert!(
-            ALLOWED_CHANNELS
+            allowed_channels()
                 .iter()
                 .all(|channel| channel.class != ChannelClass::Unspecified),
             "a catalog channel without an explicit class fabricates provenance"
@@ -657,13 +732,14 @@ mod tests {
 
     #[test]
     fn allowed_channels_are_unique_bare_usernames() {
-        assert!(!ALLOWED_CHANNELS.is_empty());
-        let unique = ALLOWED_CHANNELS
+        let channels = allowed_channels();
+        assert!(!channels.is_empty());
+        let unique = channels
             .iter()
-            .map(|channel| channel.name)
+            .map(|channel| channel.name.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(unique.len(), ALLOWED_CHANNELS.len());
-        assert!(ALLOWED_CHANNELS.iter().all(|channel| {
+        assert_eq!(unique.len(), channels.len());
+        assert!(channels.iter().all(|channel| {
             !channel.name.contains(['@', '/']) && !channel.name.chars().any(char::is_whitespace)
         }));
     }
