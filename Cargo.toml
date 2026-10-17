@@ -117,7 +117,7 @@ toml = "1"
 url = "2"
 # GDELT Events dumps are single-entry DEFLATE zips; pure-Rust miniz_oxide
 # backend keeps CI OpenSSL/zlib-free. No aes/bzip2/lzma/zstd.
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # JPEG decode for the slippy-tile basemap (desktop, feature `tiles-live`).
 # Pure-Rust decoder (MIT OR Apache-2.0 OR Zlib) — keeps the deliberate
 # rustls/pure-Rust posture (docs/BASEMAP.md §6). Default RGB output feeds
