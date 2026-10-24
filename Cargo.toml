@@ -80,7 +80,7 @@ governor = "0.10"
 # TDLib/C++ dependency — keeps this workspace's "no bundled C++ beyond
 # DuckDB" posture. All grammers-* crates are one workspace and version
 # together upstream.
-grammers-client = "0.10"
+grammers-client = "0.11"
 # `default-features = false` drops `sqlite-storage`, whose `libsql-ffi`
 # vendors a second static SQLite alongside the one `rusqlite`/`libsqlite3-sys`
 # already vendors — linking both into one binary fails with duplicate
@@ -89,11 +89,11 @@ grammers-client = "0.10"
 # dropped storage; `serde` supplies the derives its mirror struct needs.
 # Must be set here, not in the member: Cargo ignores a member's
 # `default-features = false` when the workspace entry leaves defaults on.
-grammers-session = { version = "0.10", default-features = false, features = [
+grammers-session = { version = "0.11", default-features = false, features = [
     "serde",
 ] }
-grammers-mtsender = "0.10"
-h3o = "0.10"
+grammers-mtsender = "0.11"
+h3o = "0.11"
 # GDELT live ingestion (M3). rustls (not native-tls) so CI stays OpenSSL-free
 # on both Windows and Linux; no default TLS/http2 pulled in.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
@@ -171,8 +171,8 @@ tower_governor = { version = "0.8", default-features = false, features = [
     "axum",
 ] }
 # OpenAPI spec generation for the api (M7 item 4).
-utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-axum = "0.2"
+utoipa = { version = "6", features = ["axum_extras"] }
+utoipa-axum = "0.3"
 # Prometheus /metrics (M7 item 3). `default-features = false` drops
 # `http-listener`/`push-gateway` — the exporter renders text that our own
 # axum `/metrics` route returns, so we don't need this crate's built-in
