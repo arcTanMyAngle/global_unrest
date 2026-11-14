@@ -89,15 +89,15 @@ grammers-client = "0.10"
 # dropped storage; `serde` supplies the derives its mirror struct needs.
 # Must be set here, not in the member: Cargo ignores a member's
 # `default-features = false` when the workspace entry leaves defaults on.
-grammers-session = { version = "0.10", default-features = false, features = [
+grammers-session = { version = "0.12", default-features = false, features = [
     "serde",
 ] }
 grammers-mtsender = "0.10"
-h3o = "0.10"
+h3o = "0.11"
 # GDELT live ingestion (M3). rustls (not native-tls) so CI stays OpenSSL-free
 # on both Windows and Linux; no default TLS/http2 pulled in.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # tokio-tungstenite's rustls feature pulls rustls but selects no crypto
 # provider, so source-bluesky installs one explicitly. `ring` is the provider
 # reqwest already puts in this tree; default features off keeps aws-lc-rs
@@ -171,8 +171,8 @@ tower_governor = { version = "0.8", default-features = false, features = [
     "axum",
 ] }
 # OpenAPI spec generation for the api (M7 item 4).
-utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-axum = "0.2"
+utoipa = { version = "6", features = ["axum_extras"] }
+utoipa-axum = "0.3"
 # Prometheus /metrics (M7 item 3). `default-features = false` drops
 # `http-listener`/`push-gateway` — the exporter renders text that our own
 # axum `/metrics` route returns, so we don't need this crate's built-in
